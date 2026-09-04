@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.py[cod]
+*.csv
+credentials/
+backend/token.json
+backend/credentials/credentials.json
+*.pkl
