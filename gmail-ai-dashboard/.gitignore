@@ -1,8 +1,59 @@
 .env
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
 *.csv
 credentials/
 backend/token.json
 backend/credentials/credentials.json
 *.pkl
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# Credentials
+credentials/
+**/token.json
+**/credentials.json
+
+# Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.vite/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Generated models and databases
+*.pkl
+*.db
+*.sqlite
+*.sqlite3
+
+# Private or generated datasets
+*.csv
+
+# Logs
+*.log
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.csv
+!dataset/sample.csv
