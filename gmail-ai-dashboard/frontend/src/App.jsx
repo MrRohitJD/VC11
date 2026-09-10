@@ -1,12 +1,16 @@
 import { useMemo, useState } from 'react';
-import { NavLink } from 'react-router-dom';
+import { useLocation, useNavigate, Navigate } from 'react-router-dom';
 import {
 	AlertCircle, BarChart3, Bell, ChevronDown, CircleHelp, FileText, Inbox,
 	LayoutDashboard, Mail, Menu, MoreHorizontal, Paperclip, PenLine, Search,
-	Send, Settings, ShieldAlert, Star, Tag, Trash2, Users, X, Zap,
+	Send, Settings, ShieldAlert, Star, Tag, Trash2, Users, X, Zap, Sparkles, LogOut,
+	AlertTriangle, UserX,
 } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { emailActivity, categoryData, emails, stats } from './mockData';
+import { useAuth } from './context/AuthContext';
+import GmailConsent from './pages/GmailConsent';
+import SyncPage from './pages/SyncPage';
 
 const navItems = [
 	{ label: 'Inbox', icon: Inbox, count: 12 }, { label: 'Starred', icon: Star },
@@ -16,17 +20,28 @@ const navItems = [
 ];
 
 function Sidebar({ active, onNavigate, onClose }) {
+	const navigate = useNavigate();
 	return <aside className="sidebar">
 		<div className="brand"><div className="brand-mark"><Mail size={18} /></div><span>Gmail AI <strong>Dashboard</strong></span><button className="mobile-close" onClick={onClose}><X size={18} /></button></div>
 		<button className="compose-button"><PenLine size={17} /> Compose</button>
 		<div className="nav-group"><p className="nav-label">MAILBOX</p>{navItems.map(({ label, icon: Icon, count }) => <button key={label} className={`nav-item ${active === label ? 'active' : ''}`} onClick={() => onNavigate(label)}><Icon size={17} /><span>{label}</span>{count && <small>{count}</small>}</button>)}</div>
-		<div className="nav-group nav-lower"><p className="nav-label">WORKSPACE</p><button className="nav-item"><Zap size={17} /><span>AI Tools</span><span className="new-pill">NEW</span></button><button className="nav-item"><Settings size={17} /><span>Settings</span></button><button className="nav-item"><CircleHelp size={17} /><span>Help & Support</span></button></div>
-		<div className="sidebar-footer"><div className="plan-icon"><BarChart3 size={17} /></div><div><strong>AI model status</strong><span><i /> Ready to classify</span></div><MoreHorizontal size={16} /></div>
+		<div className="nav-group nav-lower"><p className="nav-label">WORKSPACE</p><button className="nav-item"><Zap size={17} /><span>AI Tools</span><span className="new-pill">NEW</span></button><button className="nav-item" onClick={() => navigate('/settings')}><Settings size={17} /><span>Settings</span></button><button className="nav-item"><CircleHelp size={17} /><span>Help & Support</span></button></div>
+		<div className="sidebar-footer"><div className="plan-icon"><BarChart3 size={17} /></div><div><strong>AI model status</strong><span><i />Ready to classify</span></div><MoreHorizontal size={16} /></div>
 	</aside>;
 }
 
-function Header({ search, setSearch, onMenu }) {
-	return <header className="topbar"><button className="menu-button" onClick={onMenu}><Menu size={21} /></button><div className="search-box"><Search size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search emails, people, or keywords..." /><kbd>⌘ K</kbd></div><div className="top-actions"><button className="icon-button notification"><Bell size={19} /><i /></button><div className="user-profile"><div className="avatar">JD</div><div className="user-copy"><strong>Jordan Davis</strong><span>Administrator</span></div><ChevronDown size={16} /></div></div></header>;
+function Header({ search, setSearch, onMenu, user, onLogout, onNavigateSettings }) {
+	const [profileOpen, setProfileOpen] = useState(false);
+	const initials = user?.name ? user.name.split(' ').map((n) => n[0]).join('').slice(0, 2).toUpperCase() : user?.email?.[0]?.toUpperCase() || '?';
+	const displayName = user?.name || user?.email || 'User';
+
+	return <header className="topbar"><button className="menu-button" onClick={onMenu}><Menu size={21} /></button><div className="search-box"><Search size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search emails, people, or keywords..." /><kbd>⌘ K</kbd></div><div className="top-actions"><button className="icon-button notification"><Bell size={19} /><i /></button><div className="profile-menu"><button className="user-profile" onClick={() => setProfileOpen((open) => !open)} aria-expanded={profileOpen}><div className="avatar">{user?.picture ? <img src={user.picture} alt="" className="avatar-img" /> : initials}</div><div className="user-copy"><strong>{displayName}</strong><span>{user?.email || ''}</span></div><ChevronDown size={16} /></button>{profileOpen && <div className="profile-dropdown">
+		{user?.picture && <div className="profile-dropdown-user"><img src={user.picture} alt="" className="dropdown-avatar" /><div><strong>{displayName}</strong><small>{user?.email}</small></div></div>}
+		<div className="profile-dropdown-actions">
+			<button className="dropdown-action" onClick={onNavigateSettings}><Settings size={15} /> Settings</button>
+			<button className="dropdown-action logout-action" onClick={onLogout}><LogOut size={15} /> Log out</button>
+		</div>
+	</div>}</div></div></header>;
 }
 
 function StatCard({ stat }) {
@@ -55,11 +70,141 @@ function EmailPreview({ email, onClose }) {
 function ReplyIcon() { return <Send size={14} />; }
 function ForwardIcon() { return <Send size={14} className="forward-icon" />; }
 
-export default function App() {
+function GmailMark() {
+	return <span className="gmail-mark" aria-hidden="true"><i className="gmail-blue">M</i><i className="gmail-red">M</i><i className="gmail-yellow">M</i><i className="gmail-green">M</i></span>;
+}
+
+function AuthIllustration({ signup }) {
+	if (signup) {
+		return <div className="signup-illustration" aria-hidden="true"><div className="person"><div className="person-hair" /><div className="person-face" /><div className="person-body" /></div><div className="laptop"><div /></div><div className="insight-list"><div><span className="insight-icon mint">↗</span><p><strong>AI-powered insights</strong><small>Understand your emails better</small></p></div><div><span className="insight-icon blue">◆</span><p><strong>Smart organization</strong><small>Find what matters faster</small></p></div><div><span className="insight-icon coral">▥</span><p><strong>Be more productive</strong><small>Save time, focus on what counts</small></p></div></div></div>;
+	}
+	return <div className="login-illustration" aria-hidden="true"><div className="leaf leaf-one" /><div className="leaf leaf-two" /><div className="leaf leaf-three" /><div className="inbox-window"><div className="mini-toolbar"><GmailMark /><span /></div><div className="mini-sidebar"><b>▣ Inbox</b><span>☆ Starred</span><span>› Important</span><span>› Sent</span><span>› Drafts</span><span>⌄ More</span></div><div className="mini-messages">{[1, 2, 3, 4].map((item) => <div key={item}><i /><span /><em /></div>)}</div></div><div className="productivity-card"><Sparkles size={25} /><strong>Smarter emails<br />Brighter productivity</strong><span /><span /></div></div>;
+}
+
+function AuthPage({ signup }) {
+	const navigate = useNavigate();
+	const submit = (event) => { event.preventDefault(); navigate('/consent'); };
+	return <div className={`auth-shell ${signup ? 'auth-signup' : 'auth-login'}`}><main className="auth-card"><div className="auth-brand"><GmailMark /><strong>Gmail AI Dashboard</strong></div><div className="auth-copy"><h1>{signup ? 'Create Your Account' : 'Welcome Back'}</h1><p>{signup ? 'Get started with your Gmail AI Dashboard' : 'Sign in to access your Gmail AI Dashboard'}</p></div><form className="auth-form" onSubmit={submit}><button className="google-button" type="submit"><span className="google-g">G</span>{signup ? 'Sign up with Google' : 'Continue with Google'}</button><div className="auth-divider"><span /> <em>OR</em> <span /></div><p className="auth-switch">{signup ? 'Already have an account?' : "Don't have an account?"} <button type="button" onClick={() => navigate(signup ? '/login' : '/signup')}>{signup ? 'Sign in' : 'Sign up'}</button></p></form><AuthIllustration signup={signup} /><p className="auth-tagline">{signup ? 'Join and make your inbox work smarter.' : 'Your Gmail. Smarter with AI.'}</p></main></div>;
+}
+
+function EraseDialog({ open, onClose, onConfirm }) {
+	if (!open) return null;
+	return <div className="modal-overlay" onClick={onClose}>
+		<div className="modal-card erase-modal" onClick={(e) => e.stopPropagation()}>
+			<div className="erase-icon-wrap">
+				<AlertTriangle size={28} />
+			</div>
+			<h2>Erase all data?</h2>
+			<p>
+				This will permanently delete all data associated with your account from our database,
+				including synchronized emails, labels, profile data, and stored OAuth tokens.
+			</p>
+			<p className="erase-warning">This action cannot be undone.</p>
+			<div className="erase-actions">
+				<button className="erase-cancel" onClick={onClose}>Cancel</button>
+				<button className="erase-confirm" onClick={onConfirm}>
+					<UserX size={15} /> Erase All Data
+				</button>
+			</div>
+		</div>
+	</div>;
+}
+
+function SettingsPage() {
+	const { user, logout, eraseAllData } = useAuth();
+	const navigate = useNavigate();
+	const [eraseOpen, setEraseOpen] = useState(false);
+	const [eraseToast, setEraseToast] = useState('');
+
+	const handleLogout = async () => {
+		await logout();
+		navigate('/login', { replace: true });
+	};
+
+	const handleErase = async () => {
+		try {
+			await eraseAllData();
+			setEraseOpen(false);
+			setEraseToast('All your data has been erased.');
+			setTimeout(() => navigate('/login', { replace: true }), 1500);
+		} catch {
+			setEraseToast('Failed to erase data. Please try again.');
+		}
+	};
+
+	return <div className="settings-shell">
+		<div className="settings-card">
+			<button className="settings-back" onClick={() => navigate('/')}>← Back to Dashboard</button>
+			<h1>Account Settings</h1>
+
+			<section className="settings-section">
+				<h2>Profile</h2>
+				<div className="settings-profile">
+					<div className="settings-avatar">
+						{user?.picture ? <img src={user.picture} alt="" /> : <div className="avatar-placeholder">{user?.name?.[0] || '?'}</div>}
+					</div>
+					<div>
+						<strong>{user?.name || 'User'}</strong>
+						<span>{user?.email}</span>
+					</div>
+				</div>
+			</section>
+
+			<section className="settings-section">
+				<h2>Session</h2>
+				<p className="settings-desc">Log out of your account. Your synced data will be preserved.</p>
+				<button className="settings-btn logout-btn" onClick={handleLogout}>
+					<LogOut size={16} /> Log out
+				</button>
+			</section>
+
+			<section className="settings-section settings-danger">
+				<h2>Danger Zone</h2>
+				<p className="settings-desc">
+					Permanently delete all your data from this application, including synced emails,
+					labels, tokens, and your user profile. This does not affect your actual Gmail account.
+				</p>
+				<button className="settings-btn erase-btn" onClick={() => setEraseOpen(true)}>
+					<UserX size={16} /> Erase All Data
+				</button>
+			</section>
+		</div>
+
+		<EraseDialog open={eraseOpen} onClose={() => setEraseOpen(false)} onConfirm={handleErase} />
+		{eraseToast && <div className="toast"><Zap size={16} /> {eraseToast}</div>}
+	</div>;
+}
+
+function Dashboard() {
 	const [active, setActive] = useState('Inbox'); const [search, setSearch] = useState(''); const [selectedId, setSelectedId] = useState(1); const [selectedIds, setSelectedIds] = useState([]); const [mobileOpen, setMobileOpen] = useState(false); const [toast, setToast] = useState('');
+	const navigate = useNavigate();
+	const { user, logout } = useAuth();
 	const filteredEmails = useMemo(() => emails.filter((email) => [email.sender, email.subject, email.preview, email.label].join(' ').toLowerCase().includes(search.toLowerCase())), [search]);
 	const selected = emails.find((email) => email.id === selectedId);
 	const toggleSelect = (id) => setSelectedIds((items) => items.includes(id) ? items.filter((item) => item !== id) : [...items, id]);
 	const action = (label) => { setToast(`${label} started`); window.setTimeout(() => setToast(''), 2200); };
-	return <div className="app-shell"><div className={`sidebar-overlay ${mobileOpen ? 'show' : ''}`} onClick={() => setMobileOpen(false)} /><div className={mobileOpen ? 'sidebar-wrap open' : 'sidebar-wrap'}><Sidebar active={active} onNavigate={(label) => { setActive(label); setMobileOpen(false); }} onClose={() => setMobileOpen(false)} /></div><div className="main-shell"><Header search={search} setSearch={setSearch} onMenu={() => setMobileOpen(true)} /><main className="content"><section className="welcome"><div><span className="eyebrow">MONDAY, JUNE 24, 2024</span><h1>Good morning, Jordan <span>✦</span></h1><p>Here’s what’s happening with your inbox today.</p></div><button className="date-button"><BarChart3 size={16} /> This week <ChevronDown size={14} /></button></section><div className="stats-grid">{stats.map((stat) => <StatCard key={stat.label} stat={stat} />)}</div><Charts /><QuickActions onAction={action} /><div className="bottom-grid"><RecentEmails emailsToShow={filteredEmails} selectedId={selectedId} setSelectedId={setSelectedId} selected={selected} onToggleStar={(id) => { const email = emails.find((item) => item.id === id); email.starred = !email.starred; setSelectedId(id); }} selectedIds={selectedIds} onToggleSelect={toggleSelect} /><EmailPreview email={selected} onClose={() => setSelectedId(null)} /></div></main></div>{toast && <div className="toast"><Zap size={16} /> {toast}</div>}</div>;
+	const handleLogout = async () => { await logout(); navigate('/login', { replace: true }); };
+	return <div className="app-shell"><div className={`sidebar-overlay ${mobileOpen ? 'show' : ''}`} onClick={() => setMobileOpen(false)} /><div className={mobileOpen ? 'sidebar-wrap open' : 'sidebar-wrap'}><Sidebar active={active} onNavigate={(label) => { setActive(label); setMobileOpen(false); }} onClose={() => setMobileOpen(false)} /></div><div className="main-shell"><Header search={search} setSearch={setSearch} onMenu={() => setMobileOpen(true)} onLogout={handleLogout} user={user} onNavigateSettings={() => navigate('/settings')} /><main className="content"><section className="welcome"><div><span className="eyebrow">MONDAY, JUNE 24, 2024</span><h1>Good morning, {user?.name?.split(' ')[0] || 'there'} <span>✦</span></h1><p>Here's what's happening with your inbox today.</p></div><button className="date-button"><BarChart3 size={16} /> This week <ChevronDown size={14} /></button></section><div className="stats-grid">{stats.map((stat) => <StatCard key={stat.label} stat={stat} />)}</div><Charts /><QuickActions onAction={action} /><div className="bottom-grid"><RecentEmails emailsToShow={filteredEmails} selectedId={selectedId} setSelectedId={setSelectedId} selected={selected} onToggleStar={(id) => { const email = emails.find((item) => item.id === id); email.starred = !email.starred; setSelectedId(id); }} selectedIds={selectedIds} onToggleSelect={toggleSelect} /><EmailPreview email={selected} onClose={() => setSelectedId(null)} /></div></main></div>{toast && <div className="toast"><Zap size={16} /> {toast}</div>}</div>;
+}
+
+function ProtectedRoute({ children }) {
+	const { isAuthenticated, loading } = useAuth();
+	if (loading) return <div className="auth-loading"><Loader size={24} /><p>Loading...</p></div>;
+	if (!isAuthenticated) return <Navigate to="/login" replace />;
+	return children;
+}
+
+function Loader(props) {
+	return <svg xmlns="http://www.w3.org/2000/svg" width={props.size || 24} height={props.size || 24} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="spin"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>;
+}
+
+export default function App() {
+	const location = useLocation();
+
+	if (location.pathname === '/login') return <AuthPage signup={false} />;
+	if (location.pathname === '/signup') return <AuthPage signup={true} />;
+	if (location.pathname === '/consent') return <GmailConsent />;
+	if (location.pathname === '/sync') return <ProtectedRoute><SyncPage /></ProtectedRoute>;
+	if (location.pathname === '/settings') return <ProtectedRoute><SettingsPage /></ProtectedRoute>;
+	return <ProtectedRoute><Dashboard /></ProtectedRoute>;
 }

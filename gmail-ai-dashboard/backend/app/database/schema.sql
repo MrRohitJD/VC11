@@ -32,9 +32,14 @@ CREATE TABLE IF NOT EXISTS emails (
     snippet TEXT,
     from_email VARCHAR(255),
     to_email VARCHAR(255),
+    cc TEXT,
+    bcc TEXT,
     received_at TIMESTAMPTZ,
     is_read BOOLEAN NOT NULL DEFAULT FALSE,
     has_attachment BOOLEAN NOT NULL DEFAULT FALSE,
+    attachments_meta TEXT,
+    size_estimate INTEGER,
+    history_id VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

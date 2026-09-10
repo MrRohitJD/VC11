@@ -62,3 +62,31 @@ finally:
 ```
 
 The `gmail_account_id` must already exist in `gmail_accounts`. Re-running the function updates matching Gmail messages by `gmail_message_id` instead of inserting duplicates.
+
+## Google OAuth
+
+Create a Google OAuth 2.0 **Web application** client and add this authorized redirect URI:
+
+```text
+http://127.0.0.1:8000/api/auth/callback
+```
+
+Create `backend/.env` with the database, Google client, and session settings:
+
+```env
+DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/gmail_ai_dashboard
+GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-client-secret
+BACKEND_URL=http://127.0.0.1:8000
+FRONTEND_URL=http://localhost:5173
+SESSION_SECRET=replace-with-a-long-random-secret
+SECURE_COOKIES=false
+```
+
+Start the API from `backend`:
+
+```bash
+uvicorn app.api.app:app --reload --port 8000
+```
+
+Open `http://localhost:5173/login` or `http://localhost:5173/signup`. Both Google buttons use the same OAuth flow. Google `sub` is stored as `users.google_id`; repeated sign-ins update the existing `users` and `gmail_accounts` records instead of creating duplicates. The API sets an HttpOnly session cookie after the callback.

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Student information table">
+  <title>Student Information</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/student-information.css">
+</head>
+<body>
+  <main class="page-shell">
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">ACADEMIC RECORDS</p>
+        <h1>Student information</h1>
+        <p class="subtitle">A clear view of enrollment, contact details, and academic progress.</p>
+      </div>
+      <button class="export-button" type="button">Export records <span aria-hidden="true">&darr;</span></button>
+    </header>
+
+    <section class="summary-grid" aria-label="Student summary">
+      <article class="summary-card">
+        <span class="summary-label">Total students</span>
+        <strong>248</strong>
+        <span class="summary-note">Across 8 departments</span>
+      </article>
+      <article class="summary-card accent-green">
+        <span class="summary-label">Active enrollment</span>
+        <strong>231</strong>
+        <span class="summary-note">93.1% of all records</span>
+      </article>
+      <article class="summary-card accent-orange">
+        <span class="summary-label">Average attendance</span>
+        <strong>91.8%</strong>
+        <span class="summary-note">Up 2.4% this term</span>
+      </article>
+    </section>
+
+    <section class="table-panel" aria-labelledby="directory-title">
+      <div class="table-toolbar">
+        <div>
+          <p class="eyebrow">DIRECTORY</p>
+          <h2 id="directory-title">All students</h2>
+        </div>
+        <div class="toolbar-actions">
+          <label class="search-field">
+            <span aria-hidden="true">&#8981;</span>
+            <input type="search" placeholder="Search students" aria-label="Search students">
+          </label>
+          <button class="filter-button" type="button"><span aria-hidden="true">&#9776;</span> Filter</button>
+        </div>
+      </div>
+
+      <div class="table-scroll">
+        <table>
+          <caption class="sr-only">Current student enrollment records</caption>
+          <thead>
+            <tr>
+              <th scope="col">Student</th>
+              <th scope="col">Student ID</th>
+              <th scope="col">Department</th>
+              <th scope="col">Year</th>
+              <th scope="col">Attendance</th>
+              <th scope="col">Status</th>
+              <th scope="col"><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-label="Student"><div class="student-cell"><span class="avatar avatar-lilac">AM</span><span><strong>Ava Mitchell</strong><small>ava.mitchell@example.edu</small></span></div></td>
+              <td data-label="Student ID">STU-2024-001</td>
+              <td data-label="Department">Computer Science</td>
+              <td data-label="Year">3rd year</td>
+              <td data-label="Attendance"><div class="attendance"><span>96%</span><span class="progress"><i style="width: 96%"></i></span></div></td>
+              <td data-label="Status"><span class="status active">Active</span></td>
+              <td class="action-cell"><button class="more-button" type="button" aria-label="More actions for Ava Mitchell">&middot;&middot;&middot;</button></td>
+            </tr>
+            <tr>
+              <td data-label="Student"><div class="student-cell"><span class="avatar avatar-blue">JL</span><span><strong>James Lee</strong><small>james.lee@example.edu</small></span></div></td>
+              <td data-label="Student ID">STU-2024-002</td>
+              <td data-label="Department">Business Administration</td>
+              <td data-label="Year">2nd year</td>
+              <td data-label="Attendance"><div class="attendance"><span>89%</span><span class="progress"><i style="width: 89%"></i></span></div></td>
+              <td data-label="Status"><span class="status active">Active</span></td>
+              <td class="action-cell"><button class="more-button" type="button" aria-label="More actions for James Lee">&middot;&middot;&middot;</button></td>
+            </tr>
+            <tr>
+              <td data-label="Student"><div class="student-cell"><span class="avatar avatar-peach">SR</span><span><strong>Sofia Ramirez</strong><small>sofia.ramirez@example.edu</small></span></div></td>
+              <td data-label="Student ID">STU-2024-003</td>
+              <td data-label="Department">Design &amp; Media</td>
+              <td data-label="Year">4th year</td>
+              <td data-label="Attendance"><div class="attendance"><span>93%</span><span class="progress"><i style="width: 93%"></i></span></div></td>
+              <td data-label="Status"><span class="status active">Active</span></td>
+              <td class="action-cell"><button class="more-button" type="button" aria-label="More actions for Sofia Ramirez">&middot;&middot;&middot;</button></td>
+            </tr>
+            <tr>
+              <td data-label="Student"><div class="student-cell"><span class="avatar avatar-mint">NO</span><span><strong>Noah Okafor</strong><small>noah.okafor@example.edu</small></span></div></td>
+              <td data-label="Student ID">STU-2024-004</td>
+              <td data-label="Department">Engineering</td>
+              <td data-label="Year">1st year</td>
+              <td data-label="Attendance"><div class="attendance"><span>78%</span><span class="progress"><i class="warning" style="width: 78%"></i></span></div></td>
+              <td data-label="Status"><span class="status review">Review</span></td>
+              <td class="action-cell"><button class="more-button" type="button" aria-label="More actions for Noah Okafor">&middot;&middot;&middot;</button></td>
+            </tr>
+            <tr>
+              <td data-label="Student"><div class="student-cell"><span class="avatar avatar-yellow">EC</span><span><strong>Emma Carter</strong><small>emma.carter@example.edu</small></span></div></td>
+              <td data-label="Student ID">STU-2024-005</td>
+              <td data-label="Department">Psychology</td>
+              <td data-label="Year">3rd year</td>
+              <td data-label="Attendance"><div class="attendance"><span>94%</span><span class="progress"><i style="width: 94%"></i></span></div></td>
+              <td data-label="Status"><span class="status active">Active</span></td>
+              <td class="action-cell"><button class="more-button" type="button" aria-label="More actions for Emma Carter">&middot;&middot;&middot;</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <footer class="table-footer"><span>Showing <strong>1–5</strong> of <strong>248</strong> students</span><nav aria-label="Pagination"><button class="page-button" type="button" disabled aria-label="Previous page">&larr;</button><button class="page-button current" type="button" aria-current="page">1</button><button class="page-button" type="button">2</button><button class="page-button" type="button">3</button><button class="page-button" type="button" aria-label="Next page">&rarr;</button></nav></footer>
+    </section>
+  </main>
+</body>
+</html>

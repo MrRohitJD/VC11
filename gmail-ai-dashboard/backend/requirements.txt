@@ -1,4 +1,10 @@
 fastapi
+uvicorn[standard]
 pydantic-settings
 sqlalchemy
 psycopg[binary]
+google-auth
+google-auth-oauthlib
+google-api-python-client
+beautifulsoup4
+sse-starlette

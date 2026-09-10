@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -56,6 +56,11 @@ class Email(Base):
 	received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 	is_read: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 	has_attachment: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+	cc: Mapped[str | None] = mapped_column(Text)
+	bcc: Mapped[str | None] = mapped_column(Text)
+	attachments_meta: Mapped[str | None] = mapped_column(Text)
+	size_estimate: Mapped[int | None] = mapped_column(Integer)
+	history_id: Mapped[str | None] = mapped_column(String(255))
 	created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 	gmail_account: Mapped[GmailAccount] = relationship(back_populates="emails")

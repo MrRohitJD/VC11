@@ -244,6 +244,50 @@ def extract_email(message):
     }
 
 
+def extract_email_full(message):
+    """Extract all available fields from a Gmail API message response."""
+    payload = message.get("payload", {})
+    headers = {
+        header.get("name", "").lower(): header.get("value", "")
+        for header in payload.get("headers", [])
+    }
+
+    # Scan for attachments
+    attachments = []
+    def _scan_parts(part):
+        body = part.get("body", {})
+        if body.get("attachmentId"):
+            attachments.append({
+                "filename": part.get("filename", ""),
+                "mimeType": part.get("mimeType", ""),
+                "size": body.get("size", 0),
+                "attachmentId": body.get("attachmentId"),
+            })
+        for sub in part.get("parts", []):
+            _scan_parts(sub)
+
+    _scan_parts(payload)
+
+    return {
+        "id": message.get("id", ""),
+        "threadId": message.get("threadId", ""),
+        "labelIds": message.get("labelIds", []),
+        "from": headers.get("from", ""),
+        "to": headers.get("to", ""),
+        "cc": headers.get("cc", ""),
+        "bcc": headers.get("bcc", ""),
+        "subject": clean_subject(headers.get("subject", "")),
+        "body": get_email_body(payload),
+        "snippet": message.get("snippet", ""),
+        "date": headers.get("date", ""),
+        "sizeEstimate": message.get("sizeEstimate"),
+        "historyId": message.get("historyId"),
+        "attachments": attachments,
+        "is_read": "UNREAD" not in message.get("labelIds", []),
+        "has_attachment": len(attachments) > 0,
+    }
+
+
 def get_emails(count=1, start_date=None, end_date=None, service=None):
     """Fetch up to count inbox emails in an optional inclusive date range."""
     if not isinstance(count, int) or count < 1:
