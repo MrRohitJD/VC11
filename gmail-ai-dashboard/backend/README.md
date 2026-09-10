@@ -28,11 +28,16 @@ pip install -r requirements.txt
 psql -U postgres -d "gmail_ai_dashboard" -f app/database/schema.sql
 ```
 
+The schema script is safe to rerun: it creates missing tables and adds the
+email metadata columns to databases created with an older version.
+
 Alternatively, create the tables from the SQLAlchemy models:
 
 ```bash
 python -c "from app.database.connection import init_db; init_db()"
 ```
+
+Application startup runs the same idempotent reconciliation automatically.
 
 The database connection is provided by `app.database.connection.get_db`, and the models are defined in `app.models.email`.
 

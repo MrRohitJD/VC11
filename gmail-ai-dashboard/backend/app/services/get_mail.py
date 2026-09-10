@@ -194,6 +194,25 @@ def get_email_body(payload):
     return ""
 
 
+def get_email_body_html(payload):
+    """Return the first HTML body part, preserving its formatting."""
+    html_text = None
+
+    def process_part(part):
+        nonlocal html_text
+        if html_text is not None:
+            return
+        if part.get("mimeType") == "text/html":
+            data = part.get("body", {}).get("data")
+            if data:
+                html_text = decode_body(data)
+        for nested_part in part.get("parts", []):
+            process_part(nested_part)
+
+    process_part(payload)
+    return html_text or ""
+
+
 # --------------------------------------------------
 # Clean Subject
 # --------------------------------------------------

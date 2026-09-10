@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.email import Email, EmailLabel, GmailAccount, Label, User
-from app.services.get_mail import clean_subject, extract_email_full, get_email_body
+from app.services.get_mail import clean_subject, extract_email_full, get_email_body, get_email_body_html
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +79,8 @@ def _call_with_retry(request_fn, *, retries=_MAX_RETRIES):
 		try:
 			return request_fn()
 		except HttpError as exc:
-			if exc.resp.status in (429, 500, 503) and attempt < retries - 1:
-				wait = min(2 ** attempt + 0.5, 30)
+			if exc.resp.status in (403, 429, 500, 503) and attempt < retries - 1:
+				wait = min(5 * (2 ** attempt), 60)
 				logger.warning(
 					"Gmail API %s (attempt %d/%d), retrying in %.1fs",
 					exc.resp.status, attempt + 1, retries, wait,
@@ -181,7 +181,7 @@ def _batch_fetch_messages(
 	service,
 	message_ids: list[str],
 	*,
-	batch_size: int = 50,
+	batch_size: int = 20,
 	progress_callback=None,
 ) -> list[dict]:
 	"""Fetch full message details in batches using the Gmail batch API."""
@@ -191,22 +191,34 @@ def _batch_fetch_messages(
 		batch_ids = message_ids[batch_start: batch_start + batch_size]
 		batch_results: list[dict] = []
 
-		def make_callback(results_list):
+		def execute_batch():
+			batch_results.clear()
+			batch_errors: list[Exception] = []
+
 			def callback(request_id, response, exception):
 				if exception:
-					logger.warning("Batch fetch error for %s: %s", request_id, exception)
+					batch_errors.append(exception)
 				elif response:
-					results_list.append(response)
-			return callback
+					batch_results.append(response)
 
-		batch = service.new_batch_http_request(callback=make_callback(batch_results))
-		for msg_id in batch_ids:
-			batch.add(
-				service.users().messages().get(userId="me", id=msg_id, format="full"),
-				request_id=msg_id,
-			)
+			batch = service.new_batch_http_request(callback=callback)
+			for msg_id in batch_ids:
+				batch.add(
+					service.users().messages().get(userId="me", id=msg_id, format="full"),
+					request_id=msg_id,
+				)
+			batch.execute()
+			if batch_errors:
+				transient_error = next(
+					(error for error in batch_errors if isinstance(error, HttpError) and error.resp.status in (403, 429, 500, 503)),
+					None,
+				)
+				if transient_error is not None:
+					raise transient_error
+				for error in batch_errors:
+					logger.warning("Batch fetch error: %s", error)
 
-		_call_with_retry(batch.execute)
+		_call_with_retry(execute_batch)
 		all_messages.extend(batch_results)
 
 		if progress_callback:
@@ -255,6 +267,7 @@ def _parse_message(message: dict) -> dict:
 		"bcc": headers.get("bcc", ""),
 		"subject": clean_subject(headers.get("subject", "")),
 		"body": get_email_body(payload),
+		"body_html": get_email_body_html(payload),
 		"snippet": message.get("snippet", ""),
 		"date": headers.get("date", ""),
 		"sizeEstimate": message.get("sizeEstimate"),
@@ -294,6 +307,10 @@ def _store_messages(
 			)
 		)
 		if existing is not None:
+			if record.get("body_html") and not existing.body_html:
+				existing.body_html = record["body_html"]
+			if record.get("body") and not existing.body:
+				existing.body = record["body"]
 			stored += 1
 			if progress_callback and (stored % 100 == 0 or stored == total):
 				progress_callback("storing", total, stored)
@@ -305,6 +322,7 @@ def _store_messages(
 			thread_id=record.get("threadId"),
 			subject=record.get("subject"),
 			body=record.get("body"),
+			body_html=record.get("body_html"),
 			snippet=record.get("snippet"),
 			from_email=record.get("from"),
 			to_email=record.get("to"),
@@ -393,6 +411,7 @@ def sync_all_emails(
 			select(Email.gmail_message_id).where(
 				Email.gmail_account_id == account.id,
 				Email.gmail_message_id.in_(message_ids),
+				Email.body_html.is_not(None),
 			)
 		).all()
 	)

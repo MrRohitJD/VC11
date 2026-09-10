@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS emails (
     thread_id VARCHAR(255),
     subject TEXT,
     body TEXT,
+    body_html TEXT,
     snippet TEXT,
     from_email VARCHAR(255),
     to_email VARCHAR(255),
@@ -69,3 +70,11 @@ CREATE TABLE IF NOT EXISTS email_classifications (
     model_version VARCHAR(50),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- CREATE TABLE IF NOT EXISTS does not update an existing database. Keep this
+-- upgrade block for databases created before the email metadata columns were added.
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS cc TEXT;
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS bcc TEXT;
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS attachments_meta TEXT;
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS size_estimate INTEGER;
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS history_id VARCHAR(255);

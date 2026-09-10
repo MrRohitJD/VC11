@@ -14,6 +14,8 @@ export const getSyncStatus = () => api.get('/api/gmail/sync/status');
 export const fetchEmails = (params) => api.get('/api/emails', { params });
 export const fetchEmail = (id) => api.get(`/api/emails/${id}`);
 export const fetchLabels = () => api.get('/api/labels');
+export const fetchAnalyticsSummary = (range) => api.get('/api/analytics/summary', { params: { range } });
+export const fetchAnalyticsCharts = (range) => api.get('/api/analytics/charts', { params: { range } });
 
 export const trainModel = () => api.post('/api/classification/train');
 

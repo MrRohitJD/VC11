@@ -50,6 +50,7 @@ class Email(Base):
 	thread_id: Mapped[str | None] = mapped_column(String(255))
 	subject: Mapped[str | None] = mapped_column(Text)
 	body: Mapped[str | None] = mapped_column(Text)
+	body_html: Mapped[str | None] = mapped_column(Text)
 	snippet: Mapped[str | None] = mapped_column(Text)
 	from_email: Mapped[str | None] = mapped_column(String(255))
 	to_email: Mapped[str | None] = mapped_column(String(255))

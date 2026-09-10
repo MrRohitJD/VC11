@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Mail, Check, Loader, Tag, Database, Wifi, AlertCircle } from 'lucide-react';
-import { startSync, getSyncStreamUrl } from '../services/api';
+import { Mail, Check, Loader, Tag, Database, Wifi, Shield, AlertCircle } from 'lucide-react';
+import { startSync, getSyncStatus, getSyncStreamUrl } from '../services/api';
 
 const stages = [
 	{ key: 'starting', label: 'Connecting to Gmail...', icon: Wifi },
+	{ key: 'authenticating', label: 'Authenticating with Gmail...', icon: Shield },
 	{ key: 'labels', label: 'Syncing labels...', icon: Tag },
 	{ key: 'listing', label: 'Fetching your emails...', icon: Mail },
 	{ key: 'fetching', label: 'Downloading email details...', icon: Mail },
@@ -28,6 +29,7 @@ export default function SyncPage() {
 		labels_synced: 0,
 		error: null,
 	});
+	const [startError, setStartError] = useState(null);
 	const syncStarted = useRef(false);
 	const eventSourceRef = useRef(null);
 
@@ -35,29 +37,41 @@ export default function SyncPage() {
 		if (syncStarted.current) return;
 		syncStarted.current = true;
 
-		// 1. Trigger sync
-		startSync().catch(() => {});
-
-		// 2. Connect SSE for progress
-		const eventSource = new EventSource(getSyncStreamUrl(), { withCredentials: true });
-		eventSourceRef.current = eventSource;
-
-		eventSource.onmessage = (event) => {
-			try {
-				const data = JSON.parse(event.data);
-				setSyncState((prev) => ({ ...prev, ...data }));
-			} catch {
-				// ignore parse errors
-			}
+		let pollTimer;
+		let eventSource;
+		const updateStatus = () => {
+			getSyncStatus()
+				.then((response) => setSyncState((prev) => ({ ...prev, ...response.data })))
+			.catch(() => {});
 		};
 
-		eventSource.onerror = () => {
-			// If SSE fails, fall back to polling status
-			eventSource.close();
-		};
+		// Start first so the stream cannot capture the pre-sync idle state.
+		startSync()
+			.then((response) => setSyncState((prev) => ({ ...prev, ...response.data })))
+			.then(() => {
+				eventSource = new EventSource(getSyncStreamUrl(), { withCredentials: true });
+				eventSourceRef.current = eventSource;
+				eventSource.onmessage = (event) => {
+					try {
+						const data = JSON.parse(event.data);
+						setSyncState((prev) => ({ ...prev, ...data }));
+					} catch {
+						// ignore parse errors
+					}
+				};
+				eventSource.onerror = () => eventSource.close();
+			})
+			.catch((error) => {
+				const message = error.response?.data?.detail || 'Unable to start Gmail sync.';
+				setStartError(message);
+				setSyncState((prev) => ({ ...prev, status: 'error', stage: 'error', error: message }));
+			});
+
+		pollTimer = window.setInterval(updateStatus, 2000);
 
 		return () => {
-			eventSource.close();
+			window.clearInterval(pollTimer);
+			eventSource?.close();
 		};
 	}, []);
 
@@ -100,7 +114,7 @@ export default function SyncPage() {
 				</h1>
 
 				{isError && (
-					<p className="sync-error-msg">{syncState.error || 'An unexpected error occurred.'}</p>
+					<p className="sync-error-msg">{startError || syncState.error || 'An unexpected error occurred.'}</p>
 				)}
 
 				{/* Progress steps */}

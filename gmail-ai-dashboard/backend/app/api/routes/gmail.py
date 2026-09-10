@@ -37,6 +37,7 @@ def _run_sync_in_thread(user_id_str: str, user_id: UUID):
 	"""Run Gmail sync in a background thread (not async — Gmail API is blocking)."""
 	db = SessionLocal()
 	try:
+		_sync_state[user_id_str].update({"status": "syncing", "stage": "authenticating"})
 		user = db.get(User, user_id)
 		if user is None:
 			_sync_state[user_id_str] = {
