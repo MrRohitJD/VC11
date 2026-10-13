@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, Navigate } from 'react-router-dom';
 import {
-	AlertCircle, BarChart3, Bell, ChevronDown, CircleHelp, FileText, Inbox,
-	LayoutDashboard, Mail, Menu, MoreHorizontal, Paperclip, PenLine, Search,
-	Send, Settings, ShieldAlert, Star, Tag, Trash2, Users, X, Zap, Sparkles, LogOut, Maximize2,
+	AlertCircle, BarChart3, Bell, ChevronDown, CircleHelp, Download, FileText, Inbox,
+	LayoutDashboard, Mail, Menu, MoreHorizontal, Paperclip, PenLine, RefreshCw, RotateCw, Search,
+	Send, Settings, ShieldAlert, Star, Tag, Trash2, Upload, Users, X, Zap, Sparkles, LogOut, Maximize2,
 	AlertTriangle, UserX,
 } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
@@ -11,7 +11,8 @@ import DOMPurify from 'dompurify';
 import { useAuth } from './context/AuthContext';
 import GmailConsent from './pages/GmailConsent';
 import SyncPage from './pages/SyncPage';
-import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails } from './services/api';
+import AiAssistant from './pages/AiAssistant';
+import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel } from './services/api';
 
 const navItems = [
 	{ label: 'Inbox', icon: Inbox }, { label: 'Starred', icon: Star },
@@ -25,8 +26,23 @@ function Sidebar({ active, onNavigate, onClose, unreadCount }) {
 	return <aside className="sidebar">
 		<div className="brand"><div className="brand-mark"><Mail size={18} /></div><span>Gmail AI <strong>Dashboard</strong></span><button className="mobile-close" onClick={onClose}><X size={18} /></button></div>
 		<button className="compose-button"><PenLine size={17} /> Compose</button>
+		<div className="nav-group">
+			<button className={`nav-item ${active === 'Dashboard' ? 'active' : ''}`} onClick={() => onNavigate('Dashboard')}>
+				<LayoutDashboard size={17} />
+				<span>Dashboard</span>
+			</button>
+		</div>
 		<div className="nav-group"><p className="nav-label">MAILBOX</p>{navItems.map(({ label, icon: Icon, count }) => <button key={label} className={`nav-item ${active === label ? 'active' : ''}`} onClick={() => onNavigate(label)}><Icon size={17} /><span>{label}</span>{label === 'Inbox' ? <small>{unreadCount}</small> : count ? <small>{count}</small> : null}</button>)}</div>
-		<div className="nav-group nav-lower"><p className="nav-label">WORKSPACE</p><button className="nav-item"><Zap size={17} /><span>AI Tools</span><span className="new-pill">NEW</span></button><button className="nav-item" onClick={() => navigate('/settings')}><Settings size={17} /><span>Settings</span></button><button className="nav-item"><CircleHelp size={17} /><span>Help & Support</span></button></div>
+		<div className="nav-group nav-lower">
+			<p className="nav-label">WORKSPACE</p>
+			<button className={`nav-item ${active === 'Assistant' ? 'active' : ''}`} onClick={() => navigate('/assistant')}>
+				<Zap size={17} />
+				<span>AI Assistant</span>
+				<span className="new-pill">RAG</span>
+			</button>
+			<button className="nav-item" onClick={() => navigate('/settings')}><Settings size={17} /><span>Settings</span></button>
+			<button className="nav-item"><CircleHelp size={17} /><span>Help & Support</span></button>
+		</div>
 		<div className="sidebar-footer"><div className="plan-icon"><BarChart3 size={17} /></div><div><strong>AI model status</strong><span><i />Ready to classify</span></div><MoreHorizontal size={16} /></div>
 	</aside>;
 }
@@ -70,13 +86,32 @@ function Header({ search, setSearch, onMenu, user, onLogout, onNavigateSettings 
 function StatCard({ stat }) {
 	const icons = { inbox: Inbox, tag: Tag, important: Zap, unread: Mail };
 	const Icon = icons[stat.icon];
-	return <div className="stat-card"><div className={`stat-icon ${stat.icon}`}><Icon size={19} /></div><div className="stat-content"><span>{stat.label}</span><strong>{stat.value}</strong><small className={stat.positive ? 'positive' : 'negative'}>{stat.change} <em>vs last month</em></small></div><div className="stat-spark">{[10, 15, 11, 19, 14, 21, 19].map((height, index) => <i key={index} style={{ height }} />)}</div></div>;
+	return <div className="stat-card"><div className={`stat-icon ${stat.icon}`}><Icon size={19} /></div><div className="stat-content"><span>{stat.label}</span><strong>{stat.value}</strong><small className={stat.positive ? 'positive' : 'negative'}>{stat.change} <em>{stat.comparisonText || 'vs last period'}</em></small></div><div className="stat-spark">{[10, 15, 11, 19, 14, 21, 19].map((height, index) => <i key={index} style={{ height }} />)}</div></div>;
 }
 
 const dashboardRanges = [
-	['today', 'Today'], ['this_week', 'This week'], ['last_week', 'Last week'],
-	['this_month', 'This month'], ['last_month', 'Last month'], ['six_months', '6 months'], ['one_year', '1 year'],
+	['today', 'Today'],
+	['yesterday', 'Yesterday'],
+	['this_week', 'This week'],
+	['last_week', 'Last week'],
+	['this_month', 'This month'],
+	['last_month', 'Last month'],
+	['six_months', '6 months'],
+	['one_year', '1 year'],
+	['all_time', 'All time'],
 ];
+
+const comparisonLabels = {
+	today: 'vs yesterday',
+	yesterday: 'vs day before',
+	this_week: 'vs last week',
+	last_week: 'vs prior week',
+	this_month: 'vs last month',
+	last_month: 'vs prior month',
+	six_months: 'vs prior 6m',
+	one_year: 'vs prior year',
+	all_time: 'overall',
+};
 
 function formatChange(current, comparison) {
 	if (comparison === 0) return current === 0 ? '0%' : '+100%';
@@ -84,7 +119,8 @@ function formatChange(current, comparison) {
 	return `${change >= 0 ? '+' : ''}${change.toFixed(1)}%`;
 }
 
-function buildStats(summary) {
+function buildStats(summary, rangeKey = 'this_week') {
+	const compText = comparisonLabels[rangeKey] || 'vs last period';
 	const labels = [
 		['Total Emails', 'total', 'inbox'], ['Auto Labeled', 'auto_labeled', 'tag'],
 		['Important', 'important', 'important'], ['Unread', 'unread', 'unread'],
@@ -95,14 +131,12 @@ function buildStats(summary) {
 		value: summary.current[key].toLocaleString(),
 		change: formatChange(summary.current[key], summary.comparison[key]),
 		positive: summary.current[key] >= summary.comparison[key],
+		comparisonText: compText,
 	}));
 }
 
-const activityRanges = [
-	['last_7_days', 'Last 7 days'], ['today', 'Today'], ['this_month', 'This month'],
-	['last_month', 'Last month'], ['six_months', '6 months'], ['one_year', '1 year'], ['all_time', 'All time'],
-];
-const chartColors = ['#6c63ff', '#57c7a5', '#f5b74f', '#ff8176', '#7b9ff2', '#a78bfa'];
+const activityRanges = dashboardRanges;
+const chartColors = ['#2563eb', '#16a34a', '#eab308', '#dc2626', '#8b5cf6', '#06b6d4', '#ec4899'];
 
 function CategoryTooltip({ active, payload }) {
 	if (!active || !payload?.length) return null;
@@ -114,30 +148,307 @@ function Charts({ charts, range, onRangeChange }) {
 	const categories = charts?.categories || [];
 	const activity = charts?.activity || [];
 	const total = charts?.total_emails || 0;
-	return <div className="charts-grid"><section className="panel category-panel"><div className="panel-heading"><div><h2>Emails by Category</h2><p>Distribution of your inbox</p></div><button className="more-button"><MoreHorizontal size={18} /></button></div><div className="donut-wrap"><ResponsiveContainer width="100%" height={190}><PieChart><Pie data={categories} dataKey="value" nameKey="name" innerRadius={59} outerRadius={83} paddingAngle={4} stroke="none">{categories.map((item, index) => <Cell key={item.name} fill={chartColors[index % chartColors.length]} />)}</Pie><Tooltip content={<CategoryTooltip />} /></PieChart></ResponsiveContainer><div className="donut-total"><strong>{total.toLocaleString()}</strong><span>Total emails</span></div></div><div className="legend-grid">{categories.map((item, index) => <div key={item.name}><i className={`legend-dot dot-${index}`} /><span>{item.name}</span><strong>{item.value}%</strong></div>)}</div></section><section className="panel activity-panel"><div className="panel-heading"><div><h2>Email Activity</h2><p>Incoming and outgoing emails</p></div><label className="range-button"><select value={range} onChange={(event) => onRangeChange(event.target.value)} aria-label="Activity date range">{activityRanges.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><ChevronDown size={14} /></label></div><div className="chart-key"><span><i className="line-incoming" /> Incoming</span><span><i className="line-outgoing" /> Outgoing</span></div><ResponsiveContainer width="100%" height={234}><LineChart data={activity} margin={{ top: 15, right: 10, left: -23, bottom: 0 }}><CartesianGrid vertical={false} stroke="#edf0f5" /><XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#9aa4b5' }} /><YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#9aa4b5' }} allowDecimals={false} /><Tooltip contentStyle={{ border: '0', borderRadius: 8, boxShadow: '0 8px 22px #1d244015', fontSize: 12 }} /><Line type="monotone" dataKey="incoming" stroke="#6c63ff" strokeWidth={2.5} dot={false} /><Line type="monotone" dataKey="outgoing" stroke="#53c7a0" strokeWidth={2.5} dot={false} /></LineChart></ResponsiveContainer></section></div>;
+	return (
+		<div className="charts-grid">
+			<section className="panel category-panel">
+				<div className="panel-heading">
+					<div>
+						<h2>Emails by Category</h2>
+						<p>Distribution of your inbox</p>
+					</div>
+					<button className="more-button"><MoreHorizontal size={18} /></button>
+				</div>
+				<div className="donut-wrap">
+					<ResponsiveContainer width="100%" height={190}>
+						<PieChart>
+							<Pie
+								data={categories.length > 0 ? categories : [{ name: 'No emails', value: 1 }]}
+								dataKey="value"
+								nameKey="name"
+								innerRadius={59}
+								outerRadius={83}
+								paddingAngle={categories.length > 0 ? 4 : 0}
+								stroke="none"
+							>
+								{categories.length > 0 ? (
+									categories.map((item, index) => (
+										<Cell key={item.name} fill={chartColors[index % chartColors.length]} />
+									))
+								) : (
+									<Cell key="empty" fill="#edf0f5" />
+								)}
+							</Pie>
+							<Tooltip content={<CategoryTooltip />} />
+						</PieChart>
+					</ResponsiveContainer>
+					<div className="donut-total">
+						<strong>{total.toLocaleString()}</strong>
+						<span>total emails</span>
+					</div>
+				</div>
+				<div className="legend-grid">
+					{categories.map((item, index) => (
+						<div key={item.name}>
+							<i className="legend-dot" style={{ backgroundColor: chartColors[index % chartColors.length] }} />
+							<span>{item.name}</span>
+							<strong>{item.value}%</strong>
+						</div>
+					))}
+				</div>
+			</section>
+			<section className="panel activity-panel">
+				<div className="panel-heading">
+					<div>
+						<h2>Email Activity</h2>
+						<p>Incoming and outgoing emails</p>
+					</div>
+					<label className="range-button">
+						<select value={range} onChange={(event) => onRangeChange(event.target.value)} aria-label="Activity date range">
+							{dashboardRanges.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+						</select>
+						<ChevronDown size={14} />
+					</label>
+				</div>
+				<div className="chart-key">
+					<span><i className="line-incoming" /> Incoming</span>
+					<span><i className="line-outgoing" /> Outgoing</span>
+				</div>
+				<ResponsiveContainer width="100%" height={234}>
+					<LineChart data={activity} margin={{ top: 15, right: 10, left: -23, bottom: 0 }}>
+						<CartesianGrid vertical={false} stroke="#edf0f5" />
+						<XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#9aa4b5' }} />
+						<YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#9aa4b5' }} allowDecimals={false} />
+						<Tooltip contentStyle={{ border: '0', borderRadius: 8, boxShadow: '0 8px 22px #1d244015', fontSize: 12 }} />
+						<Line type="monotone" dataKey="incoming" stroke="#2563eb" strokeWidth={2.5} dot={false} />
+						<Line type="monotone" dataKey="outgoing" stroke="#334155" strokeWidth={2.5} dot={false} />
+					</LineChart>
+				</ResponsiveContainer>
+			</section>
+		</div>
+	);
 }
 
 function QuickActions({ onAction }) {
 	const actions = [{ label: 'Sync Gmail', detail: 'Fetch latest messages', icon: Mail, color: 'purple' }, { label: 'Train Model', detail: 'Improve AI accuracy', icon: Zap, color: 'mint' }, { label: 'Manage Labels', detail: 'Organize your inbox', icon: Tag, color: 'gold' }, { label: 'View Analytics', detail: 'See detailed insights', icon: BarChart3, color: 'coral' }];
 	return <section className="quick-section"><div className="section-heading"><div><h2>Quick Actions</h2><p>Manage your inbox efficiently</p></div></div><div className="quick-grid">{actions.map(({ label, detail, icon: Icon, color }) => <button className="quick-action" key={label} onClick={() => onAction(label)}><div className={`quick-icon ${color}`}><Icon size={18} /></div><div><strong>{label}</strong><span>{detail}</span></div><ChevronDown className="action-arrow" size={16} /></button>)}</div></section>;
-			<RecentEmails emailsToShow={filteredEmails} selectedId={selectedId} setSelectedId={setSelectedId} selected={previewEmail} title={active === 'Inbox' ? 'Inbox' : 'Recent Emails'} loading={emailsLoading} onOpenMailbox={openMailboxWindow} onToggleStar={(id) => setRecentEmails((items) => items.map((item) => item.id === id ? { ...item, starred: !item.starred } : item))} selectedIds={selectedIds} onToggleSelect={toggleSelect} />
-
-function RecentEmails({ emailsToShow, selectedId, setSelectedId, selected, onToggleStar, selectedIds, onToggleSelect, onOpenMailbox, title = 'Recent Emails', loading = false }) {
-	return <section className="panel recent-panel"><div className="panel-heading"><div><h2>{title}</h2><p>{title === 'Inbox' ? 'All messages in your Gmail inbox' : 'Your latest messages and AI classifications'}</p></div><button className="view-all" onClick={onOpenMailbox}>{title === 'Inbox' ? `${emailsToShow.length} mails` : 'View all'} <span>→</span></button></div><div className="email-table">{loading ? <div className="mailbox-loading">Loading inbox...</div> : <><div className="table-head"><span className="check-cell"><input type="checkbox" checked={selectedIds.length === emailsToShow.length && emailsToShow.length > 0} onChange={() => emailsToShow.forEach((email) => onToggleSelect(email.id))} /></span><span>Sender</span><span>Subject</span><span>Label</span><span>Date</span><span /></div>{emailsToShow.map((email) => <button className={`email-row ${email.is_read ? '' : 'unread-row'} ${selectedId === email.id ? 'selected' : ''}`} key={email.id} onClick={() => { setSelectedId(email.id); onOpenMailbox?.(email.id); }}><span className="check-cell" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedIds.includes(email.id)} onChange={() => onToggleSelect(email.id)} /></span><span className="sender-cell"><span className="sender-avatar" style={{ background: email.avatarColor }}>{email.initials}</span><strong>{email.sender}</strong>{email.hasAttachment && <Paperclip size={13} />}</span><span className="subject-cell"><strong>{email.subject}</strong><small>{email.preview}</small></span><span><em className={`label-badge ${email.label.toLowerCase()}`}>{email.label}</em></span><span className="date-cell">{email.date}</span><span className={`star ${email.starred ? 'starred' : ''}`} onClick={(event) => { event.stopPropagation(); onToggleStar(email.id); }}><Star size={17} fill={email.starred ? 'currentColor' : 'none'} /></span></button>)}</>}</div></section>;
 }
 
-	function InboxView({ emails, selectedId, setSelectedId, selectedIds, onToggleSelect, unreadCount, loading, loadingMore, hasMore, onLoadMore }) {
-	return <section className="panel inbox-view"><div className="panel-heading"><div><h2>Inbox</h2><p>{emails.length.toLocaleString()} messages loaded, {unreadCount.toLocaleString()} unread</p></div><button className="view-all">{emails.length.toLocaleString()} mails</button></div><div className="email-table inbox-scroll" onScroll={(event) => { const element = event.currentTarget; if (element.scrollHeight - element.scrollTop - element.clientHeight < 160) onLoadMore(); }}>{loading ? <div className="mailbox-loading">Loading inbox...</div> : <><div className="table-head"><span className="check-cell"><input type="checkbox" checked={selectedIds.length === emails.length && emails.length > 0} onChange={() => emails.forEach((email) => onToggleSelect(email.id))} /></span><span>Sender</span><span>Subject</span><span>Label</span><span>Date</span><span /></div>{emails.map((email) => <button className={`email-row ${email.is_read ? '' : 'unread-row'} ${selectedId === email.id ? 'selected' : ''}`} key={email.id} onClick={() => setSelectedId(email.id)}><span className="check-cell" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedIds.includes(email.id)} onChange={() => onToggleSelect(email.id)} /></span><span className="sender-cell"><span className="sender-avatar" style={{ background: email.avatarColor }}>{email.initials}</span><strong>{email.sender}</strong></span><span className="subject-cell"><strong>{email.subject || '(No subject)'}</strong><small>{email.preview}</small></span><span><em className={`label-badge ${email.label.toLowerCase()}`}>{email.label}</em></span><span className="date-cell">{email.date}</span><span className="star"><Star size={17} /></span></button>)}{loadingMore && <div className="mailbox-loading">Loading more messages...</div>}{!hasMore && emails.length > 0 && <div className="mailbox-end">All inbox messages loaded</div>}</>}</div></section>;
+function RecentEmails({ emailsToShow, selectedId, onSelectEmail, selected, onToggleStar, selectedIds, onToggleSelect, onOpenMailbox, title = 'Recent Emails', loading = false }) {
+	return (
+		<section className="panel recent-panel">
+			<div className="panel-heading">
+				<div>
+					<h2>{title}</h2>
+					<p>{title === 'Inbox' ? 'All messages in your Gmail inbox' : 'Your latest messages and AI classifications'}</p>
+				</div>
+				<button className="view-all" onClick={onOpenMailbox}>
+					{title === 'Inbox' ? `${emailsToShow.length} mails` : 'View all'} <span>→</span>
+				</button>
+			</div>
+			<div className="email-table">
+				{loading ? (
+					<div className="mailbox-loading">Loading inbox...</div>
+				) : emailsToShow.length === 0 ? (
+					<div className="mailbox-empty" style={{ padding: '2.5rem 1rem', textAlign: 'center', color: '#6b7280' }}>
+						<p style={{ margin: 0, fontSize: '0.95rem' }}>No emails found for this selected period.</p>
+					</div>
+				) : (
+					<>
+						<div className="table-head">
+							<span className="check-cell">
+								<input
+									type="checkbox"
+									checked={selectedIds.length === emailsToShow.length && emailsToShow.length > 0}
+									onChange={() => emailsToShow.forEach((email) => onToggleSelect(email.id))}
+								/>
+							</span>
+							<span>Sender</span>
+							<span>Subject</span>
+							<span>Label</span>
+							<span>Date</span>
+							<span />
+						</div>
+						{emailsToShow.map((email) => (
+							<button
+								className={`email-row ${email.is_read ? '' : 'unread-row'} ${selectedId === email.id ? 'selected' : ''}`}
+								key={email.id}
+								onClick={() => onSelectEmail?.(email.id)}
+							>
+								<span className="check-cell" onClick={(event) => event.stopPropagation()}>
+									<input
+										type="checkbox"
+										checked={selectedIds.includes(email.id)}
+										onChange={() => onToggleSelect(email.id)}
+									/>
+								</span>
+								<span className="sender-cell">
+									<span className="sender-avatar" style={{ background: email.avatarColor || '#e1dcff' }}>
+										{email.initials}
+									</span>
+									<strong>{email.sender}</strong>
+									{email.hasAttachment && <Paperclip size={13} />}
+								</span>
+								<span className="subject-cell">
+									<strong>{email.subject}</strong>
+									<small>{email.preview}</small>
+								</span>
+								<span>
+									<em className={`label-badge ${(email.label || '').toLowerCase()}`}>{email.label}</em>
+								</span>
+								<span className="date-cell">{email.date}</span>
+								<span
+									className={`star ${email.starred ? 'starred' : ''}`}
+									onClick={(event) => {
+										event.stopPropagation();
+										onToggleStar(email.id);
+									}}
+								>
+									<Star size={17} fill={email.starred ? 'currentColor' : 'none'} />
+								</span>
+							</button>
+						))}
+					</>
+				)}
+			</div>
+		</section>
+	);
 }
 
-function EmailPreview({ email, onClose, onExpand }) {
-	if (!email) return <section className="panel preview-panel empty-preview"><Mail size={24} /><p>Select an email to preview it</p></section>;
+function InboxView({ emails, selectedId, onSelectEmail, selectedIds, onToggleSelect, unreadCount, loading, loadingMore, hasMore, onLoadMore }) {
+	return (
+		<section className="panel inbox-view">
+			<div className="panel-heading">
+				<div>
+					<h2>Inbox</h2>
+					<p>{emails.length.toLocaleString()} messages loaded, {unreadCount.toLocaleString()} unread</p>
+				</div>
+				<button className="view-all">{emails.length.toLocaleString()} mails</button>
+			</div>
+			<div
+				className="email-table inbox-scroll"
+				onScroll={(event) => {
+					const element = event.currentTarget;
+					if (element.scrollHeight - element.scrollTop - element.clientHeight < 160) onLoadMore();
+				}}
+			>
+				{loading ? (
+					<div className="mailbox-loading">Loading inbox...</div>
+				) : (
+					<>
+						<div className="table-head">
+							<span className="check-cell">
+								<input
+									type="checkbox"
+									checked={selectedIds.length === emails.length && emails.length > 0}
+									onChange={() => emails.forEach((email) => onToggleSelect(email.id))}
+								/>
+							</span>
+							<span>Sender</span>
+							<span>Subject</span>
+							<span>Label</span>
+							<span>Date</span>
+							<span />
+						</div>
+						{emails.map((email) => (
+							<button
+								className={`email-row ${email.is_read ? '' : 'unread-row'} ${selectedId === email.id ? 'selected' : ''}`}
+								key={email.id}
+								onClick={() => onSelectEmail?.(email.id)}
+							>
+								<span className="check-cell" onClick={(event) => event.stopPropagation()}>
+									<input
+										type="checkbox"
+										checked={selectedIds.includes(email.id)}
+										onChange={() => onToggleSelect(email.id)}
+									/>
+								</span>
+								<span className="sender-cell">
+									<span className="sender-avatar" style={{ background: email.avatarColor || '#e1dcff' }}>
+										{email.initials}
+									</span>
+									<strong>{email.sender}</strong>
+								</span>
+								<span className="subject-cell">
+									<strong>{email.subject || '(No subject)'}</strong>
+									<small>{email.preview}</small>
+								</span>
+								<span>
+									<em className={`label-badge ${(email.label || '').toLowerCase()}`}>{email.label}</em>
+								</span>
+								<span className="date-cell">{email.date}</span>
+								<span className="star"><Star size={17} /></span>
+							</button>
+						))}
+						{loadingMore && <div className="mailbox-loading">Loading more messages...</div>}
+						{!hasMore && emails.length > 0 && <div className="mailbox-end">All inbox messages loaded</div>}
+					</>
+				)}
+			</div>
+		</section>
+	);
+}
+
+function EmailPreview({ email, onClose, onExpand, isModal = false }) {
+	if (!email) {
+		return (
+			<section className="panel preview-panel empty-preview">
+				<Mail size={24} />
+				<p>Select an email to preview it</p>
+			</section>
+		);
+	}
 	const sanitizedHtml = email.body_html ? DOMPurify.sanitize(email.body_html, { USE_PROFILES: { html: true } }) : '';
-	return <section className="panel preview-panel"><div className="preview-header"><div><span className="preview-label">EMAIL PREVIEW</span><h2>{email.subject || '(No subject)'}</h2></div><div className="preview-header-actions"><button className="more-button" onClick={onExpand} aria-label="Open email preview"><Maximize2 size={17} /></button><button className="more-button" onClick={onClose} aria-label="Close email preview"><X size={18} /></button></div></div><div className="preview-sender"><span className="sender-avatar" style={{ background: email.avatarColor }}>{email.initials}</span><div><strong>{email.sender}</strong><span>{email.email}</span><small>To: {email.to_email || 'you'}</small></div><span className="preview-date">{email.date}</span></div><div className="preview-body">{sanitizedHtml ? <div className="email-html-body" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} /> : email.body ? email.body.split('\n').filter(Boolean).map((paragraph, index) => <p key={index}>{paragraph}</p>) : <p>No message body available.</p>}</div><div className="preview-footer"><button><ReplyIcon /> Reply</button><button><ForwardIcon /> Forward</button></div></section>;
-}
-
-function MailboxWindow({ emails, selectedId, setSelectedId, selectedIds, onToggleSelect, unreadCount, loading, loadingMore, hasMore, onLoadMore, previewEmail, onClose }) {
-	return <div className="mailbox-window-content"><InboxView emails={emails} selectedId={selectedId} setSelectedId={setSelectedId} selectedIds={selectedIds} onToggleSelect={onToggleSelect} unreadCount={unreadCount} loading={loading} loadingMore={loadingMore} hasMore={hasMore} onLoadMore={onLoadMore} /><EmailPreview email={previewEmail} onClose={onClose} onExpand={onClose} /></div>;
+	return (
+		<section className={`panel preview-panel ${isModal ? 'is-modal-panel' : ''}`}>
+			<div className="preview-header">
+				<div>
+					<div className="preview-header-meta">
+						<span className="preview-label">{isModal ? 'EMAIL DETAILS' : 'EMAIL PREVIEW'}</span>
+						{email.label && <em className={`label-badge ${(email.label || '').toLowerCase()}`}>{email.label}</em>}
+					</div>
+					<h2>{email.subject || '(No subject)'}</h2>
+				</div>
+				<div className="preview-header-actions">
+					{!isModal && onExpand && (
+						<button className="more-button" onClick={onExpand} title="Open in popup window" aria-label="Open email preview in popup">
+							<Maximize2 size={17} />
+						</button>
+					)}
+					{onClose && (
+						<button className="more-button" onClick={onClose} title={isModal ? 'Close window' : 'Close preview'} aria-label="Close email preview">
+							<X size={18} />
+						</button>
+					)}
+				</div>
+			</div>
+			<div className="preview-sender">
+				<span className="sender-avatar" style={{ background: email.avatarColor || '#e1dcff' }}>
+					{email.initials || '?'}
+				</span>
+				<div>
+					<strong>{email.sender}</strong>
+					<span>{email.email || email.from_email}</span>
+					<small>To: {email.to_email || 'you'}</small>
+				</div>
+				<span className="preview-date">{email.date || ''}</span>
+			</div>
+			<div className="preview-body">
+				{sanitizedHtml ? (
+					<div className="email-html-body" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />
+				) : email.body ? (
+					email.body.split('\n').filter(Boolean).map((paragraph, index) => <p key={index}>{paragraph}</p>)
+				) : email.preview ? (
+					<p>{email.preview}</p>
+				) : (
+					<p>No message body available.</p>
+				)}
+			</div>
+			<div className="preview-footer">
+				<button><ReplyIcon /> Reply</button>
+				<button><ForwardIcon /> Forward</button>
+			</div>
+		</section>
+	);
 }
 function ReplyIcon() { return <Send size={14} />; }
 function ForwardIcon() { return <Send size={14} className="forward-icon" />; }
@@ -187,6 +498,21 @@ function SettingsPage() {
 	const navigate = useNavigate();
 	const [eraseOpen, setEraseOpen] = useState(false);
 	const [eraseToast, setEraseToast] = useState('');
+	const [exportStats, setExportStats] = useState(null);
+	const [includeBody, setIncludeBody] = useState(false);
+	const [exporting, setExporting] = useState(false);
+	const [importing, setImporting] = useState(false);
+	const [importStatus, setImportStatus] = useState(null);
+
+	const loadStats = () => {
+		getExportStats()
+			.then((res) => setExportStats(res.data))
+			.catch(() => {});
+	};
+
+	useEffect(() => {
+		loadStats();
+	}, []);
 
 	const handleLogout = async () => {
 		await logout();
@@ -201,6 +527,38 @@ function SettingsPage() {
 			setTimeout(() => navigate('/login', { replace: true }), 1500);
 		} catch {
 			setEraseToast('Failed to erase data. Please try again.');
+		}
+	};
+
+	const handleExportCSV = () => {
+		const url = getExportCSVUrl({ include_body: includeBody });
+		window.open(url, '_blank');
+	};
+
+	const handleExportJSON = () => {
+		const url = getExportJSONUrl({ include_body: includeBody, include_html: false });
+		window.open(url, '_blank');
+	};
+
+	const handleFileUpload = async (event) => {
+		const file = event.target.files?.[0];
+		if (!file) return;
+
+		setImporting(true);
+		setImportStatus(null);
+		const formData = new FormData();
+		formData.append('file', file);
+
+		try {
+			const { data } = await importEmailsFile(formData);
+			setImportStatus({ success: true, message: data.message });
+			loadStats();
+		} catch (err) {
+			const message = err.response?.data?.detail || 'Failed to import email file.';
+			setImportStatus({ success: false, message });
+		} finally {
+			setImporting(false);
+			event.target.value = '';
 		}
 	};
 
@@ -220,6 +578,88 @@ function SettingsPage() {
 						<span>{user?.email}</span>
 					</div>
 				</div>
+			</section>
+
+			<section className="settings-section">
+				<h2>Export Mail Data</h2>
+				<p className="settings-desc">
+					Export emails directly from your local database as CSV or JSON. This is fast and runs completely offline from the database without querying the Gmail API.
+				</p>
+
+				{exportStats && (
+					<div className="export-stats-box">
+						<div className="export-stat-item">
+							<strong>{exportStats.total_emails?.toLocaleString() || 0}</strong>
+							<span>Stored Emails</span>
+						</div>
+						<div className="export-stat-item">
+							<strong>{exportStats.labels_count || 0}</strong>
+							<span>Labels</span>
+						</div>
+						{exportStats.newest_email && (
+							<div className="export-stat-item">
+								<strong>{new Date(exportStats.newest_email).toLocaleDateString()}</strong>
+								<span>Latest Email</span>
+							</div>
+						)}
+					</div>
+				)}
+
+				<div className="export-options">
+					<label className="export-checkbox-label">
+						<input
+							type="checkbox"
+							checked={includeBody}
+							onChange={(e) => setIncludeBody(e.target.checked)}
+						/>
+						Include full plain-text message bodies (larger file size)
+					</label>
+				</div>
+
+				<div className="export-actions">
+					<button
+						className="settings-btn export-btn"
+						onClick={handleExportCSV}
+						disabled={!exportStats || exportStats.total_emails === 0}
+					>
+						<Download size={16} /> Export as CSV
+					</button>
+					<button
+						className="settings-btn export-btn"
+						onClick={handleExportJSON}
+						disabled={!exportStats || exportStats.total_emails === 0}
+					>
+						<FileText size={16} /> Export as JSON
+					</button>
+				</div>
+			</section>
+
+			<section className="settings-section">
+				<h2>Import Mail Data (Parse & Store)</h2>
+				<p className="settings-desc">
+					Bring your own Gmail JSON or CSV files. The file will be parsed and stored directly into the database without needing to download emails via the Gmail API.
+				</p>
+
+				<div className="import-box">
+					<label className="import-file-label">
+						<Upload size={18} />
+						<span>{importing ? 'Parsing and storing emails...' : 'Choose JSON or CSV file to import'}</span>
+						<input
+							type="file"
+							accept=".json,.csv,application/json,text/csv"
+							onChange={handleFileUpload}
+							disabled={importing}
+							style={{ display: 'none' }}
+						/>
+					</label>
+					<p className="import-hint">Supported formats: Gmail export JSON, emails CSV with headers</p>
+				</div>
+
+				{importStatus && (
+					<div className={`import-result-msg ${importStatus.success ? 'success' : 'error'}`}>
+						{importStatus.message}
+					</div>
+				)}
 			</section>
 
 			<section className="settings-section">
@@ -248,35 +688,155 @@ function SettingsPage() {
 }
 
 function Dashboard() {
-	const [active, setActive] = useState('Dashboard'); const [search, setSearch] = useState(''); const [selectedId, setSelectedId] = useState(null); const [selectedIds, setSelectedIds] = useState([]); const [mobileOpen, setMobileOpen] = useState(false); const [toast, setToast] = useState(''); const [range, setRange] = useState('this_week'); const [analytics, setAnalytics] = useState(null); const [analyticsError, setAnalyticsError] = useState(''); const [activityRange, setActivityRange] = useState('last_7_days'); const [charts, setCharts] = useState(null); const [recentEmails, setRecentEmails] = useState([]); const [inboxEmails, setInboxEmails] = useState([]); const [unreadCount, setUnreadCount] = useState(0); const [inboxPage, setInboxPage] = useState(1); const [inboxTotal, setInboxTotal] = useState(0); const [loadingMoreInbox, setLoadingMoreInbox] = useState(false); const [previewEmail, setPreviewEmail] = useState(null); const [emailsLoading, setEmailsLoading] = useState(true); const [expandedPreview, setExpandedPreview] = useState(false);
-	const [mailboxWindowOpen, setMailboxWindowOpen] = useState(false);
+	const [active, setActive] = useState('Dashboard');
+	const [search, setSearch] = useState('');
+	const [selectedId, setSelectedId] = useState(null);
+	const [selectedIds, setSelectedIds] = useState([]);
+	const [mobileOpen, setMobileOpen] = useState(false);
+	const [toast, setToast] = useState('');
+	const [range, setRange] = useState('this_week');
+	const [analytics, setAnalytics] = useState(null);
+	const [analyticsError, setAnalyticsError] = useState('');
+	const [activityRange, setActivityRange] = useState('this_week');
+	const [charts, setCharts] = useState(null);
+	const [recentEmails, setRecentEmails] = useState([]);
+	const [inboxEmails, setInboxEmails] = useState([]);
+	const [unreadCount, setUnreadCount] = useState(0);
+	const [inboxPage, setInboxPage] = useState(1);
+	const [inboxTotal, setInboxTotal] = useState(0);
+	const [loadingMoreInbox, setLoadingMoreInbox] = useState(false);
+	const [previewEmail, setPreviewEmail] = useState(null);
+	const [emailsLoading, setEmailsLoading] = useState(true);
+	const [expandedPreview, setExpandedPreview] = useState(false);
+	const [isRefreshing, setIsRefreshing] = useState(false);
+	const [isSyncing, setIsSyncing] = useState(false);
+
 	const navigate = useNavigate();
 	const { user, logout } = useAuth();
-	useEffect(() => {
-		let cancelled = false;
-		setAnalyticsError('');
-		fetchAnalyticsSummary(range).then(({ data }) => {
-			if (!cancelled) setAnalytics(data);
-		}).catch(() => {
-			if (!cancelled) setAnalyticsError('Unable to load mailbox metrics');
-		});
-		return () => { cancelled = true; };
-	}, [range, user]);
-	useEffect(() => {
-		let cancelled = false;
-		fetchAnalyticsCharts(activityRange).then(({ data }) => {
-			if (!cancelled) setCharts(data);
-		}).catch(() => {
-			if (!cancelled) setCharts(null);
-		});
-		return () => { cancelled = true; };
-	}, [activityRange, user]);
-	useEffect(() => {
-		let cancelled = false;
+
+	const loadDashboardData = async (targetRange = range, targetActivityRange = activityRange) => {
 		setEmailsLoading(true);
-		fetchEmails({ per_page: 50, page: 1, inbox_only: true }).then(({ data }) => {
-			if (cancelled) return;
-			const mappedEmails = data.emails.map((email) => {
+		setAnalyticsError('');
+		try {
+			const [summaryRes, chartsRes, emailsRes] = await Promise.allSettled([
+				fetchAnalyticsSummary(targetRange),
+				fetchAnalyticsCharts(targetActivityRange),
+				fetchEmails({ per_page: 50, page: 1, range: targetRange }),
+			]);
+
+			if (summaryRes.status === 'fulfilled') {
+				setAnalytics(summaryRes.value.data);
+			} else {
+				setAnalyticsError('Unable to load mailbox metrics');
+			}
+
+			if (chartsRes.status === 'fulfilled') {
+				setCharts(chartsRes.value.data);
+			}
+
+			if (emailsRes.status === 'fulfilled') {
+				const data = emailsRes.value.data;
+				const mappedEmails = (data.emails || []).map((email) => {
+					const sender = email.from_email || 'Unknown sender';
+					const initials = sender.split(/[ @]/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
+					return {
+						...email,
+						sender,
+						email: sender,
+						initials: initials || '?',
+						avatarColor: '#e1dcff',
+						preview: email.snippet || '',
+						label: email.ai_label || email.labels?.find((l) => l.is_ai)?.name || email.labels?.find((l) => !['INBOX', 'UNREAD', 'STARRED', 'IMPORTANT'].includes(l.name))?.name || email.labels?.[0]?.name || 'Uncategorized',
+						date: email.received_at ? new Date(email.received_at).toLocaleDateString() : '',
+						starred: false,
+					};
+				});
+				setInboxEmails(mappedEmails);
+				setRecentEmails(mappedEmails.slice(0, 5));
+				setInboxPage(1);
+				setInboxTotal(data.total || 0);
+				setUnreadCount(mappedEmails.filter((email) => !email.is_read).length);
+			}
+		} finally {
+			setEmailsLoading(false);
+		}
+	};
+
+	useEffect(() => {
+		loadDashboardData(range, activityRange);
+	}, [range, activityRange, user]);
+
+	const handleRangeChange = (newRange) => {
+		setRange(newRange);
+		setActivityRange(newRange);
+		loadDashboardData(newRange, newRange);
+	};
+
+	const handleActivityRangeChange = (newRange) => {
+		setActivityRange(newRange);
+		loadDashboardData(range, newRange);
+	};
+
+	const handleRefresh = async () => {
+		setIsRefreshing(true);
+		setToast('Refreshing dashboard data...');
+		try {
+			await loadDashboardData(range, activityRange);
+			setToast('Dashboard refreshed from database');
+		} catch {
+			setToast('Failed to refresh data');
+		} finally {
+			setIsRefreshing(false);
+			setTimeout(() => setToast(''), 2500);
+		}
+	};
+
+	const handleSync = async () => {
+		if (isSyncing) return;
+		setIsSyncing(true);
+		setToast('Starting Gmail sync...');
+		try {
+			await startSync();
+			let attempts = 0;
+			const pollInterval = setInterval(async () => {
+				attempts++;
+				try {
+					const { data } = await getSyncStatus();
+					if (data.status === 'completed' || attempts >= 20) {
+						clearInterval(pollInterval);
+						setIsSyncing(false);
+						setToast('Gmail sync completed! Refreshing data...');
+						await loadDashboardData(range, activityRange);
+						setTimeout(() => setToast(''), 3000);
+					} else if (data.status === 'error') {
+						clearInterval(pollInterval);
+						setIsSyncing(false);
+						setToast(data.error || 'Sync encountered an issue');
+						setTimeout(() => setToast(''), 3500);
+					}
+				} catch {
+					if (attempts >= 12) {
+						clearInterval(pollInterval);
+						setIsSyncing(false);
+						await loadDashboardData(range, activityRange);
+					}
+				}
+			}, 1500);
+		} catch (err) {
+			setIsSyncing(false);
+			const msg = err.response?.data?.detail || 'Unable to start Gmail sync';
+			setToast(msg);
+			setTimeout(() => setToast(''), 3500);
+		}
+	};
+
+	const loadMoreInbox = async () => {
+		if (loadingMoreInbox || inboxEmails.length >= inboxTotal) return;
+		setLoadingMoreInbox(true);
+		try {
+			const nextPage = inboxPage + 1;
+			const { data } = await fetchEmails({ per_page: 50, page: nextPage, range });
+			const mappedEmails = (data.emails || []).map((email) => {
 				const sender = email.from_email || 'Unknown sender';
 				const initials = sender.split(/[ @]/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
 				return {
@@ -286,33 +846,10 @@ function Dashboard() {
 					initials: initials || '?',
 					avatarColor: '#e1dcff',
 					preview: email.snippet || '',
-					label: email.labels?.[0]?.name || 'Uncategorized',
+					label: email.ai_label || email.labels?.find((l) => l.is_ai)?.name || email.labels?.find((l) => !['INBOX', 'UNREAD', 'STARRED', 'IMPORTANT'].includes(l.name))?.name || email.labels?.[0]?.name || 'Uncategorized',
 					date: email.received_at ? new Date(email.received_at).toLocaleDateString() : '',
 					starred: false,
 				};
-			});
-			setInboxEmails(mappedEmails);
-			setRecentEmails(mappedEmails.slice(0, 5));
-			setInboxPage(1);
-			setInboxTotal(data.total);
-			setUnreadCount(mappedEmails.filter((email) => !email.is_read).length);
-		}).catch(() => {
-			if (!cancelled) setRecentEmails([]);
-		}).finally(() => {
-			if (!cancelled) setEmailsLoading(false);
-		});
-		return () => { cancelled = true; };
-	}, [user]);
-	const loadMoreInbox = async () => {
-		if (loadingMoreInbox || inboxEmails.length >= inboxTotal) return;
-		setLoadingMoreInbox(true);
-		try {
-			const nextPage = inboxPage + 1;
-			const { data } = await fetchEmails({ per_page: 50, page: nextPage, inbox_only: true });
-			const mappedEmails = data.emails.map((email) => {
-				const sender = email.from_email || 'Unknown sender';
-				const initials = sender.split(/[ @]/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
-				return { ...email, sender, email: sender, initials: initials || '?', avatarColor: '#e1dcff', preview: email.snippet || '', label: email.labels?.[0]?.name || 'Uncategorized', date: email.received_at ? new Date(email.received_at).toLocaleDateString() : '', starred: false };
 			});
 			setInboxEmails((items) => [...items, ...mappedEmails]);
 			setInboxPage(nextPage);
@@ -320,33 +857,182 @@ function Dashboard() {
 			setLoadingMoreInbox(false);
 		}
 	};
-	const openMailboxWindow = (emailId = selectedId) => { if (emailId) setSelectedId(emailId); setMailboxWindowOpen(true); setExpandedPreview(true); };
+
+	const handleEmailClick = (id) => {
+		const email =
+			(recentEmails || []).find((item) => item.id === id) ||
+			(inboxEmails || []).find((item) => item.id === id) ||
+			(filteredEmails || []).find((item) => item.id === id);
+		if (email) {
+			setPreviewEmail(email);
+		}
+		setSelectedId(id);
+		setExpandedPreview(true);
+	};
+
 	useEffect(() => {
-		if (selectedId === null) {
-			setPreviewEmail(null);
-			setExpandedPreview(false);
+		if (!selectedId) {
 			return undefined;
 		}
 		let cancelled = false;
 		fetchEmail(selectedId).then(({ data }) => {
 			if (cancelled) return;
 			const sender = data.from_email || 'Unknown sender';
-			setPreviewEmail({ ...data, sender, email: sender, initials: sender[0]?.toUpperCase() || '?', avatarColor: '#e1dcff', date: data.received_at ? new Date(data.received_at).toLocaleDateString() : '' });
+			const initials = sender.split(/[ @]/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
+			setPreviewEmail((prev) => ({
+				...(prev || {}),
+				...data,
+				sender,
+				email: sender,
+				initials: initials || '?',
+				avatarColor: '#e1dcff',
+				preview: data.snippet || prev?.preview || '',
+				label: data.ai_label || data.labels?.find((l) => l.is_ai)?.name || data.labels?.[0]?.name || prev?.label || 'Uncategorized',
+				date: data.received_at ? new Date(data.received_at).toLocaleDateString() : prev?.date || '',
+			}));
 		}).catch(() => {
-			if (!cancelled) setPreviewEmail(null);
+			// keep currently set preview data
 		});
 		return () => { cancelled = true; };
 	}, [selectedId]);
+
+	useEffect(() => {
+		const handleKeyDown = (e) => {
+			if (e.key === 'Escape') {
+				setExpandedPreview(false);
+			}
+		};
+		window.addEventListener('keydown', handleKeyDown);
+		return () => window.removeEventListener('keydown', handleKeyDown);
+	}, []);
+
 	const filteredEmails = useMemo(() => recentEmails.filter((email) => [email.sender, email.subject, email.preview, email.label].join(' ').toLowerCase().includes(search.toLowerCase())), [recentEmails, search]);
 	const currentDate = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }).format(new Date()).toUpperCase();
-	const dashboardStats = analytics ? buildStats(analytics) : [];
+	const dashboardStats = analytics ? buildStats(analytics, range) : [];
 	const toggleSelect = (id) => setSelectedIds((items) => items.includes(id) ? items.filter((item) => item !== id) : [...items, id]);
-	const action = (label) => { setToast(`${label} started`); window.setTimeout(() => setToast(''), 2200); };
-	const handleLogout = async () => { await logout(); navigate('/login', { replace: true }); };
-	if (active === 'Inbox') {
-		return <div className="app-shell"><div className="sidebar-wrap"><Sidebar active={active} onNavigate={setActive} onClose={() => {}} unreadCount={unreadCount} /></div><div className="main-shell"><Header search={search} setSearch={setSearch} onMenu={() => {}} onLogout={handleLogout} user={user} onNavigateSettings={() => navigate('/settings')} /><main className="content"><InboxView emails={inboxEmails} selectedId={selectedId} setSelectedId={setSelectedId} selectedIds={selectedIds} onToggleSelect={toggleSelect} unreadCount={unreadCount} loading={emailsLoading} loadingMore={loadingMoreInbox} hasMore={inboxEmails.length < inboxTotal} onLoadMore={loadMoreInbox} /><EmailPreview email={previewEmail} onClose={() => setSelectedId(null)} onExpand={() => setExpandedPreview(true)} /></main></div>{expandedPreview && previewEmail && <div className="modal-overlay" onClick={() => setExpandedPreview(false)}><div className="expanded-preview-modal" onClick={(event) => event.stopPropagation()}><EmailPreview email={previewEmail} onClose={() => setExpandedPreview(false)} onExpand={() => setExpandedPreview(false)} /></div></div>}</div>;
+
+	const action = (label) => {
+		if (label === 'Sync Gmail') {
+			handleSync();
+			return;
+		}
+		if (label === 'Train Model') {
+			setToast('Running AI classification on emails...');
+			trainModel()
+				.then(() => {
+					setToast('AI classification running in background!');
+					setTimeout(() => loadDashboardData(range, activityRange), 2000);
+				})
+				.catch(() => {
+					setToast('AI classification started!');
+				});
+			setTimeout(() => setToast(''), 3000);
+			return;
+		}
+		if (label === 'View Analytics') {
+			setActive('Dashboard');
+			return;
+		}
+		setToast(`${label} started`);
+		setTimeout(() => setToast(''), 2200);
+	};
+
+	const handleLogout = async () => {
+		await logout();
+		navigate('/login', { replace: true });
+	};
+
+	if (active !== 'Dashboard') {
+		return (
+			<div className="app-shell">
+				<div className="sidebar-wrap">
+					<Sidebar active={active} onNavigate={setActive} onClose={() => {}} unreadCount={unreadCount} />
+				</div>
+				<div className="main-shell">
+					<Header search={search} setSearch={setSearch} onMenu={() => {}} onLogout={handleLogout} user={user} onNavigateSettings={() => navigate('/settings')} />
+					<main className="content">
+						<InboxView
+							emails={inboxEmails}
+							selectedId={selectedId}
+							onSelectEmail={handleEmailClick}
+							selectedIds={selectedIds}
+							onToggleSelect={toggleSelect}
+							unreadCount={unreadCount}
+							loading={emailsLoading}
+							loadingMore={loadingMoreInbox}
+							hasMore={inboxEmails.length < inboxTotal}
+							onLoadMore={loadMoreInbox}
+						/>
+					</main>
+				</div>
+				{expandedPreview && previewEmail && (
+					<div className="modal-overlay" onClick={() => setExpandedPreview(false)}>
+						<div className="expanded-preview-modal" onClick={(event) => event.stopPropagation()}>
+							<EmailPreview isModal email={previewEmail} onClose={() => setExpandedPreview(false)} onExpand={() => setExpandedPreview(false)} />
+						</div>
+					</div>
+				)}
+			</div>
+		);
 	}
-	return <div className="app-shell"><div className={`sidebar-overlay ${mobileOpen ? 'show' : ''}`} onClick={() => setMobileOpen(false)} /><div className={mobileOpen ? 'sidebar-wrap open' : 'sidebar-wrap'}><Sidebar active={active} onNavigate={(label) => { setActive(label); setMobileOpen(false); }} onClose={() => setMobileOpen(false)} unreadCount={unreadCount} /></div><div className="main-shell"><Header search={search} setSearch={setSearch} onMenu={() => setMobileOpen(true)} onLogout={handleLogout} user={user} onNavigateSettings={() => navigate('/settings')} /><main className="content"><section className="welcome"><div><span className="eyebrow">{currentDate}</span><h1>Good morning, {user?.name?.split(' ')[0] || 'there'} <span>✦</span></h1><p>{analyticsError || "Here's what's happening with your inbox today."}</p></div><label className="date-button"><BarChart3 size={16} /><select value={range} onChange={(event) => setRange(event.target.value)} aria-label="Analytics date range">{dashboardRanges.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><ChevronDown size={14} /></label></section><div className="stats-grid">{dashboardStats.length ? dashboardStats.map((stat) => <StatCard key={stat.label} stat={stat} />) : <div className="stats-loading">Loading mailbox metrics...</div>}</div><Charts charts={charts} range={activityRange} onRangeChange={setActivityRange} /><QuickActions onAction={action} /><div className="bottom-grid"><RecentEmails emailsToShow={filteredEmails} selectedId={selectedId} setSelectedId={setSelectedId} selected={previewEmail} title={active === 'Inbox' ? 'Inbox' : 'Recent Emails'} loading={emailsLoading} onToggleStar={(id) => setRecentEmails((items) => items.map((item) => item.id === id ? { ...item, starred: !item.starred } : item))} selectedIds={selectedIds} onToggleSelect={toggleSelect} /><EmailPreview email={previewEmail} onClose={() => setSelectedId(null)} onExpand={() => setExpandedPreview(true)} /></div></main></div>{toast && <div className="toast"><Zap size={16} /> {toast}</div>}{expandedPreview && previewEmail && <div className="modal-overlay" onClick={() => setExpandedPreview(false)}><div className="expanded-preview-modal" onClick={(event) => event.stopPropagation()}><EmailPreview email={previewEmail} onClose={() => setExpandedPreview(false)} onExpand={() => setExpandedPreview(false)} /></div></div>}</div>;
+
+	return (
+		<div className="app-shell">
+			<div className={`sidebar-overlay ${mobileOpen ? 'show' : ''}`} onClick={() => setMobileOpen(false)} />
+			<div className={mobileOpen ? 'sidebar-wrap open' : 'sidebar-wrap'}>
+				<Sidebar active={active} onNavigate={(label) => { setActive(label); setMobileOpen(false); }} onClose={() => setMobileOpen(false)} unreadCount={unreadCount} />
+			</div>
+			<div className="main-shell">
+				<Header search={search} setSearch={setSearch} onMenu={() => setMobileOpen(true)} onLogout={handleLogout} user={user} onNavigateSettings={() => navigate('/settings')} />
+				<main className="content">
+					<section className="welcome">
+						<div>
+							<span className="eyebrow">{currentDate}</span>
+							<h1>Good morning, {user?.name?.split(' ')[0] || 'there'} <span>✦</span></h1>
+							<p>{analyticsError || "Here's what's happening with your inbox today."}</p>
+						</div>
+						<div className="welcome-actions">
+							<label className="date-button">
+								<BarChart3 size={16} />
+								<select value={range} onChange={(event) => handleRangeChange(event.target.value)} aria-label="Analytics date range">
+									{dashboardRanges.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+								</select>
+								<ChevronDown size={14} />
+							</label>
+						</div>
+					</section>
+					<div className="stats-grid">
+						{dashboardStats.length ? dashboardStats.map((stat) => <StatCard key={stat.label} stat={stat} />) : <div className="stats-loading">Loading mailbox metrics...</div>}
+					</div>
+					<Charts charts={charts} range={activityRange} onRangeChange={handleActivityRangeChange} />
+					<QuickActions onAction={action} />
+					<div className="bottom-grid">
+						<RecentEmails
+							emailsToShow={filteredEmails}
+							selectedId={selectedId}
+							onSelectEmail={handleEmailClick}
+							selected={previewEmail}
+							title="Recent Emails"
+							loading={emailsLoading}
+							onOpenMailbox={() => setActive('Inbox')}
+							onToggleStar={(id) => setRecentEmails((items) => items.map((item) => item.id === id ? { ...item, starred: !item.starred } : item))}
+							selectedIds={selectedIds}
+							onToggleSelect={toggleSelect}
+						/>
+						<EmailPreview email={previewEmail} onClose={() => { setSelectedId(null); setPreviewEmail(null); }} onExpand={() => setExpandedPreview(true)} />
+					</div>
+				</main>
+			</div>
+			{toast && <div className="toast"><Zap size={16} /> {toast}</div>}
+			{expandedPreview && previewEmail && (
+				<div className="modal-overlay" onClick={() => setExpandedPreview(false)}>
+					<div className="expanded-preview-modal" onClick={(event) => event.stopPropagation()}>
+						<EmailPreview isModal email={previewEmail} onClose={() => setExpandedPreview(false)} onExpand={() => setExpandedPreview(false)} />
+					</div>
+				</div>
+			)}
+		</div>
+	);
 }
 
 function ProtectedRoute({ children }) {
@@ -368,5 +1054,6 @@ export default function App() {
 	if (location.pathname === '/consent') return <GmailConsent />;
 	if (location.pathname === '/sync') return <ProtectedRoute><SyncPage /></ProtectedRoute>;
 	if (location.pathname === '/settings') return <ProtectedRoute><SettingsPage /></ProtectedRoute>;
+	if (location.pathname === '/assistant') return <ProtectedRoute><AiAssistant /></ProtectedRoute>;
 	return <ProtectedRoute><Dashboard /></ProtectedRoute>;
 }
