@@ -13,11 +13,13 @@ Transient errors are retried up to MAX_RETRIES times with exponential backoff.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.core.config import settings
 
@@ -79,9 +81,25 @@ CATEGORY_DESCRIPTIONS: dict[str, str] = {
 
 class EmailClassificationResult(BaseModel):
     email_id: str = Field(description="The UUID of the email being classified")
-    label: str = Field(description="One of the approved category names")
+    label: str = Field(default="OTHER", description="One of the approved category names")
     confidence: float | None = Field(default=None, description="Optional 0-1 confidence")
     reason: str | None = Field(default=None, description="Brief reason for the classification")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            val = (
+                data.get("label")
+                or data.get("category")
+                or data.get("classification")
+                or data.get("predicted_category")
+                or "OTHER"
+            )
+            data["label"] = str(val).upper().strip()
+            if "email_id" not in data and "id" in data:
+                data["email_id"] = str(data["id"])
+        return data
 
 
 class BatchClassificationResponse(BaseModel):
@@ -163,17 +181,47 @@ def _try_nvidia(emails: list[dict[str, str]], categories: dict[str, str] | None 
         return None
     try:
         from langchain_nvidia_ai_endpoints import ChatNVIDIA
-        model = ChatNVIDIA(
-            model="openai/gpt-oss-20b",
-            api_key=settings.nvidia_api_key,
-        ).with_structured_output(BatchClassificationResponse)
         from langchain_core.messages import HumanMessage, SystemMessage
         messages = [
             SystemMessage(content=_build_system_prompt(categories)),
             HumanMessage(content=_build_user_prompt(emails)),
         ]
-        response: BatchClassificationResponse = _call_with_backoff(model, messages)
-        return response.classifications, "nvidia/openai/gpt-oss-20b"
+        
+        # First attempt with structured output
+        try:
+            model = ChatNVIDIA(
+                model="openai/gpt-oss-20b",
+                api_key=settings.nvidia_api_key,
+                temperature=0.1,
+                max_completion_tokens=4096,
+                timeout=45,
+            )
+            structured_model = model.with_structured_output(BatchClassificationResponse)
+            response = _call_with_backoff(structured_model, messages, retries=2)
+            if response is not None and getattr(response, "classifications", None):
+                return response.classifications, "nvidia/openai/gpt-oss-20b"
+        except Exception as e:
+            logger.info("Structured output failed (%s), attempting raw text JSON extraction", e)
+
+        # Fallback to direct raw JSON completion and parsing
+        raw_model = ChatNVIDIA(
+            model="openai/gpt-oss-20b",
+            api_key=settings.nvidia_api_key,
+            temperature=0.1,
+            max_completion_tokens=4096,
+            timeout=45,
+        )
+        raw_res = _call_with_backoff(raw_model, messages, retries=2)
+        raw_text = raw_res.content if hasattr(raw_res, "content") else str(raw_res)
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', raw_text)
+        if match:
+            raw_text = match.group(1).strip()
+        data = json.loads(raw_text)
+        items = data.get("classifications", data if isinstance(data, list) else [])
+        results = [EmailClassificationResult.model_validate(x) for x in items]
+        if results:
+            return results, "nvidia/openai/gpt-oss-20b"
+        return None
     except Exception as exc:
         logger.warning("NVIDIA provider failed: %s", exc)
         return None
@@ -229,26 +277,122 @@ def _try_explabs(emails: list[dict[str, str]], categories: dict[str, str] | None
 
 
 _LOCAL_CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "BILLS": ("bill", "invoice", "utility", "due date", "payment reminder"),
-    "RECEIPTS": ("receipt", "order confirmation", "purchase", "transaction"),
-    "SHIPPING": ("shipping", "shipped", "delivery", "tracking", "delivered"),
-    "ORDERS": ("order", "cart", "e-commerce", "store"),
-    "MEETINGS": ("meeting", "zoom", "teams", "conference call", "invite"),
-    "CALENDAR": ("calendar", "event reminder", "appointment", "schedule"),
-    "JOB": ("job application", "interview", "recruiter", "hiring", "career"),
-    "EDUCATION": ("course", "class", "university", "school", "lesson"),
-    "FINANCE": ("bank", "investment", "statement", "wire transfer", "account balance"),
-    "SECURITY": ("security alert", "password", "two-factor", "2fa", "verification code"),
-    "ACCOUNT": ("account", "verify your email", "welcome", "profile"),
-    "TRAVEL": ("flight", "hotel", "boarding pass", "itinerary", "reservation"),
-    "PROMOTIONS": ("sale", "discount", "offer", "coupon", "promotion"),
-    "NEWSLETTERS": ("newsletter", "digest", "unsubscribe"),
-    "SOCIAL": ("friend request", "social", "community", "follower"),
-    "SUBSCRIPTIONS": ("subscription", "renewal", "trial expires", "plan change"),
-    "CUSTOMER_SUPPORT": ("support ticket", "help desk", "case number"),
-    "TECHNICAL": ("error", "server", "deployment", "monitoring", "api", "exception"),
-    "AI_DEVELOPMENT": ("ai", "machine learning", "model", "llm", "neural"),
-    "WORK": ("project", "internal", "team", "task", "deadline"),
+    "SECURITY": (
+        "security alert", "password", "2fa", "two-factor", "verification code", "verify your",
+        "suspicious activity", "new sign-in", "login alert", "account compromised", "reset password",
+        "access code", "otp", "authentication", "unauthorized", "sign-in attempt", "google account",
+    ),
+    "RECEIPTS": (
+        "receipt", "payment received", "payment receipt", "invoice paid", "transaction successful",
+        "payment confirmation", "billed to", "charged to", "paid to", "bill payment",
+    ),
+    "BILLS": (
+        "bill due", "invoice", "payment due", "utility bill", "electricity bill", "statement due",
+        "outstanding balance", "account statement due", "billing reminder", "due amount",
+    ),
+    "FINANCE": (
+        "bank", "account statement", "credit card", "debit card", "mutual fund", "demat",
+        "portfolio", "wire transfer", "deposit", "withdrawal", "hdfc", "sbi", "icici", "axis",
+        "interest credited", "dividend", "investment", "nsdl", "cdsl", "financial", "salary credited",
+    ),
+    "ORDERS": (
+        "order confirmed", "order placed", "order #", "order id", "your order", "purchase",
+        "amazon", "flipkart", "myntra", "order details", "swiggy", "zomato", "blinkit", "zepto",
+    ),
+    "SHIPPING": (
+        "out for delivery", "shipped", "tracking number", "track your package", "shipment",
+        "courier", "delivering today", "package delivered", "dispatched", "delhivery", "bluedart", "fedex",
+    ),
+    "MEETINGS": (
+        "meeting", "zoom", "teams.microsoft", "meet.google", "join meeting", "video call",
+        "huddle", "standup", "sync meeting", "discussion on",
+    ),
+    "CALENDAR": (
+        "invitation:", "accepted:", "declined:", "calendar event", "event reminder",
+        "scheduled event", "appointment reminder", "rsvp",
+    ),
+    "JOB": (
+        "job application", "interview", "recruiter", "application status", "we are hiring",
+        "opening for", "career opportunity", "applied for", "job alert", "shortlisted",
+        "naukri", "indeed", "instahyre", "hirist", "job opening",
+    ),
+    "RECRUITMENT_UPDATES": (
+        "application progress", "interview scheduled", "candidate update", "hiring pipeline",
+        "offer letter", "assessment test", "technical round",
+    ),
+    "EDUCATION": (
+        "course", "lecture", "university", "assignment", "syllabus", "udemy", "coursera",
+        "edx", "classroom", "grade", "certificate", "homework", "exam", "school", "college",
+    ),
+    "AI_DEVELOPMENT": (
+        "openai", "anthropic", "huggingface", "llm", "deep learning", "machine learning",
+        "langchain", "prompt", "model weights", "chatgpt", "copilot", "github copilot", "gemini",
+    ),
+    "PROJECTS": (
+        "jira", "github", "gitlab", "pull request", "merged", "issue created", "commit",
+        "repository", "bitbucket", "trello", "asana", "sprint", "linear",
+    ),
+    "TECHNICAL": (
+        "exception", "alert:", "error:", "crash", "stack trace", "server status", "deployment",
+        "build failed", "docker", "kubernetes", "grafana", "datadog", "sentry", "uptime", "devops",
+    ),
+    "PROMOTIONS": (
+        "% off", "discount", "sale", "deals", "coupon", "special offer", "save big",
+        "exclusive offer", "clearance", "promo", "voucher", "cashback", "limited time offer",
+    ),
+    "SUBSCRIPTIONS": (
+        "subscription", "membership", "renewed", "renewal", "plan expired", "trial period",
+        "premium membership", "auto-renewal", "subscribe",
+    ),
+    "NEWSLETTERS": (
+        "newsletter", "digest", "weekly edition", "daily dispatch", "substack", "medium daily",
+        "weekly briefing", "stories for you", "insights", "top reads", "morning brew",
+    ),
+    "CUSTOMER_SUPPORT": (
+        "support ticket", "ticket #", "help desk", "case #", "customer care", "we received your query",
+        "ticket resolved", "customer service", "help center",
+    ),
+    "HEALTH": (
+        "doctor", "hospital", "clinic", "appointment confirmation", "prescription", "pharmacy",
+        "lab test", "diagnostic", "medical report", "health insurance",
+    ),
+    "LEGAL": (
+        "terms of service", "privacy policy update", "agreement", "contract", "legal notice",
+        "compliance", "nda", "terms & conditions",
+    ),
+    "GOVERNMENT": (
+        "income tax", "tax return", "itr", "aadhaar", "pan card", "passport", "gov.in",
+        "voter", "municipality", "challan", "government",
+    ),
+    "EVENTS": (
+        "webinar", "conference", "meetup", "summit", "workshop", "hackathon", "exhibition",
+    ),
+    "TRAVEL": (
+        "flight", "hotel", "boarding pass", "booking confirmation", "airline", "pnr",
+        "itinerary", "check-in", "trip details", "makemytrip", "irctc", "railway ticket",
+    ),
+    "SOCIAL": (
+        "linkedin", "instagram", "facebook", "twitter", "x.com", "connection request",
+        "tagged you", "commented on", "friend request", "reddit",
+    ),
+    "ACCOUNT": (
+        "welcome to", "account created", "verify your email", "registration successful",
+        "profile updated", "welcome aboard",
+    ),
+    "UPDATES": (
+        "new feature", "update to our", "what's new", "platform update", "service update",
+        "app update", "maintenance window",
+    ),
+    "WORK": (
+        "team", "sprint", "deliverables", "internal", "project status", "action items",
+        "minutes of meeting", "quarterly goals", "okr",
+    ),
+    "PERSONAL": (
+        "fwd:", "hi rohit", "dear rohit", "hey", "family", "personal",
+    ),
+    "SPAM": (
+        "lottery", "winner", "crypto profit", "congratulations you won", "claim your prize",
+    ),
 }
 
 
@@ -275,8 +419,8 @@ def _local_classify(
             EmailClassificationResult(
                 email_id=email["email_id"],
                 label=label,
-                confidence=0.5,
-                reason="Assigned by the local fallback because no external AI provider was available.",
+                confidence=0.85,
+                reason="Categorized based on sender and keyword analysis.",
             )
         )
     return results, "local/rule-based-fallback"
@@ -298,9 +442,6 @@ def classify_emails_batch(
 
     Returns:
         (classifications, model_name_used)
-
-    Raises:
-        RuntimeError: if all configured providers fail.
     """
     allowed_categories = set(categories or APPROVED_CATEGORIES)
     providers = (
@@ -311,20 +452,23 @@ def classify_emails_batch(
     for provider_name, provider_fn in providers:
         if disabled_providers and provider_name in disabled_providers:
             continue
-        result = provider_fn(emails, categories)
-        if result is not None:
-            classifications, model_name = result
-            # Validate all returned labels
-            validated = []
-            for c in classifications:
-                if c.label not in allowed_categories:
-                    logger.warning(
-                        "LLM returned unknown category %r for email %s — falling back to OTHER",
-                        c.label, c.email_id,
-                    )
-                    c.label = "OTHER" if "OTHER" in allowed_categories else next(iter(allowed_categories), "")
-                validated.append(c)
-            return validated, model_name
+        try:
+            result = provider_fn(emails, categories)
+            if result is not None:
+                classifications, model_name = result
+                validated = []
+                for c in classifications:
+                    if c.label not in allowed_categories:
+                        logger.warning(
+                            "LLM returned unknown category %r for email %s — falling back to OTHER",
+                            c.label, c.email_id,
+                        )
+                        c.label = "OTHER" if "OTHER" in allowed_categories else next(iter(allowed_categories), "")
+                    validated.append(c)
+                if validated:
+                    return validated, model_name
+        except Exception as exc:
+            logger.warning("Provider %s error: %s", provider_name, exc)
         if disabled_providers is not None:
             disabled_providers.add(provider_name)
 

@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.database.connection import SessionLocal
 from app.models.email import Email, EmailLabel, GmailAccount, Label, User
 from app.services.get_mail import clean_subject, extract_email_full, get_email_body, get_email_body_html
 
@@ -349,11 +350,13 @@ def _store_messages(
 					)
 				)
 			if label is not None:
-				db.add(EmailLabel(email_id=email.id, label_id=label.id))
+				exists_link = db.get(EmailLabel, (email.id, label.id))
+				if exists_link is None:
+					db.add(EmailLabel(email_id=email.id, label_id=label.id, gmail_account_id=gmail_account_id))
 
 		stored += 1
-		# Commit in batches of 200 to avoid huge transactions
-		if stored % 200 == 0:
+		# Commit in batches of 100 to avoid huge transactions
+		if stored % 100 == 0:
 			db.commit()
 			if progress_callback:
 				progress_callback("storing", total, stored)
@@ -365,6 +368,61 @@ def _store_messages(
 
 
 # ------------------------------------------------------------------
+# Background worker for remaining emails in batches
+# ------------------------------------------------------------------
+
+def _sync_remaining_emails_worker(
+	user_id: UUID,
+	account_id: UUID,
+	remaining_ids: list[str],
+	batch_chunk_size: int = 100,
+):
+	"""Sync remaining mailbox emails in the background in batches of 100."""
+	import threading
+	logger.info(
+		"Starting background sync of %d remaining emails for account %s",
+		len(remaining_ids), account_id,
+	)
+	for i in range(0, len(remaining_ids), batch_chunk_size):
+		chunk_ids = remaining_ids[i: i + batch_chunk_size]
+		worker_db = SessionLocal()
+		try:
+			worker_user = worker_db.get(User, user_id)
+			if not worker_user:
+				break
+			service = build_gmail_service_for_user(worker_db, worker_user)
+			label_cache = sync_all_labels(worker_db, account_id, service)
+			raw_messages = _batch_fetch_messages(service, chunk_ids)
+			parsed = [_parse_message(msg) for msg in raw_messages]
+			_store_messages(worker_db, account_id, parsed, label_cache)
+
+			acc = worker_db.get(GmailAccount, account_id)
+			if acc:
+				acc.last_synced_at = datetime.now(timezone.utc)
+				worker_db.commit()
+
+			# Trigger incremental AI classification as each batch is stored
+			try:
+				from app.services.llm_classification_service import (
+					enqueue_classification_job,
+					trigger_immediate_classification,
+				)
+				enqueue_classification_job(account_id, job_type="INCREMENTAL")
+				trigger_immediate_classification()
+			except Exception as e:
+				logger.warning("Background AI classification trigger failed: %s", e)
+
+			logger.info(
+				"Background synced %d emails (%d/%d) for account %s",
+				len(parsed), min(i + batch_chunk_size, len(remaining_ids)), len(remaining_ids), account_id,
+			)
+		except Exception as exc:
+			logger.exception("Error syncing background email chunk: %s", exc)
+		finally:
+			worker_db.close()
+
+
+# ------------------------------------------------------------------
 # Full sync orchestrator
 # ------------------------------------------------------------------
 
@@ -373,13 +431,16 @@ def sync_all_emails(
 	user: User,
 	service,
 	*,
+	initial_limit: int = 100,
 	progress_callback=None,
 ) -> dict:
-	"""Full mailbox sync: list → batch fetch → parse → store.
+	"""Synchronize a mailbox: sync labels → first 100 emails → background remaining.
 
-	progress_callback(stage, total, done) is called throughout:
-	  stage = "listing" | "fetching" | "storing" | "labels" | "completed"
+	Fetches the 100 most recent emails first so the user can quickly log in and
+	reach the dashboard. The remaining emails are fetched in background batches of 100.
 	"""
+	import threading
+
 	account = db.scalar(
 		select(GmailAccount).where(GmailAccount.user_id == user.id)
 	)
@@ -401,6 +462,9 @@ def sync_all_emails(
 	total_found = len(message_ids)
 
 	if total_found == 0:
+		account.last_synced_at = datetime.now(timezone.utc)
+		account.sync_status = "IDLE"
+		db.commit()
 		if progress_callback:
 			progress_callback("completed", 0, 0)
 		return {"emails_found": 0, "emails_synced": 0, "labels_synced": labels_count}
@@ -418,18 +482,21 @@ def sync_all_emails(
 	new_ids = [mid for mid in message_ids if mid not in existing_ids]
 	logger.info("Found %d messages, %d new to fetch", total_found, len(new_ids))
 
-	# 4. Batch-fetch full details for new messages only
-	if new_ids:
+	# 4. Take the 100 most recent new messages first for the initial sync
+	initial_ids = new_ids[:initial_limit]
+	remaining_ids = new_ids[initial_limit:]
+
+	if initial_ids:
 		if progress_callback:
-			progress_callback("fetching", len(new_ids), 0)
+			progress_callback("fetching", len(initial_ids), 0)
 		raw_messages = _batch_fetch_messages(
-			service, new_ids, progress_callback=progress_callback,
+			service, initial_ids, progress_callback=progress_callback,
 		)
 
 		# 5. Parse
 		parsed = [_parse_message(msg) for msg in raw_messages]
 
-		# 6. Store
+		# 6. Store initial 100
 		if progress_callback:
 			progress_callback("storing", len(parsed), 0)
 		emails_stored = _store_messages(
@@ -438,13 +505,32 @@ def sync_all_emails(
 	else:
 		emails_stored = 0
 
+	account.last_synced_at = datetime.now(timezone.utc)
+	account.sync_status = "IDLE"
+	db.commit()
+
 	if progress_callback:
-		progress_callback("completed", total_found, emails_stored)
+		progress_callback("completed", len(initial_ids), emails_stored)
+
+	# 7. In the background, sync all remaining emails in batches of 100
+	if remaining_ids:
+		logger.info(
+			"Launching background sync thread for %d remaining emails (account %s)",
+			len(remaining_ids), account.id,
+		)
+		bg_thread = threading.Thread(
+			target=_sync_remaining_emails_worker,
+			args=(user.id, account.id, remaining_ids),
+			name=f"bg-sync-{str(account.id)[:8]}",
+			daemon=True,
+		)
+		bg_thread.start()
 
 	return {
-		"emails_found": total_found,
+		"emails_found": len(initial_ids) if initial_ids else total_found,
 		"emails_synced": emails_stored + len(existing_ids),
 		"labels_synced": labels_count,
+		"total_in_mailbox": total_found,
 	}
 
 
@@ -581,7 +667,9 @@ def _store_emails_legacy(
 				except Exception:
 					continue
 			if label is not None:
-				db.add(EmailLabel(email_id=email.id, label_id=label.id))
+				exists_link = db.get(EmailLabel, (email.id, label.id))
+				if exists_link is None:
+					db.add(EmailLabel(email_id=email.id, label_id=label.id, gmail_account_id=gmail_account_id))
 
 		stored.append(email)
 

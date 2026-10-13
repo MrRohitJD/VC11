@@ -62,4 +62,16 @@ export const importEmailsFile = (formData) => api.post('/api/export/import', for
 export const getGoogleAuthUrl = () => `${API_BASE}/api/auth/google`;
 export const getSyncStreamUrl = () => `${API_BASE}/api/gmail/sync/stream`;
 
+// RAG AI Assistant endpoints
+export const sendRagChat = (data) => api.post('/api/rag/chat', data);
+export const getRagStatus = () => api.get('/api/rag/status');
+export const triggerRagIndex = (data = {}) => api.post('/api/rag/index', data);
+export const getRagSessions = (limit = 20) => api.get('/api/rag/sessions', { params: { limit } });
+export const getRagSession = (sessionId) => api.get(`/api/rag/sessions/${sessionId}`);
+export const deleteRagSession = (sessionId) => api.delete(`/api/rag/sessions/${sessionId}`);
+export const getRagApprovals = (statusFilter) => api.get('/api/rag/approvals', { params: { status_filter: statusFilter } });
+export const approveRagEmail = (approvalId) => api.post(`/api/rag/approvals/${approvalId}/approve`);
+export const rejectRagEmail = (approvalId) => api.post(`/api/rag/approvals/${approvalId}/reject`);
+export const getRagSourceEmail = (emailId) => api.get(`/api/rag/sources/${emailId}`);
+
 export default api;

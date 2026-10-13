@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user
 from app.database.connection import get_db, SessionLocal
-from app.models.email import User
+from app.models.email import GmailAccount, User
 from app.services.gmail_service import build_gmail_service_for_user, sync_all_emails
 
 logger = logging.getLogger(__name__)
@@ -71,9 +71,27 @@ def _run_sync_in_thread(user_id_str: str, user_id: UUID):
 				state["emails_synced"] = done
 
 		result = sync_all_emails(db, user, service, progress_callback=progress_callback)
+		
+		# Always ensure AI classification is enabled and triggered on initial sync / login
+		account = db.query(GmailAccount).filter(GmailAccount.user_id == user.id).first()
+		if account:
+			account.ai_classification_enabled = True
+			account.sync_status = "IDLE"
+			db.commit()
+			try:
+				from app.services.llm_classification_service import (
+					enqueue_classification_job,
+					trigger_immediate_classification,
+				)
+				enqueue_classification_job(account.id, job_type="INITIAL")
+				trigger_immediate_classification()
+			except Exception as llm_exc:
+				logger.warning("Failed to enqueue initial LLM classification: %s", llm_exc)
+
 		_sync_state[user_id_str] = {
 			"status": "completed",
-			"stage": "completed",
+			"stage": "ai_labels",
+			"ai_labels_status": "queued",
 			"emails_found": result["emails_found"],
 			"emails_synced": result["emails_synced"],
 			"labels_synced": result["labels_synced"],

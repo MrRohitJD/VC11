@@ -29,7 +29,7 @@ from app.services.llm_provider import PROMPT_VERSION, classify_emails_batch
 logger = logging.getLogger(__name__)
 
 # Default batch size for LLM requests
-_BATCH_SIZE = 25
+_BATCH_SIZE = 15
 
 # In-memory job state per account (keyed by str(gmail_account_id))
 _job_state: dict[str, dict] = {}

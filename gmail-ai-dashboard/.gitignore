@@ -43,6 +43,9 @@ frontend/dist/
 *.db
 *.sqlite
 *.sqlite3
+backend/data/
+**/chroma/
+**/test_chroma_*/
 
 # Private or generated datasets
 *.csv
