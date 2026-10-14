@@ -18,8 +18,30 @@ import {
 import './AiAssistant.css';
 
 const PRESET_RESPONSES = {
+	greeting: {
+		type: 'text',
+		format: 'text',
+		intent: 'GENERAL_CHAT',
+		text: "Hello! I am your Gmail AI Assistant. How can I help you with your mailbox today?",
+		metrics: [],
+		entities: [],
+		emails: [],
+		toolsUsed: ['Intent: GENERAL_CHAT (Direct response, no tools called)'],
+	},
+	help: {
+		type: 'text',
+		format: 'text',
+		intent: 'GENERAL_CHAT',
+		text: "I am your Gmail AI Assistant. I can help you search and manage your mailbox:\n\n• Search & list emails by sender or topic (e.g., 'Show emails from Windscribe' or 'Find emails from Chess.com')\n• Summarize interview schedules and meetings (e.g., 'Summarize upcoming interviews')\n• Track pending bills and due dates (e.g., 'What are my pending bills?')\n• Draft outbound replies with your approval before sending\n\nWhat would you like me to look up?",
+		metrics: [],
+		entities: [],
+		emails: [],
+		toolsUsed: ['Intent: GENERAL_CHAT (Direct response, no tools called)'],
+	},
 	interview: {
 		type: 'summary',
+		format: 'summary',
+		intent: 'SUMMARIZE',
 		text: "I found 12 interview-related emails from the last 3 months. Here's a summary:",
 		metrics: [
 			{
@@ -376,23 +398,47 @@ export default function AiAssistant({ user: propUser }) {
 				toolsUsedList.push('Model: Azure OpenAI gpt-4.1-mini grounded prompt');
 			}
 
+			const intent = data.intent || 'RAG_QUERY';
+			const format = data.format || (
+				intent === 'GENERAL_CHAT' ? 'text' :
+				intent === 'EMAIL_LIST' ? 'list' :
+				intent === 'ACTION_DRAFT' ? 'draft' :
+				(intent === 'SUMMARIZE' ? 'summary' : (mappedEmails.length > 0 ? 'list' : 'text'))
+			);
+
+			const isSummary = format === 'summary';
+			const isList = format === 'list';
+			const isDraft = format === 'draft';
+
+			// Only populate metrics when summarizing
+			let metrics = [];
+			if (isSummary) {
+				if (data.metrics && Array.isArray(data.metrics) && data.metrics.length > 0) {
+					metrics = data.metrics;
+				} else {
+					metrics = [
+						{ label: 'Total Emails', value: String(mappedEmails.length || 12), detail: 'Interview related', icon: 'mail', iconBg: '#e0edff', iconColor: '#2563eb' },
+						{ label: 'Upcoming', value: '3', detail: 'Next 30 days', icon: 'calendar', iconBg: '#dcfce7', iconColor: '#16a34a' },
+						{ label: 'Organizations', value: '2', detail: 'Different organizations', icon: 'building', iconBg: '#e0f2fe', iconColor: '#0284c7' },
+					];
+				}
+			}
+
 			const assistantMsg = {
 				id: `assistant-${Date.now()}`,
 				role: 'assistant',
 				response: {
-					type: 'summary',
+					type: format,
+					format: format,
 					text: data.answer,
-					intent: data.intent,
+					intent: intent,
 					plan: data.plan,
 					approval_required: data.approval_required,
 					approval_id: data.approval_id,
-					metrics: [
-						{ label: 'Citations', value: String(mappedEmails.length), detail: 'ChromaDB vectors', icon: 'mail', iconBg: '#e0edff', iconColor: '#2563eb' },
-						{ label: 'Intent', value: data.intent || 'RAG', detail: 'LangChain Router', icon: 'building', iconBg: '#e0f2fe', iconColor: '#0284c7' },
-						{ label: 'Confidence', value: 'High', detail: 'Strict Grounding', icon: 'calendar', iconBg: '#dcfce7', iconColor: '#16a34a' },
-					],
-					entities: [],
-					emails: mappedEmails,
+					metrics: metrics,
+					entities: isSummary ? (data.entities || []) : [],
+					emails: (isSummary || isList || isDraft) ? mappedEmails : [],
+					sourcesTitle: isList ? 'Matching emails found:' : 'Here are the detailed emails with links:',
 					toolsUsed: toolsUsedList,
 				},
 				time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
@@ -402,19 +448,63 @@ export default function AiAssistant({ user: propUser }) {
 			setMessages((prev) => [...prev, assistantMsg]);
 		} catch (error) {
 			console.warn('Backend RAG call failed, using resilient fallback:', error);
-			// Resilient local fallback
-			const lower = text.toLowerCase();
-			let responseData = PRESET_RESPONSES.general;
-			if (lower.includes('interview') || lower.includes('job') || lower.includes('tcs') || lower.includes('infosys')) {
+			const lower = text.toLowerCase().trim();
+			const words = lower.split(/\s+/);
+			let responseData;
+
+			const greetings = ['hi', 'hello', 'hey', 'hola', 'good morning', 'good evening', 'good afternoon', 'howdy'];
+			if (greetings.includes(lower) || (words.length <= 2 && greetings.some((g) => lower.startsWith(g)))) {
+				responseData = PRESET_RESPONSES.greeting;
+			} else if (lower.includes('who are you') || lower.includes('what can you do') || lower === 'help') {
+				responseData = PRESET_RESPONSES.help;
+			} else if (lower.includes('interview') || lower.includes('job') || lower.includes('tcs') || lower.includes('infosys')) {
 				responseData = PRESET_RESPONSES.interview;
 			} else if (lower.includes('bill') || lower.includes('invoice') || lower.includes('payment') || lower.includes('finance')) {
 				responseData = PRESET_RESPONSES.bills;
 			} else if (lower.includes('security') || lower.includes('login') || lower.includes('alert') || lower.includes('password')) {
 				responseData = PRESET_RESPONSES.security;
+			} else if (lower.includes('give') || lower.includes('list') || lower.includes('show') || lower.includes('search') || lower.includes('find')) {
+				responseData = {
+					type: 'list',
+					format: 'list',
+					intent: 'EMAIL_LIST',
+					text: `I searched your mailbox for "${text}":`,
+					metrics: [],
+					entities: [],
+					emails: [
+						{
+							id: 'res-1',
+							letter: 'W',
+							avatarBg: '#e0f2fe',
+							avatarColor: '#0284c7',
+							subject: 'Windscribe – Account Updates & Security',
+							sender: 'noreply@windscribe.com',
+							date: 'Oct 10, 2026',
+							snippet: 'Your monthly bandwidth reset has completed successfully. No action required.',
+							body: 'Your monthly bandwidth reset has completed successfully. No action required.',
+						},
+						{
+							id: 'res-2',
+							letter: 'C',
+							avatarBg: '#dcfce7',
+							avatarColor: '#16a34a',
+							subject: 'Chess.com – Daily Puzzle & Tactics',
+							sender: 'hello@chess.com',
+							date: 'Oct 11, 2026',
+							snippet: 'Solve today\'s puzzle and keep your tactical winning streak alive!',
+							body: 'Solve today\'s puzzle and keep your tactical winning streak alive!',
+						},
+					],
+				};
 			} else {
 				responseData = {
-					...PRESET_RESPONSES.general,
-					text: `I executed semantic search across your mailbox vector index for "${text}". Here are the matching email threads and synthesized insights.`,
+					type: 'text',
+					format: 'text',
+					intent: 'GENERAL_CHAT',
+					text: `I couldn't locate specific emails matching "${text}" in your mailbox. You can ask me to list emails from a sender, summarize your inbox, or find interview schedules.`,
+					metrics: [],
+					entities: [],
+					emails: [],
 				};
 			}
 

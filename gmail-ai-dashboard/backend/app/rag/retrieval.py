@@ -349,6 +349,15 @@ class GmailCustomHybridRetriever(BaseRetriever):
         docs = retriever.invoke(keyword or "")
         return documents_to_citations(docs)
 
+    def retrieve_sql_metadata(
+        self,
+        db: Session,
+        query: str,
+        user_id: UUID | str,
+        top_k: int = 5,
+    ) -> List[RetrievedCitation]:
+        return self.retrieve_structured_sql(db=db, user_id=user_id, keyword=query, limit=top_k)
+
     def retrieve_hybrid(
         self,
         db: Session,

@@ -19,9 +19,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -33,8 +34,17 @@ from langchain_core.messages import (
 )
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.models.email import (
+    AiCategory,
+    Email,
+    EmailClassification,
+    EmailLabel,
+    GmailAccount,
+    Label,
+)
 from app.models.rag import ChatMessage, ChatSession, EmailSendApproval
 from app.rag.chains import GroundedRAGChain, get_chat_model
 from app.rag.memory import (
@@ -122,6 +132,84 @@ class AgentResponse:
     approval_id: Optional[str] = None
     session_id: Optional[str] = None
     message_id: Optional[str] = None
+    format: str = "text"
+    metrics: Optional[List[Dict[str, Any]]] = None
+
+
+def extract_search_keyword(query: str) -> str:
+    """Extract the core search topic, sender, or keyword from a natural language query."""
+    clean_q = query.strip()
+    lower_q = clean_q.lower()
+
+    # 1. Strip leading action prefixes
+    prefixes = [
+        "give those emails as coming from", "give those emails from", "give emails as coming from",
+        "give emails coming from", "give emails from", "give mails from", "give mail from",
+        "give me emails from", "give me mails from", "give me email from", "give me emails about",
+        "give me mails about", "give me emails regarding", "give me mails regarding",
+        "give me a brief summary of all incoming emails received",
+        "give me a brief summary of all emails received",
+        "give me a summary of all incoming emails received",
+        "give me a summary of all emails received",
+        "give me a brief summary of", "give me a summary of",
+        "brief summary of all incoming emails received",
+        "summary of all incoming emails received",
+        "summary of incoming emails received",
+        "summary of emails received",
+        "summary of emails", "summary of mails",
+        "list emails from", "list mails from", "list email from", "list mail from",
+        "show emails from", "show mails from", "show email from", "show mail from",
+        "search emails from", "search mails from", "search email from", "search mail from",
+        "find emails from", "find mails from", "find email from", "find mail from",
+        "get emails from", "get mails from", "get email from", "get mail from",
+        "emails coming from", "mails coming from", "emails from", "mails from", "coming from",
+        "search emails regarding", "search mails regarding", "search email regarding",
+        "search emails about", "search mails about", "search email about",
+        "search emails for", "search mails for", "search email for",
+        "find emails regarding", "find mails regarding", "find emails about", "find mails about",
+        "show emails regarding", "show mails regarding", "show emails about", "show mails about",
+        "give emails regarding", "give mails regarding", "give emails about", "give mails about",
+        "search emails", "search mails", "search email", "search mail",
+        "find emails", "find mails", "find email", "find mail",
+        "list emails", "list mails", "list email", "list mail",
+        "show emails", "show mails", "show email", "show mail",
+        "give emails", "give mails", "give email", "give mail",
+        "get emails", "get mails", "get email", "get mail",
+        "filter emails", "filter mails",
+    ]
+
+    extracted = lower_q
+    for p in prefixes:
+        if extracted.startswith(p):
+            extracted = extracted[len(p):].strip()
+            break
+        elif f" {p} " in f" {extracted} ":
+            extracted = re.sub(r"\b" + re.escape(p) + r"\b", " ", extracted).strip()
+            break
+
+    # 2. Strip leading stop words / prepositions
+    leading_stops = ["about", "regarding", "for", "from", "of", "on", "with", "as", "to", "me"]
+    words = extracted.split()
+    while words and words[0] in leading_stops:
+        words = words[1:]
+    extracted = " ".join(words).strip()
+
+    # 3. Strip trailing noise phrases
+    trailing_phrases = [
+        "related mails", "related emails", "related mail", "related email",
+        "related messages", "related message", "related",
+        "incoming emails", "incoming mails", "incoming mail", "incoming email",
+        "emails", "mails", "email", "mail", "messages", "message"
+    ]
+    for tp in trailing_phrases:
+        if extracted.endswith(tp):
+            extracted = extracted[:-len(tp)].strip()
+            break
+
+    # Clean punctuation
+    extracted = re.sub(r"^[\s.:,;\"'!?]+|[\s.:,;\"'!?]+$", "", extracted).strip()
+
+    return extracted or lower_q
 
 
 class GmailAIAssistant:
@@ -131,7 +219,7 @@ class GmailAIAssistant:
         self,
         model: Optional[BaseChatModel] = None,
         retriever: Optional[GmailHybridRetriever] = None,
-        max_agent_iterations: int = 6,
+        max_agent_iterations: int = 10,
     ):
         self.model = model or get_chat_model()
         self.retriever = retriever or default_retriever
@@ -145,30 +233,52 @@ class GmailAIAssistant:
     def route_intent(self, query: str) -> str:
         """Classify user query into an actionable routing category."""
         clean_q = query.strip().lower()
+        words = re.findall(r"\w+", clean_q)
 
-        # Fast heuristic checks
+        # 1. Fast check for calendar date / current time inquiries
+        date_phrases = ["todays date", "today's date", "what is today's date", "what is the date", "what date is it", "current date", "what date today", "what time is it"]
+        if any(dp in clean_q for dp in date_phrases) and not any(w in clean_q for w in ["mail", "email", "summary", "summarize", "received"]):
+            return "CURRENT_DATE"
+
+        # 2. Fast check for date-bounded or incoming email summaries/requests
+        date_summary_patterns = [
+            "received today", "emails today", "mails today", "incoming emails received today",
+            "received this week", "emails this week", "mails this week", "incoming emails received this week",
+            "received yesterday", "emails yesterday", "mails yesterday",
+            "received this month", "emails this month", "mails this month",
+            "incoming emails", "incoming mails", "recent emails", "recent mails", "latest emails"
+        ]
+        if any(dsp in clean_q for dsp in date_summary_patterns):
+            return "DATE_SUMMARY"
+
+        # 3. Fast check for greetings and conversational small talk (NO tool calling!)
+        greetings = {"hi", "hello", "hey", "hola", "howdy", "sup", "yo", "greetings", "good morning", "good evening", "good afternoon", "hi there", "hello there", "hey there"}
+        if clean_q in greetings:
+            return "GENERAL_CHAT"
+
+        small_talk = ["who are you", "what can you do", "what are you", "help me", "how to use", "how does this work", "thanks", "thank you", "bye", "goodbye"]
+        if any(phrase in clean_q for phrase in small_talk) and len(words) <= 8:
+            return "GENERAL_CHAT"
+
+        # 4. Fast check for Action / Send / Approve
         if any(w in clean_q for w in ["send the draft", "approve send", "send approval", "send email", "send this draft"]):
             return "ACTION_SEND"
-        if (" and " in clean_q or "then" in clean_q) and len(clean_q.split()) > 10:
-            if any(w in clean_q for w in ["draft", "summarize", "find", "extract"]):
-                return "PLAN_AND_EXECUTE"
-        if any(w in clean_q for w in ["summarize my inbox", "summary of emails", "summarize unread", "inbox recap"]):
-            return "SUMMARIZE"
-        if any(w in clean_q for w in ["draft", "compose", "write an email", "prepare an email"]):
+
+        # 5. Fast check for Action / Draft
+        if any(w in clean_q for w in ["draft a reply", "draft reply", "compose an email", "compose email", "write an email", "prepare an email", "send mail to", "send an email to", "reply to"]):
             return "ACTION_DRAFT"
 
-        # LLM router classification
-        try:
-            chain = ROUTER_PROMPT | self.model | self.output_parser
-            decision = chain.invoke({"query": query}).strip()
-            valid_intents = {"RAG_QUERY", "ACTION_DRAFT", "ACTION_SEND", "PLAN_AND_EXECUTE", "SUMMARIZE", "GENERAL_CHAT"}
-            for vi in valid_intents:
-                if vi in decision:
-                    return vi
-        except Exception as exc:
-            logger.debug("Router LLM invocation fallback: %s", exc)
+        # 6. Fast check for complex multi-step Plan & Execute
+        if (" and " in clean_q or "then" in clean_q) and len(words) > 10:
+            if any(w in clean_q for w in ["draft", "summarize", "find", "extract"]):
+                return "PLAN_AND_EXECUTE"
 
-        return "RAG_QUERY"
+        # 7. Fast check for Summaries & Timelines (interviews, bills, etc.)
+        if any(w in clean_q for w in ["summarize", "summary", "overview", "recap", "interview", "schedule", "pending bills", "due dates", "upcoming"]):
+            return "SUMMARIZE"
+
+        # 8. All other queries (including keywords like "chess", "bills", "meetings", or explicit search phrases) route to EMAIL_LIST
+        return "EMAIL_LIST"
 
     # ------------------------------------------------------------------------
     # Pattern 7: Query Transformation
@@ -176,6 +286,19 @@ class GmailAIAssistant:
     def transform_query(self, query: str, history: List[BaseMessage]) -> str:
         """Rewrite contextual follow-up questions into standalone retrieval queries."""
         if not history:
+            return query
+
+        clean_q = query.strip().lower()
+        greetings = {"hi", "hello", "hey", "hola", "howdy", "sup", "yo", "greetings", "good morning", "good evening", "good afternoon"}
+        if clean_q in greetings or len(clean_q.split()) <= 2:
+            return query
+
+        # Fast exit for explicit standalone search, list, or summary queries
+        standalone_indicators = [
+            "give ", "list ", "show ", "search ", "find ", "get ", "from ", "coming from",
+            "summarize ", "overview ", "bills", "interview", "draft ", "compose ", "send "
+        ]
+        if any(ind in clean_q for ind in standalone_indicators):
             return query
 
         # Format past few turns
@@ -462,6 +585,7 @@ class GmailAIAssistant:
 
         # 2. Pattern 7: Query Transformation (Contextual Resolution)
         effective_query = self.transform_query(query, existing_history)
+        clean_q = effective_query.strip().lower()
 
         # 3. Pattern 3: Router Pattern
         intent = self.route_intent(effective_query)
@@ -475,8 +599,202 @@ class GmailAIAssistant:
         approval_required: bool = False
         approval_id: Optional[str] = None
 
+        format_type = "text"
+        metrics: Optional[List[Dict[str, Any]]] = None
+
         # 4. Dispatch based on intent
-        if intent == "PLAN_AND_EXECUTE":
+        if intent == "CURRENT_DATE":
+            try:
+                now_local = datetime.now(ZoneInfo("Asia/Calcutta"))
+            except Exception:
+                now_local = datetime.now()
+            answer = f"Today's date is {now_local.strftime('%A, %B %d, %Y')}."
+            citations = []
+            steps = [{"step": 1, "thought": "Calendar date inquiry", "action": "direct_response", "observation": "Provided current date"}]
+            format_type = "text"
+
+        elif intent == "DATE_SUMMARY":
+            try:
+                now_local = datetime.now(ZoneInfo("Asia/Calcutta"))
+            except Exception:
+                now_local = datetime.now()
+
+            is_today = "today" in clean_q
+            is_yesterday = "yesterday" in clean_q
+            is_this_week = any(w in clean_q for w in ["this week", "past week", "last week", "7 days", "week"])
+            is_this_month = any(w in clean_q for w in ["this month", "past month", "last month", "30 days", "month"])
+
+            start_date = None
+            end_date = None
+            period_label = "recently"
+
+            if is_today:
+                start_date = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+                period_label = f"today ({now_local.strftime('%A, %B %d, %Y')})"
+            elif is_yesterday:
+                start_date = (now_local - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                end_date = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+                period_label = f"yesterday ({(now_local - timedelta(days=1)).strftime('%B %d, %Y')})"
+            elif is_this_week:
+                start_date = now_local - timedelta(days=7)
+                period_label = "this week (past 7 days)"
+            elif is_this_month:
+                start_date = now_local - timedelta(days=30)
+                period_label = "this month (past 30 days)"
+
+            q = (
+                db.query(Email)
+                .join(GmailAccount, Email.gmail_account_id == GmailAccount.id)
+                .filter(GmailAccount.user_id == user_uuid)
+            )
+            if start_date:
+                q = q.filter(Email.received_at >= start_date)
+            if end_date:
+                q = q.filter(Email.received_at < end_date)
+
+            period_emails = q.order_by(Email.received_at.desc()).all()
+
+            if len(period_emails) == 0:
+                latest = (
+                    db.query(Email)
+                    .join(GmailAccount, Email.gmail_account_id == GmailAccount.id)
+                    .filter(GmailAccount.user_id == user_uuid)
+                    .order_by(Email.received_at.desc())
+                    .first()
+                )
+                latest_str = ""
+                if latest and latest.received_at:
+                    try:
+                        rec_loc = latest.received_at.astimezone(ZoneInfo("Asia/Calcutta")) if latest.received_at.tzinfo else latest.received_at
+                    except Exception:
+                        rec_loc = latest.received_at
+                    latest_str = f" Your most recent email arrived on {rec_loc.strftime('%B %d, %Y at %I:%M %p')} from {latest.from_email} ('{latest.subject}')."
+
+                recent_citations = (
+                    db.query(Email)
+                    .join(GmailAccount, Email.gmail_account_id == GmailAccount.id)
+                    .filter(GmailAccount.user_id == user_uuid)
+                    .order_by(Email.received_at.desc())
+                    .limit(top_k)
+                    .all()
+                )
+                answer = f"You have not received any incoming emails {period_label} yet.{latest_str} Here are your most recent messages:"
+                citations = [
+                    RetrievedCitation(
+                        email_id=str(e.id),
+                        subject=e.subject or "(No Subject)",
+                        sender=e.from_email or "Unknown",
+                        date=str(e.received_at).split("T")[0] if e.received_at else "Recent",
+                        snippet=e.snippet or (e.body[:150] if e.body else ""),
+                        score=0.95,
+                    )
+                    for e in recent_citations
+                ]
+                format_type = "list"
+            else:
+                senders = {}
+                for e in period_emails:
+                    s_clean = e.from_email.split("<")[0].strip().replace('"', '') if e.from_email else "Unknown"
+                    senders[s_clean] = senders.get(s_clean, 0) + 1
+                top_senders = sorted(senders.items(), key=lambda x: x[1], reverse=True)[:3]
+                top_senders_str = ", ".join([f"{name} ({c})" for name, c in top_senders])
+
+                answer = (
+                    f"You received {len(period_emails)} incoming email(s) {period_label}. "
+                    f"Top senders include {top_senders_str}. "
+                    f"Here is the breakdown of your messages:"
+                )
+                citations = [
+                    RetrievedCitation(
+                        email_id=str(e.id),
+                        subject=e.subject or "(No Subject)",
+                        sender=e.from_email or "Unknown",
+                        date=str(e.received_at).split("T")[0] if e.received_at else "Recent",
+                        snippet=e.snippet or (e.body[:150] if e.body else ""),
+                        score=0.95,
+                    )
+                    for e in period_emails[:top_k]
+                ]
+                format_type = "summary"
+                metrics = [
+                    {"label": "Total Emails", "value": str(len(period_emails)), "detail": period_label, "icon": "mail", "iconBg": "#e0edff", "iconColor": "#2563eb"},
+                    {"label": "Active Senders", "value": str(len(senders)), "detail": "Unique contacts", "icon": "building", "iconBg": "#e0f2fe", "iconColor": "#0284c7"},
+                    {"label": "Latest Date", "value": str(period_emails[0].received_at).split("T")[0] if period_emails[0].received_at else "Recent", "detail": "Most recent email", "icon": "calendar", "iconBg": "#dcfce7", "iconColor": "#16a34a"},
+                ]
+
+            steps = [{"step": 1, "thought": "Date-bounded email summary", "action": "date_filter", "observation": f"Retrieved {len(citations)} emails"}]
+
+        elif intent == "GENERAL_CHAT":
+            # Strict no-tool policy: greetings and conversational small-talk never search emails
+            if any(w in clean_q for w in ["who are you", "what can you do", "what are you", "help"]):
+                answer = (
+                    "I am your Gmail AI Assistant. I can help you search and manage your mailbox:\n\n"
+                    "• **Search & list emails** by sender or topic (e.g., 'Show emails from Windscribe' or 'Find emails from Chess.com')\n"
+                    "• **Summarize interview schedules and meetings** (e.g., 'Summarize upcoming interviews')\n"
+                    "• **Track pending bills & due dates** (e.g., 'What are my pending bills?')\n"
+                    "• **Draft outbound replies** with your human authorization before sending\n\n"
+                    "How can I assist you today?"
+                )
+            else:
+                answer = "Hello! I am your Gmail AI Assistant. How can I help you with your mailbox today?"
+            citations = []
+            steps = [{"step": 1, "thought": "Greeting or conversation query", "action": "direct_response", "observation": "Direct conversational response without tool execution"}]
+            format_type = "text"
+
+        elif intent == "EMAIL_LIST":
+            format_type = "list"
+            extracted_term = extract_search_keyword(effective_query)
+
+            matching_emails = []
+            if extracted_term:
+                singular = extracted_term[:-1] if extracted_term.endswith("s") and len(extracted_term) > 3 else extracted_term
+                query_filter = (
+                    Email.from_email.ilike(f"%{extracted_term}%")
+                    | Email.sender_name.ilike(f"%{extracted_term}%")
+                    | Email.subject.ilike(f"%{extracted_term}%")
+                    | Email.snippet.ilike(f"%{extracted_term}%")
+                    | Email.body.ilike(f"%{extracted_term}%")
+                    | Email.labels.any(EmailLabel.label.has(Label.name.ilike(f"%{extracted_term}%")))
+                    | Email.classifications.any(EmailClassification.category.has(AiCategory.name.ilike(f"%{extracted_term}%")))
+                    | Email.subject.ilike(f"%{singular}%")
+                    | Email.snippet.ilike(f"%{singular}%")
+                    | Email.body.ilike(f"%{singular}%")
+                    | Email.labels.any(EmailLabel.label.has(Label.name.ilike(f"%{singular}%")))
+                    | Email.classifications.any(EmailClassification.category.has(AiCategory.name.ilike(f"%{singular}%")))
+                )
+                matching_emails = (
+                    db.query(Email)
+                    .join(GmailAccount, Email.gmail_account_id == GmailAccount.id)
+                    .filter(GmailAccount.user_id == user_uuid, query_filter)
+                    .order_by(Email.received_at.desc())
+                    .limit(top_k)
+                    .all()
+                )
+
+            if not matching_emails and extracted_term:
+                citations = self.retriever.retrieve_sql_metadata(db, extracted_term, user_uuid, top_k=top_k)
+            else:
+                citations = [
+                    RetrievedCitation(
+                        email_id=str(e.id),
+                        subject=e.subject or "(No Subject)",
+                        sender=e.from_email or "Unknown",
+                        date=str(e.received_at).split("T")[0] if e.received_at else "Recent",
+                        snippet=e.snippet or (e.body[:150] if e.body else ""),
+                        score=0.95,
+                    )
+                    for e in matching_emails
+                ]
+
+            if citations:
+                answer = f"I found {len(citations)} email(s) matching '{extracted_term}':"
+            else:
+                answer = f"I searched your mailbox for '{extracted_term}', but found no matching emails."
+                format_type = "text"
+
+            steps = [{"step": 1, "thought": "Mailbox email search", "action": "list_emails", "observation": f"Retrieved {len(citations)} emails"}]
+
+        elif intent == "PLAN_AND_EXECUTE":
             # Pattern 5
             answer, plan, steps, citations = self.execute_plan_and_execute(
                 query=effective_query,
@@ -484,8 +802,10 @@ class GmailAIAssistant:
                 user_id=user_uuid,
                 tools=tools,
             )
-        elif intent == "RAG_QUERY":
-            # Pattern 1 & 9: Grounded RAG + Hybrid Retrieval + HistoryAware + MultiQuery
+            format_type = "summary" if citations else "text"
+
+        elif intent in ["RAG_QUERY", "SUMMARIZE"]:
+            # Pattern 1 & 9: Grounded RAG + Hybrid Retrieval
             rag_output = self.rag_chain.answer_query(
                 db=db,
                 query=effective_query,
@@ -504,10 +824,11 @@ class GmailAIAssistant:
                 "arguments": {"query": effective_query, "top_k": top_k, "multi_query": use_multi_query},
                 "observation": f"Retrieved {len(citations)} source citations.",
             }]
+            format_type = "summary" if citations else "text"
+
         elif intent == "ACTION_DRAFT":
             # Pattern 2 & 6: Tool-Calling + Human-in-the-Loop Drafting
             answer, citations, steps = self.execute_react_agent(effective_query, db, user_uuid, tools)
-            # Check if pending approval was generated
             pending_appr = db.query(EmailSendApproval).filter(
                 EmailSendApproval.user_id == user_uuid,
                 EmailSendApproval.status == "PENDING",
@@ -516,15 +837,21 @@ class GmailAIAssistant:
                 approval_required = True
                 approval_id = str(pending_appr.id)
                 answer += f"\n\n[Action Required] Created draft for '{pending_appr.recipient_email}' (Approval ID: {approval_id}). Please approve before sending."
+            format_type = "draft"
+
         elif intent == "ACTION_SEND":
             # Pattern 6: Human-in-the-Loop Send Authorization
             answer, citations, steps = self.execute_react_agent(effective_query, db, user_uuid, tools)
+            format_type = "draft" if approval_required else "text"
+
         else:
             # Pattern 10: Fallback execution
             answer, citations, steps = self.execute_with_fallback(effective_query, db, user_uuid, tools)
+            format_type = "list" if citations else "text"
 
         # Pattern 8: Contextual Compression
-        citations = self.compress_context(citations, max_chunks=5)
+        if citations:
+            citations = self.compress_context(citations, max_chunks=5)
 
         # 5. Persist Assistant Response & Citations
         asst_msg = ChatMessage(
@@ -555,6 +882,8 @@ class GmailAIAssistant:
             approval_id=approval_id,
             session_id=str(session.id),
             message_id=str(asst_msg.id),
+            format=format_type,
+            metrics=metrics,
         )
 
 

@@ -63,27 +63,51 @@ def get_chat_model() -> BaseChatModel:
                 api_version=settings.azure_openai_api_version,
                 azure_deployment="gpt-4.1-mini",
                 temperature=0.1,
+                timeout=15,
             )
         except Exception as exc:
             logger.warning("Could not initialize AzureChatOpenAI (%s). Falling back.", exc)
 
+    # Priority 2: NVIDIA NIM
+    if settings.nvidia_api_key:
+        try:
+            from langchain_nvidia_ai_endpoints import ChatNVIDIA
+            return ChatNVIDIA(
+                model="openai/gpt-oss-20b",
+                api_key=settings.nvidia_api_key,
+                temperature=0.1,
+                timeout=15,
+            )
+        except Exception as exc:
+            logger.debug("ChatNVIDIA initialization skipped (%s)", exc)
+
+    # Priority 3: ExperientialLabs DeepSeek
+    if settings.explabs_api_key:
+        try:
+            return ChatOpenAI(
+                model="deepseek-v4-flash",
+                base_url="https://api.experientiallabs.ai/v1",
+                api_key=settings.explabs_api_key,
+                temperature=0.1,
+                timeout=15,
+            )
+        except Exception as exc:
+            logger.debug("ExperientialLabs ChatOpenAI initialization skipped (%s)", exc)
+
+    # Priority 4: Standard ChatOpenAI
     if settings.openai_api_key:
         try:
             return ChatOpenAI(
                 api_key=settings.openai_api_key,
                 model="gpt-4o-mini",
                 temperature=0.1,
+                timeout=15,
             )
         except Exception:
             pass
 
-    # Use existing app LLM provider fallback
-    try:
-        from app.services.llm_provider import get_chat_model as get_app_chat_model
-        return get_app_chat_model()
-    except Exception:
-        # Fallback to local ChatOpenAI with dummy key for offline tests
-        return ChatOpenAI(api_key="sk-dummy", model="gpt-4o-mini", temperature=0.1)
+    # Fallback to local ChatOpenAI with dummy key for offline tests
+    return ChatOpenAI(api_key="sk-dummy", model="gpt-4o-mini", temperature=0.1)
 
 
 def format_context_from_citations(citations: List[RetrievedCitation]) -> str:

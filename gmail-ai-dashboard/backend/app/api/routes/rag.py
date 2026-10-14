@@ -55,8 +55,13 @@ def get_user_for_rag(request: Request, db: Session = Depends(get_db)) -> User:
     try:
         return get_current_user(request, db)
     except HTTPException:
-        # Development convenience: use first registered user if unauthenticated
-        user = db.scalar(select(User).limit(1))
+        # Development convenience: use active user with Gmail account if unauthenticated
+        user = (
+            db.query(User)
+            .join(GmailAccount, GmailAccount.user_id == User.id)
+            .first()
+            or db.scalar(select(User).limit(1))
+        )
         if user:
             return user
         # Auto-create dev user if table is empty
@@ -94,6 +99,7 @@ class CitationItem(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     intent: str
+    format: str = "text"
     citations: List[CitationItem]
     steps: List[Dict[str, Any]]
     plan: Optional[List[str]] = None
@@ -101,6 +107,7 @@ class ChatResponse(BaseModel):
     approval_id: Optional[str] = None
     session_id: str
     message_id: str
+    metrics: Optional[List[Dict[str, Any]]] = None
 
 
 class IndexRequest(BaseModel):
@@ -164,6 +171,7 @@ def chat_with_assistant(
         return ChatResponse(
             answer=agent_res.answer,
             intent=agent_res.intent,
+            format=getattr(agent_res, "format", "text"),
             citations=citation_items,
             steps=agent_res.steps,
             plan=agent_res.plan,
@@ -171,6 +179,7 @@ def chat_with_assistant(
             approval_id=agent_res.approval_id,
             session_id=agent_res.session_id or "",
             message_id=agent_res.message_id or "",
+            metrics=getattr(agent_res, "metrics", None),
         )
     except Exception as exc:
         logger.exception("RAG assistant execution error: %s", exc)
