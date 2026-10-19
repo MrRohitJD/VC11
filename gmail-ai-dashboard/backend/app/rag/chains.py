@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+from functools import lru_cache
 from typing import Any, List, Optional
 from uuid import UUID
 
@@ -33,8 +34,33 @@ except ImportError:
 
 from app.core.config import settings
 from app.rag.retrieval import RetrievedCitation, default_retriever
+from app.rag.query_constraints import mailbox_now, is_financial_query
+from app.rag.mailbox_scope import primary_email_ids
+from app.rag.relevance import validate_email_relevance
 
 logger = logging.getLogger(__name__)
+
+USER_RESPONSE_STYLE = """
+Write for the mailbox owner, using plain language and addressing them as "you".
+Mailbox searches and answers use only Gmail's Primary category. If no emails
+match, explicitly say no matching emails were found in Primary. Do not claim
+to have searched Social, Promotions, Updates, Forums, or the entire mailbox.
+Focus on their question and what they need to know or do. Do not describe internal
+routing, tools, execution plans, RAG, vector databases, or model configuration.
+For substantive mailbox answers, use this Markdown structure:
+## Summary
+Give the direct answer in one or two short sentences.
+## Key details
+Use concise bullets for relevant people, dates, amounts, and deadlines.
+## Next steps
+Include only when an action is relevant; use a short numbered list.
+## Related emails
+List supporting subjects, senders, and dates only when available.
+Omit empty sections. For greetings and simple questions, reply briefly without
+forcing headings. If nothing matches, say so and suggest a useful search refinement.
+Never invent facts, next steps, or sources to fill the structure. Describe drafts
+as awaiting review; only say an email was sent when the tool confirms success.
+"""
 
 RAG_SYSTEM_PROMPT = """You are an intelligent Gmail AI Assistant.
 Your task is to answer the user's questions about their emails accurately and truthfully.
@@ -42,14 +68,19 @@ Your task is to answer the user's questions about their emails accurately and tr
 STRICT INSTRUCTIONS:
 1. Base your answer ONLY on the provided email context.
 2. DO NOT fabricate, hallucinate, or assume email subjects, senders, dates, or contents that are not in the context.
-3. If the provided context is insufficient or contains no matching emails, clearly state: "I could not find relevant emails in your mailbox matching this request."
+3. If the provided context is insufficient or contains no matching emails, clearly state: "I could not find relevant emails in your Primary category matching this request."
 4. When referencing emails, cite the Sender, Subject, and Date clearly.
 5. Provide actionable insights, structured timelines, or next steps when answering about interviews, bills, or tasks.
 6. Present the key points extracted from the retrieved emails as bullet points, where each key point is in ONE SENTENCE MAXIMUM.
 
 EMAIL CONTEXT:
 {context}
-"""
+
+For bills or invoices, distinguish unpaid balances from receipts and paid
+confirmations. A message received this month is not evidence that its payment
+is due this month. Use explicit payment due dates and preserve their year.
+If payment status or the due date is unclear, state the uncertainty.
+""" + USER_RESPONSE_STYLE
 
 RAG_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
     ("system", RAG_SYSTEM_PROMPT),
@@ -57,45 +88,64 @@ RAG_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
 ])
 
 
-def get_chat_model() -> BaseChatModel:
+@lru_cache(maxsize=1)
+def get_chat_model() -> Any:
     """Instantiate and return the configured LangChain chat model.
 
     Priority:
-    1. Azure OpenAI (gpt-4.1-mini) if credentials and endpoint are present.
-    2. Fallback to existing LLM provider or standard ChatOpenAI.
+    NVIDIA first, followed by configured Azure/OpenAI and ExperientialLabs.
+    Failures use real provider fallbacks; no dummy credentials or local verdicts.
     """
+    models = []
+    if settings.nvidia_api_key:
+        try:
+            from langchain_nvidia_ai_endpoints import ChatNVIDIA
+            models.append(ChatNVIDIA(
+                model="openai/gpt-oss-20b", api_key=settings.nvidia_api_key,
+                temperature=0.1, max_completion_tokens=4096, timeout=60,
+                model_kwargs={"reasoning_effort": "low"},
+            ))
+        except Exception as exc:
+            logger.warning("NVIDIA assistant provider unavailable: %s", type(exc).__name__)
     has_azure_key = bool(settings.azure_openai_api_key and settings.azure_openai_api_key.strip())
     has_azure_endpoint = bool(settings.azure_openai_endpoint and settings.azure_openai_endpoint.strip())
 
     if has_azure_key and has_azure_endpoint:
         try:
-            return AzureChatOpenAI(
+            models.append(AzureChatOpenAI(
                 azure_endpoint=settings.azure_openai_endpoint,
                 api_key=settings.azure_openai_api_key,
                 api_version=settings.azure_openai_api_version,
-                azure_deployment="gpt-4.1-mini",
+                azure_deployment=getattr(settings, "azure_openai_deployment", "gpt-4.1-mini"),
                 temperature=0.1,
-            )
+                timeout=20, max_retries=0,
+            ))
         except Exception as exc:
             logger.warning("Could not initialize AzureChatOpenAI (%s). Falling back.", exc)
 
     if settings.openai_api_key:
         try:
-            return ChatOpenAI(
+            models.append(ChatOpenAI(
                 api_key=settings.openai_api_key,
                 model="gpt-4o-mini",
                 temperature=0.1,
-            )
+                timeout=20, max_retries=0,
+            ))
         except Exception:
             pass
 
-    # Use existing app LLM provider fallback
-    try:
-        from app.services.llm_provider import get_chat_model as get_app_chat_model
-        return get_app_chat_model()
-    except Exception:
-        # Fallback to local ChatOpenAI with dummy key for offline tests
-        return ChatOpenAI(api_key="sk-dummy", model="gpt-4o-mini", temperature=0.1)
+    if settings.explabs_api_key:
+        models.append(ChatOpenAI(
+            model="deepseek-v4-flash", base_url="https://api.experientiallabs.ai/v1",
+            api_key=settings.explabs_api_key, temperature=0.1, timeout=20, max_retries=0,
+        ))
+    if models:
+        return models[0].with_fallbacks(models[1:]) if len(models) > 1 else models[0]
+    # No dummy credentials: offline/unconfigured requests fail explicitly.
+    from langchain_core.runnables import RunnableLambda
+    def unavailable(_input):
+        raise RuntimeError("No assistant LLM provider is configured")
+    return RunnableLambda(unavailable)
 
 
 def format_context_from_citations(citations: List[RetrievedCitation]) -> str:
@@ -134,6 +184,7 @@ from app.rag.retrieval import (
     route_query_retrieval_strategy,
     should_fallback_to_hybrid,
     split_into_single_sentence_bullets,
+    hydrate_email_documents,
 )
 
 
@@ -153,7 +204,9 @@ def format_grounded_key_points_summary(citations: List[RetrievedCitation], query
     - Strips email header noise and deduplicates subjects.
     """
     if not citations:
-        return "I could not find relevant emails in your mailbox matching this request."
+        if is_financial_query(query):
+            return "I could not verify any matching bills or invoices in your Primary category with the requested payment status and due date."
+        return "I could not find relevant emails in your Primary category matching this request."
 
     bullets = []
     seen_subjects = set()
@@ -295,6 +348,10 @@ class GroundedRAGChain:
             logger.info("Rewrote ambiguous query '%s' -> '%s'", query, effective_query)
 
         # 2. Step 2: Determine retrieval strategy
+        all_requested = bool(re.search(r"\b(?:find|show|list|get|search)\s+all\b", effective_query, re.I))
+        candidate_k = max(top_k * 4, 20)
+        if all_requested:
+            candidate_k = max(1, len(primary_email_ids(db, user_id, effective_query)))
         is_hybrid_mode = (retrieval_mode == "hybrid")
         has_exact, exact_reason = detect_exact_identifier_or_term(effective_query, filters)
         search_type = "mmr" if retrieval_mode == "mmr" else "similarity"
@@ -302,7 +359,10 @@ class GroundedRAGChain:
         # Primary fast retriever: LangChain + ChromaDB HNSW similarity search
         semantic_retriever = ChromaSemanticRetriever(
             user_id=user_str,
-            top_k=top_k,
+            db_session=db,
+            primary_only=True,
+            scope_query=effective_query,
+            top_k=candidate_k,
             search_type=search_type,
             sender=filters.get("sender"),
             gmail_message_id=filters.get("gmail_message_id"),
@@ -341,7 +401,9 @@ class GroundedRAGChain:
             hybrid_retriever = GmailCustomHybridRetriever(
                 user_id=user_str,
                 db_session=db,
-                top_k=top_k,
+                primary_only=True,
+                scope_query=effective_query,
+                top_k=candidate_k,
                 sender=filters.get("sender"),
                 gmail_message_id=filters.get("gmail_message_id"),
                 start_date=filters.get("start_date"),
@@ -369,32 +431,38 @@ class GroundedRAGChain:
                 docs = hybrid_retriever.invoke(effective_query)
                 retrieval_strategy_used = "standard"
 
-        # 4. Step 4: Contextual Compression Retriever extracting single-sentence key points
-        compressor = EmailKeyPointsCompressor(llm=self.model, max_key_points=5)
-        compressed_docs = compressor.compress_documents(docs, effective_query)
-        citations = documents_to_citations(compressed_docs)
+        # Use current database metadata and full bodies even for legacy indexes.
+        docs = hydrate_email_documents(docs, db, user_id, full_body=True)
+        eligible_ids = set(primary_email_ids(db, user_id, effective_query))
+        docs = [doc for doc in docs if str(doc.metadata.get("email_id")) in eligible_ids]
+        unique_docs = {}
+        for doc in docs:
+            unique_docs.setdefault(str(doc.metadata.get("email_id")), doc)
+        docs = list(unique_docs.values())
 
-        # Fallback to broader hybrid search if zero matches and specific filters were applied
-        if not citations and filters and db is not None:
-            citations = self.retriever.retrieve_hybrid(
-                db=db,
-                query=effective_query,
-                user_id=user_id,
-                top_k=top_k,
-            )
-            for c in citations:
-                if not c.key_points and c.snippet:
-                    c.key_points = split_into_single_sentence_bullets(c.snippet, max_points=3)
+        # The LLM receives real envelope metadata and content, then explicitly
+        # accepts/rejects each candidate before it can become a cited source.
+        validation = validate_email_relevance(docs, effective_query, self.model)
+        accepted = validation.documents if all_requested else validation.documents[:top_k]
+        citations = documents_to_citations(accepted)
 
         # 5. Format context from deduplicated citations with compressed key points
-        context_str = format_context_from_citations(citations)
+        context_str = (
+            f"Current date: {mailbox_now().date().isoformat()} ({mailbox_now().tzinfo}).\n\n"
+            + format_context_from_citations(citations)
+        )
 
         # 6. Step 5: Generate grounded answer through traced LangChain runnable
-        try:
-            answer_text = generate_grounded_answer(self.chain, context_str, effective_query)
-        except Exception as exc:
-            logger.warning("LLM invocation error: %s. Using deterministic grounded summary with single-sentence bullets.", exc)
+        if validation.failed:
+            answer_text = "I could not validate which emails match your question because the relevance check is unavailable. Please try again."
+        elif not citations:
             answer_text = format_grounded_key_points_summary(citations, effective_query)
+        else:
+            try:
+                answer_text = generate_grounded_answer(self.chain, context_str, effective_query)
+            except Exception as exc:
+                logger.warning("LLM invocation error: %s. Using deterministic grounded summary with single-sentence bullets.", exc)
+                answer_text = format_grounded_key_points_summary(citations, effective_query)
 
         return {
             "answer": answer_text,
@@ -402,6 +470,8 @@ class GroundedRAGChain:
             "context_count": len(citations),
             "rewritten_query": effective_query,
             "retrieval_strategy": retrieval_strategy_used,
+            "relevance_validated": not validation.failed,
+            "candidates_evaluated": validation.evaluated,
         }
 
 

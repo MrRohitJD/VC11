@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     azure_openai_api_key: str = Field("", validation_alias=AliasChoices("AZURE_OPENAI_API_KEY", "AZURE_API_KEY"))
     azure_openai_endpoint: str = Field("", validation_alias=AliasChoices("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_BASE", "AZURE_ENDPOINT"))
     azure_openai_api_version: str = Field("2024-02-01", validation_alias=AliasChoices("AZURE_OPENAI_API_VERSION", "OPENAI_API_VERSION"))
+    azure_openai_deployment: str = Field("gpt-4.1-mini", validation_alias=AliasChoices("AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_CHAT_DEPLOYMENT"))
     azure_openai_embedding_deployment: str = Field(
         "text-embedding-3-large",
         validation_alias=AliasChoices(

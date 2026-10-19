@@ -44,7 +44,7 @@ except ImportError:
         return decorator if (name is None or isinstance(name, str)) else name
 
 from app.models.rag import ChatMessage, ChatSession, EmailSendApproval
-from app.rag.chains import GroundedRAGChain, get_chat_model
+from app.rag.chains import GroundedRAGChain, USER_RESPONSE_STYLE, get_chat_model
 from app.rag.memory import (
     PostgresChatMessageHistory,
     get_or_create_chat_session,
@@ -116,7 +116,7 @@ GUIDELINES:
 2. For consequential actions like drafting or sending emails, ALWAYS inform the user that their draft is pending review.
 3. Keep answers clear, structured, and professional.
 4. If a tool returns no results, explain that no matching records were found and suggest alternative searches.
-"""
+""" + USER_RESPONSE_STYLE
 
 
 @dataclass
@@ -289,7 +289,7 @@ class GmailAIAssistant:
                 )
             context_block = "\n\n".join(items)
         else:
-            context_block = "No matching emails found in the mailbox for this query."
+            context_block = "No matching emails found in the Primary category for this query."
 
         tool_obs_block = ""
         if steps:
@@ -320,7 +320,7 @@ class GmailAIAssistant:
         )
 
         messages = [
-            SystemMessage(content=sys_prompt),
+            SystemMessage(content=sys_prompt + USER_RESPONSE_STYLE),
             HumanMessage(content=user_content),
         ]
 
@@ -560,7 +560,17 @@ class GmailAIAssistant:
         # Attempt tool binding with chat model
         model_with_tools = None
         try:
-            model_with_tools = self.model.bind_tools(tools)
+            # Bind each real chat provider before constructing its runnable
+            # fallback chain; RunnableWithFallbacks itself has no bind_tools.
+            providers = [getattr(self.model, "runnable", self.model), *getattr(self.model, "fallbacks", [])]
+            bound_models = []
+            for provider in providers:
+                try:
+                    bound_models.append(provider.bind_tools(tools))
+                except (AttributeError, NotImplementedError):
+                    continue
+            if bound_models:
+                model_with_tools = bound_models[0].with_fallbacks(bound_models[1:]) if len(bound_models) > 1 else bound_models[0]
         except Exception as exc:
             logger.debug("Could not bind tools to chat model: %s", exc)
 
@@ -660,7 +670,9 @@ class GmailAIAssistant:
             logger.warning("Tool-calling agent error (%s).", exc)
 
         # Direct SQL search fallback
-        citations = default_retriever.retrieve_structured_sql(db=db, user_id=user_id, keyword=query, limit=5)
+        citations = default_retriever.retrieve_structured_sql(
+            db=db, user_id=user_id, keyword=query, limit=5, primary_only=True,
+        )
         step_log = [{"step": 1, "thought": "Direct SQL Fallback", "action": "sql_search", "observation": f"Found {len(citations)} emails"}]
         ans = self.generate_llm_response(query=query, citations=citations, steps=step_log)
         return ans, citations, step_log
@@ -802,7 +814,12 @@ class GmailAIAssistant:
             }]
 
         # Pattern 8: Contextual Compression
-        citations = self.compress_context(citations, max_chunks=5)
+        if intent in {"RAG_QUERY", "SUMMARIZE"}:
+            # Already selected by the relevance validator. Do not drop sources
+            # from an explicit 'find all' result or reinterpret RRF as confidence.
+            citations = list({c.email_id: c for c in citations}.values())
+        else:
+            citations = self.compress_context(citations, max_chunks=5)
 
         # 5. Persist Assistant Response & Citations
         asst_msg = ChatMessage(

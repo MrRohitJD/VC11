@@ -1,5 +1,49 @@
 # Gmail AI Dashboard Backend
 
+## Mailbox assistant category scope
+
+The mailbox assistant answers using only Primary emails. Semantic search,
+database fallback, multi-query search, threads, summaries, and attachments all
+use the current synced Gmail labels. Other categories are never included as a
+fallback when Primary has no matches.
+
+Primary includes `CATEGORY_PERSONAL` and `INBOX` messages without another Gmail
+category. Social, Promotions, Updates, Forums, Spam, Trash, and Drafts are
+excluded. Records without category or inbox label evidence are excluded until
+labels are synced. AI classifications and custom labels named "Primary" do not
+determine Gmail category membership. See Google's [system label reference](https://developers.google.com/workspace/gmail/api/guides/labels).
+
+Existing vector indexes work without reindexing: eligible email IDs are read
+from the database and applied before vector ranking. Gmail label changes take
+effect after sync. This restriction applies to assistant retrieval; mailbox
+sync and dashboard email lists continue to include all categories.
+
+Standalone questions do not inherit topics from earlier conversation turns.
+For pending bills due this month, retrieval requires explicit billing,
+payment-status, and due-date evidence; receipt dates are not treated as payment
+deadlines. Calendar boundaries use the browser's `X-Timezone` header. Emails
+with unclear status or dates are not reported as confirmed matches.
+
+Citation metadata is refreshed from the authorized email record, including for
+older indexes. The assistant's View email action fetches the full message from
+`/api/rag/sources/{email_id}`, with sender, recipients, timestamp, plain text,
+HTML, and attachments, rather than displaying the compressed citation body.
+
+Relative email date requests such as "interview related emails of this month"
+are restricted to the client's calendar month before vector and SQL ranking.
+The original date restriction is retained through multi-query expansion.
+
+After retrieval, an LLM receives each authorized candidate's ID, subject,
+sender address/name, receipt timestamp, and full message text. It returns an
+explicit relevance decision with supporting key points. Only accepted
+candidates become answer context and related-email cards. Invalid decisions,
+unknown IDs, or provider failures produce no unvalidated sources and a clear
+validation-unavailable response. The assistant uses the configured NVIDIA
+provider first, with configured Azure/OpenAI and ExperientialLabs fallbacks.
+
+"Find all" requests validate the full retrieved candidate set in batches and
+retain all accepted sources instead of silently truncating the result to five.
+
 ## PostgreSQL setup
 
 The configured database name is `gmail_ai_dashboard`.

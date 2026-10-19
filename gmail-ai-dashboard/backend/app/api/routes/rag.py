@@ -16,11 +16,12 @@ Provides:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parseaddr
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
@@ -38,6 +39,8 @@ from app.models.rag import (
     EmailSendApproval,
 )
 from app.rag.agent import default_assistant
+from app.rag.preprocessing import clean_email_text
+from app.rag.query_constraints import mailbox_time_context
 from app.rag.indexing import default_pipeline
 from app.rag.memory import list_user_sessions
 from app.rag.vectorstore import default_vectorstore
@@ -137,6 +140,7 @@ def chat_with_assistant(
     body: ChatRequest,
     user: User = Depends(get_user_for_rag),
     db: Session = Depends(get_db),
+    x_timezone: Optional[str] = Header(None, alias="X-Timezone"),
 ):
     """Execute grounded question answering or agent execution for the user's emails."""
     if not body.query or not body.query.strip():
@@ -153,15 +157,16 @@ def chat_with_assistant(
         if body.thread_id:
             f_dict["thread_id"] = body.thread_id
 
-        agent_res = default_assistant.run(
-            query=body.query.strip(),
-            db=db,
-            user_id=user.id,
-            session_id=body.session_id,
-            top_k=body.top_k,
-            filter_dict=f_dict if f_dict else None,
-            use_multi_query=body.use_multi_query,
-        )
+        with mailbox_time_context(x_timezone):
+            agent_res = default_assistant.run(
+                query=body.query.strip(),
+                db=db,
+                user_id=user.id,
+                session_id=body.session_id,
+                top_k=body.top_k,
+                filter_dict=f_dict if f_dict else None,
+                use_multi_query=body.use_multi_query,
+            )
 
         citation_items = [
             CitationItem(
@@ -519,14 +524,25 @@ def get_source_email_details(
         select(Attachment).where(Attachment.email_id == email.id)
     ).all()
 
+    sender_name, sender_address = parseaddr(email.from_email or "")
+    received_at = email.received_at
+    if received_at and received_at.tzinfo is None:
+        received_at = received_at.replace(tzinfo=timezone.utc)
+
     return {
         "id": str(email.id),
         "subject": email.subject or "",
         "from": email.from_email or "",
+        "from_email": sender_address or email.from_email or "",
+        "sender_name": email.sender_name or sender_name,
         "to": email.to_email or "",
-        "date": email.received_at.isoformat() if email.received_at else "",
+        "cc": email.cc or "",
+        "bcc": email.bcc or "",
+        "date": received_at.isoformat() if received_at else None,
+        "received_at": received_at.isoformat() if received_at else None,
         "snippet": email.snippet or "",
-        "body": email.body or "",
+        "body": clean_email_text(email.body, email.body_html, remove_quotes=False, remove_signatures=False),
+        "body_html": email.body_html or "",
         "is_read": email.is_read,
         "attachments": [
             {
