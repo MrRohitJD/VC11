@@ -881,3 +881,16 @@
 .email-detail-error button { border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px 14px; }
 .email-attachment-details { margin-top: 24px; border-top: 1px solid #e5e7eb; }
 .email-attachment-details h3 { font-size: 13px; margin-top: 16px; }
+.search-activity { margin-bottom: 14px; border: 1px solid #dce5ef; border-radius: 10px; background: #f8fafc; color: #334155; font-size: 12px; overflow: hidden; }
+.search-activity summary { display: flex; align-items: center; gap: 7px; padding: 10px 12px; cursor: pointer; font-weight: 600; }
+.search-activity summary > span { margin-left: auto; color: #64748b; font-size: 11px; font-weight: 400; }
+.search-activity-body { padding: 0 12px 12px; }
+.search-activity-scope { color: #64748b; margin: 0 0 8px; }
+.search-activity ol { list-style: none; padding: 0; margin: 0; }
+.search-activity li { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; line-height: 1.5; }
+.search-activity time { margin-left: auto; flex-shrink: 0; color: #64748b; font-variant-numeric: tabular-nums; }
+.activity-indicator { width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: #16a34a; flex-shrink: 0; }
+.activity-running .activity-indicator { background: #2563eb; animation: pulse 1.4s infinite; }
+.activity-warning .activity-indicator { background: #d97706; }
+.search-activity-trace { border-top: 1px solid #e2e8f0; margin-top: 8px; padding-top: 9px; color: #64748b; }
+.search-activity-trace a { color: #2563eb; display: inline-flex; align-items: center; gap: 5px; }

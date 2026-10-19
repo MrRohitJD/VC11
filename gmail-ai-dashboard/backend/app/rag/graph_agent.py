@@ -5,8 +5,10 @@ Only public execution summaries are returned; no reasoning is requested.
 """
 from __future__ import annotations
 
-import os
+import logging
 import re
+from contextlib import nullcontext
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, TypedDict
 from uuid import UUID
@@ -14,7 +16,7 @@ from uuid import UUID
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langsmith import tracing_context
+from langsmith import Client, trace, tracing_context
 
 from app.core.config import settings
 from app.models.rag import ChatMessage
@@ -26,6 +28,15 @@ from app.rag.memory import (
     PostgresChatMessageHistory, get_or_create_chat_session, record_retrieval_citations,
 )
 from app.rag.tools import create_gmail_tools
+from app.rag.activity import activity_context, emit_activity
+from app.rag.adaptive import plan_retrieval
+
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def langsmith_client():
+    return Client(api_key=settings.langsmith_api_key, api_url=settings.langsmith_endpoint, timeout_ms=3000)
 
 
 class MailboxState(TypedDict, total=False):
@@ -37,6 +48,9 @@ class MailboxState(TypedDict, total=False):
     iterations: int
     steps: list[dict[str, Any]]
     approval_id: str | None
+    plan: list[str]
+    search_plan: dict[str, Any]
+    evidence_validated: bool
 
 
 def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
@@ -46,7 +60,16 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
 
     def context(state):
         query = assistant.transform_query(state["query"], history[-20:])
-        return {"effective_query": query, "intent": assistant.route_intent(query)}
+        intent = assistant.route_intent(query)
+        emit_activity("route_request", "Mailbox request selected" if intent != "GENERAL_CHAT" else "Conversational reply selected", intent=intent)
+        return {"effective_query": query, "intent": intent}
+
+    def plan(state):
+        retrieval = plan_retrieval(state["effective_query"], filter_dict, use_multi_query)
+        tasks = [retrieval.label, "Validate matching email evidence", "Answer each part of your request"]
+        if state["intent"] in {"ACTION_DRAFT", "PLAN_AND_EXECUTE"}:
+            tasks.append("Prepare a draft for your review when requested")
+        return {"plan": tasks, "search_plan": retrieval.public()}
 
     def retrieve(state):
         result = assistant.rag_chain.answer_query(
@@ -54,7 +77,8 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
             top_k=top_k, filter_dict=filter_dict, use_multi_query=use_multi_query,
         )
         citations.extend(result["citations"])
-        return {"answer": result["answer"], "steps": [{
+        return {"answer": result["answer"], "search_plan": result.get("search_plan", state.get("search_plan", {})),
+                "evidence_validated": result.get("relevance_validated", True), "steps": [{
             "action": "retrieve_mailbox", "observation": f"Retrieved {len(citations)} sources."
         }]}
 
@@ -77,6 +101,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                 "Sending is unavailable until a real delivery integration is configured."),
             *history[-20:], HumanMessage(content=state["effective_query"]),
         ]
+        emit_activity("tool_agent", "Selecting the next mailbox action", status="running")
         response = model.invoke(messages)
         return {"messages": [*messages, response],
                 "iterations": state["iterations"] + 1,
@@ -89,7 +114,14 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         # Execute sequentially: SQLAlchemy sessions cannot be shared by parallel tools.
         for call in messages[-1].tool_calls:
             tool = tools.get(call["name"])
-            output = str(tool.invoke(call["args"])) if tool else "Tool is unavailable."
+            emit_activity("mailbox_tool", f"Running {call['name'].replace('_', ' ')}", status="running")
+            try:
+                output = str(tool.invoke(call["args"])) if tool else "Tool is unavailable."
+                emit_activity("mailbox_tool", f"Completed {call['name'].replace('_', ' ')}", status="completed" if tool else "warning")
+            except Exception as exc:
+                logger.warning("Mailbox tool failed: %s", type(exc).__name__)
+                output = "This mailbox tool failed. Do not infer that no emails exist or that an action succeeded."
+                emit_activity("mailbox_tool", "Mailbox action failed", status="warning")
             if call["name"] == "draft_email":
                 match = re.search(r"Approval ID: ([0-9a-f-]{36})", output)
                 if match:
@@ -109,6 +141,11 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
     def limit(state):
         return {"answer": "I reached the workflow step limit. Please narrow your request. Any created drafts still require review."}
 
+    def review(state):
+        valid = state.get("evidence_validated", True)
+        emit_activity("review_answer", "Checked source coverage and answer status" if valid else "Answer reports the unavailable evidence check", status="completed" if valid else "warning", source_count=len(citations))
+        return {"answer": state["answer"].strip() or "I could not produce an answer. Please retry your request."}
+
     def route(state):
         if state["intent"] == "GENERAL_CHAT":
             return "chat"
@@ -123,20 +160,43 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
 
     graph = StateGraph(MailboxState)
     for name, node in [("context", context), ("retrieve", retrieve),
+                       ("plan", plan), ("review", review),
                        ("agent", agent), ("tools", execute_tools), ("chat", chat), ("limit", limit)]:
         graph.add_node(name, node)
     graph.add_edge(START, "context")
-    graph.add_conditional_edges("context", route, ["chat", "retrieve", "agent"])
-    graph.add_conditional_edges("agent", continue_agent, ["tools", "limit", END])
+    graph.add_edge("context", "plan")
+    graph.add_conditional_edges("plan", route, ["chat", "retrieve", "agent"])
+    graph.add_conditional_edges("agent", continue_agent, {"tools": "tools", "limit": "limit", END: "review"})
     graph.add_edge("tools", "agent")
     for name in ["retrieve", "chat", "limit"]:
-        graph.add_edge(name, END)
+        graph.add_edge(name, "review")
+    graph.add_edge("review", END)
     return graph.compile(checkpointer=checkpointer, name="devLG Mailbox Assistant")
 
 
 class LangGraphMailboxAssistant(GmailAIAssistant):
     def run(self, query, db, user_id, session_id=None, top_k=5,
-            filter_dict=None, use_multi_query=False):
+            filter_dict=None, use_multi_query=None):
+        enabled = bool(settings.langsmith_tracing and settings.langsmith_api_key)
+        client = langsmith_client() if enabled else None
+        with activity_context() as activity:
+            with tracing_context(enabled=enabled, project_name=settings.langsmith_project, client=client):
+                with (trace("Mailbox assistant", run_type="chain", inputs={"query": query},
+                            project_name=settings.langsmith_project, client=client,
+                            metadata={"session_id": session_id, "scope": "Primary"}) if enabled else nullcontext(None)) as run:
+                    response = self._run(query, db, user_id, session_id, top_k, filter_dict, use_multi_query)
+                    response.steps = list(activity.steps)
+                    response.tracing_enabled = enabled
+                    if run:
+                        response.trace_id = str(run.id)
+                        run.end(outputs={"answer": response.answer, "sources": len(response.citations)})
+                        try:
+                            response.trace_url = run.get_url()
+                        except Exception as exc:
+                            logger.warning("LangSmith trace link unavailable: %s", type(exc).__name__)
+                    return response
+
+    def _run(self, query, db, user_id, session_id, top_k, filter_dict, use_multi_query):
         user_id = UUID(str(user_id))
         session = get_or_create_chat_session(db, user_id, session_id=session_id)
         memory = PostgresChatMessageHistory(db, session.id)
@@ -144,26 +204,20 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
         citations = []
         checkpoint_path = Path(settings.langgraph_checkpoint_path)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        # dotenv settings are not automatically exported into the SDK environment.
-        for key in ["LANGSMITH_API_KEY", "LANGSMITH_ENDPOINT", "LANGSMITH_PROJECT"]:
-            value = getattr(settings, key.lower())
-            if value:
-                os.environ.setdefault(key, value)
         with SqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
             graph = build_mailbox_graph(
                 self, db=db, user_id=user_id, history=history, top_k=top_k,
                 filter_dict=filter_dict, use_multi_query=use_multi_query,
                 citations=citations, checkpointer=saver,
             )
-            with tracing_context(enabled=settings.langsmith_tracing,
-                                 project_name=settings.langsmith_project):
-                result = graph.invoke(
-                    {"query": query, "messages": [], "steps": [], "iterations": 0, "answer": "", "approval_id": None},
-                    config={"configurable": {"thread_id": f"{user_id}:{session.id}"},
-                            "recursion_limit": 2 * self.max_agent_iterations + 6,
-                            "tags": ["devLG", "mailbox"],
-                            "metadata": {"session_id": str(session.id)}},
-                )
+            result = graph.invoke(
+                {"query": query, "messages": [], "steps": [], "iterations": 0, "answer": "", "approval_id": None,
+                 "evidence_validated": True, "plan": [], "search_plan": {}},
+                config={"configurable": {"thread_id": f"{user_id}:{session.id}"},
+                        "recursion_limit": 2 * self.max_agent_iterations + 8,
+                        "tags": ["devLG", "mailbox"],
+                        "metadata": {"session_id": str(session.id)}},
+            )
         # SQL history remains the source of truth for the existing session UI.
         memory.add_message(HumanMessage(content=query))
         message = ChatMessage(chat_session_id=session.id, role="assistant", content=result["answer"])
@@ -179,6 +233,7 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
                              approval_required=bool(result.get("approval_id")),
                              approval_id=result.get("approval_id"),
                              citations=citations, steps=result["steps"],
+                             plan=result.get("plan"), search_plan=result.get("search_plan"),
                              session_id=str(session.id), message_id=str(message.id))
 
 

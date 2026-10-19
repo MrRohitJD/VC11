@@ -33,6 +33,8 @@ def test_retrieval_graph_and_persistent_checkpoint(tmp_path, monkeypatch):
         assert result["answer"] == "A verified mailbox answer"
         assert calls[0]["filter_dict"] == {"sender": "alice"}
         assert calls[0]["top_k"] == 7
+        assert result["plan"]
+        assert result["search_plan"]["strategy"] == "multi_query"
     with SqliteSaver.from_conn_string(path) as reopened:
         checkpoint = reopened.get_tuple(config)
         assert checkpoint.checkpoint["channel_values"]["answer"] == result["answer"]

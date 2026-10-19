@@ -33,5 +33,5 @@ it('opens the complete message when View email is clicked on a citation', async 
     expect(getRagSourceEmail).toHaveBeenCalledWith('invoice-one');
     expect(sendRagChat).toHaveBeenCalledWith(expect.objectContaining({
         query: 'What are my pending bills and invoices due this month?',
-    }));
+    }), expect.any(Function));
 });

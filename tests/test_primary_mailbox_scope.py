@@ -24,6 +24,21 @@ from app.rag.tools import create_gmail_tools
 from app.rag.vectorstore import ChromaVectorStoreManager
 
 
+def test_all_date_summary_uses_every_primary_record_without_embedding_or_relevance(mailbox, monkeypatch):
+    from app.core.config import settings
+    import app.rag.chains as chains
+    from app.rag.query_constraints import mailbox_time_context
+    db, user_id, *rest = mailbox
+    monkeypatch.setattr(settings, "gmail_mcp_enabled", False)
+    monkeypatch.setattr(chains, "validate_email_relevance", lambda *a, **k: pytest.fail("Date-only requests need no semantic validator"))
+    monkeypatch.setattr(ChromaSemanticRetriever, "_get_relevant_documents", lambda *a, **k: pytest.fail("Exhaustive search must not depend on embeddings"))
+    chain = GroundedRAGChain(model=FakeListChatModel(responses=["Summary."]))
+    with mailbox_time_context("Asia/Kolkata"):
+        result = chain.answer_query(db, "Summarize all incoming emails this month", user_id, top_k=1)
+    assert result["context_count"] == 2
+    assert result["retrieval_strategy"] == "exhaustive_primary"
+
+
 def planning_model():
     """Validate candidate identities dynamically, then generate a short answer."""
     def respond(value):

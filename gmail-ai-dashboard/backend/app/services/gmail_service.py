@@ -54,6 +54,10 @@ def build_gmail_service_for_user(db: Session, user: User):
 		client_secret=settings.google_client_secret,
 		scopes=account.scope.split(" ") if account.scope else GMAIL_SCOPES,
 	)
+	# Without expiry, google-auth treats a stored expired token as valid and
+	# the first live Gmail search fails instead of refreshing the OAuth session.
+	if account.token_expiry:
+		creds.expiry = account.token_expiry.astimezone(timezone.utc).replace(tzinfo=None) if account.token_expiry.tzinfo else account.token_expiry
 
 	if creds.expired and creds.refresh_token:
 		creds.refresh(GoogleAuthRequest())

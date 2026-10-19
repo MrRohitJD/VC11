@@ -46,6 +46,38 @@ from app.rag.vectorstore import ChromaVectorStoreManager, default_chroma_manager
 logger = logging.getLogger(__name__)
 
 
+def scoped_mailbox_documents(db, user_id, query, filters):
+    """Enumerate authorized Primary records, preserving explicit API filters."""
+    ids = [UUID(eid) for eid in primary_email_ids(db, user_id, query)]
+    if not ids:
+        return []
+    stmt = select(Email).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(
+        GmailAccount.user_id == UUID(str(user_id)), Email.id.in_(ids))
+    for name, column in [("gmail_message_id", Email.gmail_message_id), ("thread_id", Email.thread_id),
+                         ("is_read", Email.is_read), ("email_id", Email.id)]:
+        if filters.get(name) is not None:
+            stmt = stmt.where(column == filters[name])
+    if filters.get("sender"):
+        value = str(filters["sender"]).replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(or_(Email.from_email.ilike(f"%{value}%", escape="\\"),
+                              Email.sender_name.ilike(f"%{value}%", escape="\\")))
+    if filters.get("label"):
+        value = filters["label"]
+        stmt = stmt.where(Email.labels.any(EmailLabel.label.has(or_(Label.label_id == value, Label.name == value))))
+    for key, after in [("start_date", True), ("end_date", False), ("start_timestamp", True), ("end_timestamp", False)]:
+        if filters.get(key) is not None:
+            value = filters[key]
+            if "timestamp" in key:
+                value = datetime.fromtimestamp(float(value), timezone.utc)
+            elif isinstance(value, str):
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            stmt = stmt.where(Email.received_at >= value if after else Email.received_at < value)
+    if filters.get("custom_filter"):
+        raise ValueError("Raw vector filters are not supported for exhaustive mailbox requests")
+    return [Document(page_content=clean_email_text(e.body, e.body_html, remove_quotes=False, remove_signatures=False) or e.snippet or "", metadata={"email_id": str(e.id), "subject": e.subject or "", "sender": e.from_email or "", "thread_id": e.thread_id or ""})
+            for e in db.scalars(stmt.order_by(Email.received_at.desc(), Email.id))]
+
+
 def hydrate_email_documents(documents: List[Document], db: Session, user_id: UUID | str,
                             full_body: bool = False) -> List[Document]:
     """Restore current envelope fields from authorized email records.
@@ -992,9 +1024,9 @@ class MultiQueryRetriever(BaseRetriever):
                 chain = self.prompt | self.llm | StrOutputParser()
                 raw_alts = chain.invoke({"question": query, "query_count": self.query_count})
                 lines = [
-                    line.strip()
+                    re.sub(r"^(?:[-*]|\d+[.)])\s*", "", line).strip()
                     for line in raw_alts.split("\n")
-                    if line.strip() and not line.strip().startswith(("#", "-", "*", "1.", "2.", "3."))
+                    if line.strip() and not line.strip().startswith("#")
                 ]
                 for l in lines:
                     if l and l not in queries:

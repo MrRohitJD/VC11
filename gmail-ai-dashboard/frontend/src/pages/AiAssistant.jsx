@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import EmailDetailsModal, { formatEmailDate } from '../components/EmailDetailsModal';
+import SearchActivity from '../components/SearchActivity';
 import {
 	approveRagEmail,
 	getRagStatus,
@@ -82,6 +83,7 @@ export default function AiAssistant({ user: propUser }) {
 
 	const [input, setInput] = useState('');
 	const [isTyping, setIsTyping] = useState(false);
+	const [activitySteps, setActivitySteps] = useState([]);
 	const [selectedEmailModal, setSelectedEmailModal] = useState(null);
 	const [sessionId, setSessionId] = useState(null);
 	const [ragStatus, setRagStatus] = useState(null);
@@ -119,6 +121,8 @@ export default function AiAssistant({ user: propUser }) {
 		setMessages((prev) => [...prev, userMsg]);
 		if (!queryText) setInput('');
 		setIsTyping(true);
+		setActivitySteps([]);
+		const requestSteps = [];
 
 		try {
 			// Call the LangGraph mailbox workflow.
@@ -126,6 +130,9 @@ export default function AiAssistant({ user: propUser }) {
 				query: text,
 				session_id: sessionId,
 				top_k: 5,
+			}, (step) => {
+				requestSteps.push(step);
+				setActivitySteps([...requestSteps]);
 			});
 
 			const data = res.data;
@@ -163,6 +170,11 @@ export default function AiAssistant({ user: propUser }) {
 				response: {
 					type: 'summary',
 					text: data.answer,
+					steps: data.steps || [],
+					search_plan: data.search_plan,
+					trace_url: data.trace_url,
+					trace_id: data.trace_id,
+					tracing_enabled: data.tracing_enabled,
 					approval_required: data.approval_required,
 					approval_id: data.approval_id,
 					entities: [],
@@ -178,6 +190,7 @@ export default function AiAssistant({ user: propUser }) {
 			console.warn('Backend RAG call failed:', error);
 			const responseData = {
 				text: 'I could not answer your question right now. Please try again in a moment.',
+				steps: requestSteps,
 			};
 
 			setIsTyping(false);
@@ -404,6 +417,7 @@ export default function AiAssistant({ user: propUser }) {
 											</div>
 											<div className="msg-content-wrapper">
 												<div className="msg-bubble assistant-bubble">
+													<SearchActivity steps={message.response.steps} plan={message.response.search_plan} traceUrl={message.response.trace_url} traceId={message.response.trace_id} tracingEnabled={message.response.tracing_enabled} />
 													<div className="assistant-lead-text">
 														{renderAnswer(message.response.text)}
 													</div>
@@ -528,8 +542,9 @@ export default function AiAssistant({ user: propUser }) {
 												<span className="typing-dot" />
 												<span className="typing-dot" />
 												<span className="typing-dot" />
-												<span className="typing-label">Checking your emails...</span>
+												<span className="typing-label" role="status">{activitySteps.at(-1)?.observation || 'Checking your emails...'}</span>
 											</div>
+											<SearchActivity steps={activitySteps} pending plan={activitySteps.find((step) => step.plan)?.plan} />
 										</div>
 									</div>
 								)}

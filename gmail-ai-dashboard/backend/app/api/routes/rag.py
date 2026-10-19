@@ -16,18 +16,23 @@ Provides:
 from __future__ import annotations
 
 import logging
+import json
+from queue import Queue, Empty
+from threading import Thread, Event
 from datetime import datetime, timezone
 from email.utils import parseaddr
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user
-from app.database.connection import get_db
+from app.database.connection import get_db, SessionLocal
+from app.rag.activity import activity_context
 from app.models.email import Email, GmailAccount, User
 from app.models.rag import (
     Attachment,
@@ -94,7 +99,7 @@ class ChatRequest(BaseModel):
     label: Optional[str] = Field(None, description="Filter by label or category")
     is_read: Optional[bool] = Field(None, description="Filter by read status")
     thread_id: Optional[str] = Field(None, description="Filter by thread ID")
-    use_multi_query: bool = Field(False, description="Enable multi-query retrieval")
+    use_multi_query: Optional[bool] = Field(None, description="None selects automatically; true/false overrides query expansion")
 
 
 class CitationItem(BaseModel):
@@ -118,6 +123,10 @@ class ChatResponse(BaseModel):
     session_id: str
     message_id: str
     key_points: List[str] = Field(default_factory=list, description="Extracted key points based on user query in single-sentence bullets")
+    search_plan: Optional[Dict[str, Any]] = None
+    trace_id: Optional[str] = None
+    trace_url: Optional[str] = None
+    tracing_enabled: bool = False
 
 
 class IndexRequest(BaseModel):
@@ -213,6 +222,10 @@ def chat_with_assistant(
             session_id=agent_res.session_id or "",
             message_id=agent_res.message_id or "",
             key_points=extracted_key_points,
+            search_plan=getattr(agent_res, "search_plan", None),
+            trace_id=getattr(agent_res, "trace_id", None),
+            trace_url=getattr(agent_res, "trace_url", None),
+            tracing_enabled=getattr(agent_res, "tracing_enabled", False),
         )
     except Exception as exc:
         logger.exception("RAG assistant execution error: %s", exc)
@@ -220,6 +233,62 @@ def chat_with_assistant(
             status_code=500,
             detail=f"An error occurred while processing your request: {str(exc)}",
         )
+
+
+@router.post("/chat/stream")
+def stream_chat(
+    body: ChatRequest,
+    user: User = Depends(get_user_for_rag),
+    x_timezone: Optional[str] = Header(None, alias="X-Timezone"),
+):
+    """Stream observable progress and one final response; never stream reasoning."""
+    if not body.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    user_id = user.id
+    events = Queue()
+    disconnected = Event()
+
+    def publish(step):
+        if not disconnected.is_set():
+            events.put(("activity", step))
+
+    def work():
+        try:
+            # A SQLAlchemy session belongs to one worker, not the request thread.
+            with SessionLocal() as db:
+                scoped_user = db.get(User, user_id)
+                if scoped_user is None:
+                    raise ValueError("User session is unavailable")
+                with activity_context(publish):
+                    response = chat_with_assistant(body, scoped_user, db, x_timezone)
+                if not disconnected.is_set():
+                    events.put(("result", response.model_dump()))
+        except Exception as exc:
+            logger.warning("Streaming mailbox request failed: %s", type(exc).__name__)
+            if not disconnected.is_set():
+                events.put(("error", {"message": "The mailbox request could not finish. Please try again."}))
+        finally:
+            events.put(None)
+
+    def generate():
+        Thread(target=work, daemon=True).start()
+        try:
+            while True:
+                try:
+                    item = events.get(timeout=15)
+                except Empty:
+                    yield ": keepalive\n\n"
+                    continue
+                if item is None:
+                    break
+                kind, payload = item
+                yield f"event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        finally:
+            disconnected.set()
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+    })
 
 
 @router.post("/index")

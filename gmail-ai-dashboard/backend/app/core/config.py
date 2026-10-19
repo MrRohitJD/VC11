@@ -7,6 +7,9 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent  # backend/
 
 
 class Settings(BaseSettings):
+    gmail_mcp_enabled: bool = True
+    gmail_mcp_max_messages: int = Field(1000, ge=1, le=10000)
+    gmail_mcp_timeout_seconds: int = Field(120, ge=10, le=600)
     langgraph_checkpoint_path: str = str(_BACKEND_DIR / "data" / "langgraph.sqlite")
     langsmith_tracing: bool = False
     langsmith_api_key: str = ""

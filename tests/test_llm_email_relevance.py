@@ -87,3 +87,49 @@ def test_multiple_validation_batches_keep_every_accepted_source():
     result = validate_email_relevance([candidate(str(i)) for i in range(7)], "Find all interviews", RunnableLambda(respond))
     assert not result.failed
     assert len(result.documents) == result.evaluated == 7
+
+
+def test_bad_json_uses_next_provider_instead_of_failing_entire_search():
+    bad = FakeListChatModel(responses=["not JSON"])
+    good = FakeListChatModel(responses=[json.dumps({"decisions": [decision()]})])
+    result = validate_email_relevance([candidate()], "Find interviews", bad.with_fallbacks([good]))
+    assert not result.failed
+    assert len(result.documents) == 1
+
+
+def test_structured_message_content_blocks_are_parsed():
+    model = RunnableLambda(lambda _: AIMessage(content=[{"type": "text", "text": json.dumps({"decisions": [decision()]})}]))
+    assert not validate_email_relevance([candidate()], "Find interviews", model).failed
+
+
+def test_last_three_months_uses_calendar_months_and_preserves_time():
+    with mailbox_time_context("Asia/Kolkata"):
+        start, end = received_date_bounds("Find all interviews from last 3 months", datetime(2026, 10, 19, 19, 24))
+    assert start == datetime(2026, 7, 19, 13, 54, tzinfo=timezone.utc)
+    assert end == datetime(2026, 10, 19, 13, 54, tzinfo=timezone.utc)
+
+
+def test_month_subtraction_clamps_day_and_handles_year_boundary():
+    with mailbox_time_context("Asia/Kolkata"):
+        start, _ = received_date_bounds("past 3 months", datetime(2026, 5, 31))
+    assert start == datetime(2026, 2, 27, 18, 30, tzinfo=timezone.utc)
+
+
+def test_date_only_summary_does_not_misclassify_topic_or_sender_searches():
+    from app.rag.search_plan import date_only_request, exhaustive_request
+    assert date_only_request("Give me a brief summary of all incoming emails received today.")
+    assert exhaustive_request("Give me a brief summary of all incoming emails received today.")
+    assert not date_only_request("Summarize interview emails today")
+    assert not date_only_request("Summarize emails from Alice today")
+
+
+def test_malformed_batch_recovers_with_individual_strict_decisions():
+    def respond(messages):
+        data = json.loads(messages[-1].content)
+        if len(data["candidates"]) > 1:
+            return AIMessage(content="truncated JSON")
+        return AIMessage(content=json.dumps({"decisions": [decision(data["candidates"][0]["email_id"])]}))
+    result = validate_email_relevance([candidate("one"), candidate("two")], "Find all interviews", RunnableLambda(respond))
+    assert not result.failed
+    assert result.evaluated == 2
+    assert len(result.documents) == 2

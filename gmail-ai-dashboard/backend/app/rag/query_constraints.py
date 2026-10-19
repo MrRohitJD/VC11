@@ -1,6 +1,7 @@
 """Deterministic evidence checks for billing questions before answer generation."""
 
 import re
+import calendar
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
@@ -46,7 +47,21 @@ def received_date_bounds(query: str, now: datetime | None = None):
         now = now.astimezone(_client_timezone.get())
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     start = end = None
-    if re.search(r"\b(?:this|current) month\b", query, re.I):
+    rolling = re.search(r"\b(?:last|past)\s+(\d+)\s+(days?|weeks?|months?|years?)\b", query, re.I)
+    if rolling:
+        count, unit = int(rolling[1]), rolling[2].lower()
+        if unit.startswith(("month", "year")):
+            months = count * (12 if unit.startswith("year") else 1)
+            index = now.year * 12 + now.month - 1 - months
+            year, month = divmod(index, 12)
+            if year < 1:
+                return None
+            start = now.replace(year=year, month=month + 1,
+                                day=min(now.day, calendar.monthrange(year, month + 1)[1]))
+        else:
+            start = now - timedelta(days=count * (7 if unit.startswith("week") else 1))
+        end = now
+    elif re.search(r"\b(?:this|current) month\b", query, re.I):
         start = today.replace(day=1)
         end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
     elif re.search(r"\b(?:last|previous) month\b", query, re.I):

@@ -63,7 +63,45 @@ export const getGoogleAuthUrl = () => `${API_BASE}/api/auth/google`;
 export const getSyncStreamUrl = () => `${API_BASE}/api/gmail/sync/stream`;
 
 // RAG AI Assistant endpoints
-export const sendRagChat = (data) => api.post('/api/rag/chat', data);
+export const sendRagChat = async (data, onProgress) => {
+	if (!onProgress) return api.post('/api/rag/chat', data);
+	const timezone = getClientTimezone();
+	const response = await fetch(`${API_BASE}/api/rag/chat/stream`, {
+		method: 'POST', credentials: 'include',
+		headers: { 'Content-Type': 'application/json', ...(timezone ? { 'X-Timezone': timezone } : {}) },
+		body: JSON.stringify(data),
+	});
+	if (!response.ok || !response.body) throw new Error('Mailbox search could not start.');
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let buffer = '';
+	let result;
+	try {
+		while (true) {
+			const { value, done } = await reader.read();
+			buffer += decoder.decode(value, { stream: !done });
+			buffer = buffer.replace(/\r\n/g, '\n');
+			let boundary;
+			while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+				const frame = buffer.slice(0, boundary);
+				buffer = buffer.slice(boundary + 2);
+				const lines = frame.split('\n');
+				const kind = lines.find((line) => line.startsWith('event:'))?.slice(6).trim();
+				const raw = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
+				if (!raw) continue;
+				const payload = JSON.parse(raw);
+				if (kind === 'activity') onProgress(payload);
+				if (kind === 'error') throw new Error(payload.message || 'Mailbox search failed.');
+				if (kind === 'result') result = payload;
+			}
+			if (done) break;
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	if (!result) throw new Error('The mailbox search ended before returning an answer.');
+	return { data: result };
+};
 export const getRagStatus = () => api.get('/api/rag/status');
 export const triggerRagIndex = (data = {}) => api.post('/api/rag/index', data);
 export const getRagSessions = (limit = 20) => api.get('/api/rag/sessions', { params: { limit } });
