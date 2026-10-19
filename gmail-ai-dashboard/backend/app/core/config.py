@@ -7,6 +7,11 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent  # backend/
 
 
 class Settings(BaseSettings):
+    langgraph_checkpoint_path: str = str(_BACKEND_DIR / "data" / "langgraph.sqlite")
+    langsmith_tracing: bool = False
+    langsmith_api_key: str = ""
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    langsmith_project: str = "mailbox-devLG"
     database_url: str = "sqlite:///./gmail_ai_dashboard.db"
     database_pool_size: int = Field(5, validation_alias=AliasChoices("DATABASE_POOL_SIZE"))
     database_max_overflow: int = Field(10, validation_alias=AliasChoices("DATABASE_MAX_OVERFLOW"))

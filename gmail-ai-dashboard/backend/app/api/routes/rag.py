@@ -38,7 +38,7 @@ from app.models.rag import (
     EmailEmbedding,
     EmailSendApproval,
 )
-from app.rag.agent import default_assistant
+from app.rag.graph_agent import default_assistant
 from app.rag.preprocessing import clean_email_text
 from app.rag.query_constraints import mailbox_time_context
 from app.rag.indexing import default_pipeline
@@ -457,15 +457,12 @@ def approve_email_send(
 
     approval.status = "APPROVED"
     approval.approved_at = datetime.utcnow()
-    # In live mode, send email via Gmail API or mark SENT
-    approval.status = "SENT"
-    approval.sent_at = datetime.utcnow()
     db.commit()
 
     return ApprovalActionResponse(
         approval_id=str(approval.id),
-        status="SENT",
-        message=f"Email to {approval.recipient_email} authorized and marked as sent.",
+        status="APPROVED",
+        message=f"Draft for {approval.recipient_email} approved. Delivery is not configured; no email was sent.",
     )
 
 

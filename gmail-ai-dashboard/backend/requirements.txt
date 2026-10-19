@@ -8,3 +8,10 @@ google-auth-oauthlib
 google-api-python-client
 beautifulsoup4
 sse-starlette
+langgraph>=1.0,<2
+langgraph-checkpoint-sqlite>=3.0,<4
+langsmith>=0.4,<1
+langchain-core>=1.0,<2
+langchain-openai>=1.0,<2
+langchain-community>=0.4,<1
+chromadb>=1.0,<2

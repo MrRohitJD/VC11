@@ -121,7 +121,7 @@ export default function AiAssistant({ user: propUser }) {
 		setIsTyping(true);
 
 		try {
-			// Call live LangChain RAG backend
+			// Call the LangGraph mailbox workflow.
 			const res = await sendRagChat({
 				query: text,
 				session_id: sessionId,
@@ -365,7 +365,7 @@ export default function AiAssistant({ user: propUser }) {
 										<Bot size={22} />
 									</div>
 									<div>
-										<h2>AI Mailbox Assistant</h2>
+										<h2>Mailbox Assistant · LangGraph</h2>
 										<p>Answers use only your Primary category emails.</p>
 									</div>
 								</div>
