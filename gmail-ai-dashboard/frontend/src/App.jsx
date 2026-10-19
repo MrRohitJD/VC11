@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, Navigate } from 'react-router-dom';
 import {
 	AlertCircle, BarChart3, Bell, ChevronDown, CircleHelp, Download, FileText, Inbox,
-	LayoutDashboard, Mail, Menu, MoreHorizontal, Paperclip, PenLine, RefreshCw, RotateCw, Search,
+	LayoutDashboard, Mail, Menu, MoreHorizontal, Paperclip, PenLine, RefreshCw, Search,
 	Send, Settings, ShieldAlert, Star, Tag, Trash2, Upload, Users, X, Zap, Sparkles, LogOut, Maximize2,
 	AlertTriangle, UserX,
 } from 'lucide-react';
@@ -12,7 +12,7 @@ import { useAuth } from './context/AuthContext';
 import GmailConsent from './pages/GmailConsent';
 import SyncPage from './pages/SyncPage';
 import AiAssistant from './pages/AiAssistant';
-import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel } from './services/api';
+import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex } from './services/api';
 
 const navItems = [
 	{ label: 'Inbox', icon: Inbox }, { label: 'Starred', icon: Star },
@@ -503,6 +503,9 @@ function SettingsPage() {
 	const [exporting, setExporting] = useState(false);
 	const [importing, setImporting] = useState(false);
 	const [importStatus, setImportStatus] = useState(null);
+	const [ragStatus, setRagStatus] = useState(null);
+	const [embedding, setEmbedding] = useState(false);
+	const [embeddingStatus, setEmbeddingStatus] = useState('');
 
 	const loadStats = () => {
 		getExportStats()
@@ -512,7 +515,31 @@ function SettingsPage() {
 
 	useEffect(() => {
 		loadStats();
+		getRagStatus()
+			.then(({ data }) => setRagStatus(data))
+			.catch(() => setEmbeddingStatus('Embedding status is unavailable right now.'));
 	}, []);
+
+	const refreshRagStatus = async () => {
+		const { data } = await getRagStatus();
+		setRagStatus(data);
+		return data;
+	};
+
+	const handleStartEmbeddings = async () => {
+		if (embedding) return;
+		setEmbedding(true);
+		setEmbeddingStatus('Embedding emails... This may take a while.');
+		try {
+			const { data } = await triggerRagIndex();
+			await refreshRagStatus();
+			setEmbeddingStatus(data.message || 'Embedding completed.');
+		} catch (err) {
+			setEmbeddingStatus(err.response?.data?.detail || 'Embedding failed. Please try again.');
+		} finally {
+			setEmbedding(false);
+		}
+	};
 
 	const handleLogout = async () => {
 		await logout();
@@ -578,6 +605,37 @@ function SettingsPage() {
 						<span>{user?.email}</span>
 					</div>
 				</div>
+			</section>
+
+			<section className="settings-section">
+				<h2>Mail Embeddings</h2>
+				<p className="settings-desc">
+					Embeddings make your emails searchable by the AI Assistant. Embedding progress is tracked for your mailbox.
+				</p>
+				{ragStatus?.postgresql ? (
+					<div className="export-stats-box embedding-stats-box">
+						<div className="export-stat-item">
+							<strong>{ragStatus.postgresql.indexed_emails?.toLocaleString() || 0}</strong>
+							<span>Emails Embedded</span>
+						</div>
+						<div className="export-stat-item">
+							<strong>{ragStatus.postgresql.pending_emails?.toLocaleString() || 0}</strong>
+							<span>Emails Remaining</span>
+						</div>
+						<div className="export-stat-item">
+							<strong>{ragStatus.postgresql.indexed_embeddings?.toLocaleString() || 0}</strong>
+							<span>Embeddings Created</span>
+						</div>
+					</div>
+				) : (
+					<p className="settings-desc">Loading embedding status...</p>
+				)}
+				{ragStatus?.postgresql?.pending_emails > 0 && (
+					<button className="settings-btn embedding-btn" onClick={handleStartEmbeddings} disabled={embedding}>
+						<Sparkles size={16} /> {embedding ? 'Embedding emails...' : 'Start Embeddings'}
+					</button>
+				)}
+				{embeddingStatus && <div className="import-result-msg">{embeddingStatus}</div>}
 			</section>
 
 			<section className="settings-section">
@@ -778,13 +836,14 @@ function Dashboard() {
 	};
 
 	const handleRefresh = async () => {
+		if (isRefreshing || isSyncing) return;
 		setIsRefreshing(true);
-		setToast('Refreshing dashboard data...');
+		setToast('Refreshing dashboard...');
 		try {
 			await loadDashboardData(range, activityRange);
-			setToast('Dashboard refreshed from database');
+			setToast('Dashboard is up to date');
 		} catch {
-			setToast('Failed to refresh data');
+			setToast('Could not refresh the dashboard. Please try again.');
 		} finally {
 			setIsRefreshing(false);
 			setTimeout(() => setToast(''), 2500);
@@ -792,9 +851,9 @@ function Dashboard() {
 	};
 
 	const handleSync = async () => {
-		if (isSyncing) return;
+		if (isSyncing || isRefreshing) return;
 		setIsSyncing(true);
-		setToast('Starting Gmail sync...');
+		setToast('Syncing Gmail...');
 		try {
 			await startSync();
 			let attempts = 0;
@@ -802,23 +861,30 @@ function Dashboard() {
 				attempts++;
 				try {
 					const { data } = await getSyncStatus();
-					if (data.status === 'completed' || attempts >= 20) {
+					if (data.status === 'completed') {
 						clearInterval(pollInterval);
 						setIsSyncing(false);
-						setToast('Gmail sync completed! Refreshing data...');
+						setToast('Gmail synced. Refreshing dashboard...');
 						await loadDashboardData(range, activityRange);
-						setTimeout(() => setToast(''), 3000);
+						setToast('Dashboard is up to date');
+						setTimeout(() => setToast(''), 2500);
 					} else if (data.status === 'error') {
 						clearInterval(pollInterval);
 						setIsSyncing(false);
 						setToast(data.error || 'Sync encountered an issue');
 						setTimeout(() => setToast(''), 3500);
-					}
-				} catch {
-					if (attempts >= 12) {
+					} else if (attempts >= 100) {
 						clearInterval(pollInterval);
 						setIsSyncing(false);
-						await loadDashboardData(range, activityRange);
+						setToast('Gmail sync is still running. Try again shortly.');
+						setTimeout(() => setToast(''), 4000);
+					}
+				} catch {
+					if (attempts >= 100) {
+						clearInterval(pollInterval);
+						setIsSyncing(false);
+						setToast('Could not confirm sync status. Please try again.');
+						setTimeout(() => setToast(''), 3500);
 					}
 				}
 			}, 1500);
@@ -829,6 +895,18 @@ function Dashboard() {
 			setTimeout(() => setToast(''), 3500);
 		}
 	};
+
+	useEffect(() => {
+		if (!user) return undefined;
+
+		// Keep the mailbox current while the dashboard is open. The API ignores
+		// duplicate requests when a sync is already underway.
+		const autoSyncTimer = window.setInterval(() => {
+			startSync().catch(() => {});
+		}, 40000);
+
+		return () => window.clearInterval(autoSyncTimer);
+	}, [user]);
 
 	const loadMoreInbox = async () => {
 		if (loadingMoreInbox || inboxEmails.length >= inboxTotal) return;
@@ -999,6 +1077,24 @@ function Dashboard() {
 								</select>
 								<ChevronDown size={14} />
 							</label>
+							<button
+								className="refresh-button"
+								onClick={handleRefresh}
+								disabled={isRefreshing || isSyncing}
+								aria-busy={isRefreshing}
+							>
+								<RefreshCw size={15} className={isRefreshing ? 'spin' : ''} />
+								{isRefreshing ? 'Refreshing...' : 'Refresh'}
+							</button>
+							<button
+								className="sync-button"
+								onClick={handleSync}
+								disabled={isSyncing || isRefreshing}
+								aria-busy={isSyncing}
+							>
+								<Mail size={15} className={isSyncing ? 'spin' : ''} />
+								{isSyncing ? 'Syncing...' : 'Sync'}
+							</button>
 						</div>
 					</section>
 					<div className="stats-grid">

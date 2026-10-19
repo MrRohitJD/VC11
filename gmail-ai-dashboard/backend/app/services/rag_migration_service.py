@@ -135,7 +135,14 @@ class RAGMigrationService:
                 user_id_str = str(account.user_id) if account else ""
 
                 subject = email.subject if email else ""
-                emb_text = format_embedding_text(subject, chunk.chunk_text)
+                emb_text = format_embedding_text(
+                    subject=subject,
+                    chunk_text=chunk.chunk_text,
+                    sender_name=email.sender_name if email else None,
+                    sender_email=email.from_email if email else None,
+                    gmail_message_id=email.gmail_message_id if email else None,
+                    received_at=email.received_at if email else None,
+                )
                 chroma_rec_id = f"chunk_v2_{chunk.id}"
 
                 provider_name = getattr(self.embedder, "provider", settings.embedding_provider)
@@ -147,6 +154,7 @@ class RAGMigrationService:
                     "chunk_id": str(chunk.id),
                     "email_id": str(chunk.email_id),
                     "user_id": user_id_str,
+                    "gmail_message_id": str(email.gmail_message_id or "") if email else "",
                     "sender_id": str(email.from_email or "") if email else "",
                     "sender_email": str(email.from_email or "") if email else "",
                     "sender_name": str(email.sender_name or "") if email else "",

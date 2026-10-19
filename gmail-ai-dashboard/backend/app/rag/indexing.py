@@ -17,7 +17,7 @@ import logging
 from typing import List, Optional
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.email import Email, GmailAccount
@@ -78,7 +78,21 @@ class RAGIndexingPipeline:
         current_hashes = [doc.metadata.get("content_hash", "") for doc in chunk_docs]
         existing_hashes = [c.content_hash for c in existing_chunks]
 
-        if not force and current_hashes == existing_hashes and len(existing_chunks) == len(chunk_docs):
+        indexed_embedding_count = db.scalar(
+            select(func.count(EmailEmbedding.id))
+            .where(
+                EmailEmbedding.chunk_id.in_([chunk.id for chunk in existing_chunks]),
+                EmailEmbedding.chroma_collection == self.chroma.collection_name,
+                EmailEmbedding.status == "INDEXED",
+            )
+        ) or 0
+
+        if (
+            not force
+            and current_hashes == existing_hashes
+            and len(existing_chunks) == len(chunk_docs)
+            and indexed_embedding_count == len(chunk_docs)
+        ):
             # No changes detected, skip re-embedding
             logger.debug("Email %s chunks unchanged. Skipping indexing.", email_id)
             return len(existing_chunks)

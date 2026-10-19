@@ -462,6 +462,11 @@ def list_emails(
 		ensure_user_emails_classified(account.id)
 	except Exception:
 		pass
+	try:
+		from app.services.rag_auto_indexer import ensure_user_emails_embedded
+		ensure_user_emails_embedded(user.id)
+	except Exception:
+		pass
 	start_at = None
 	end_at = None
 	if range_key is not None:

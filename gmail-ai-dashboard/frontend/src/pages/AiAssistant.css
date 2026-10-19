@@ -810,3 +810,53 @@
   max-width: 680px;
   width: 100%;
 }
+
+/* Key Points Bullet List Card */
+.key-points-card {
+  border-top: 3px solid #2563eb;
+}
+
+.key-points-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.key-point-bullet-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  transition: all 0.15s ease;
+}
+
+.key-point-bullet-item:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.key-point-bullet-symbol {
+  color: #2563eb;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+  flex-shrink: 0;
+}
+
+.key-point-bullet-text {
+  font-size: 11.5px;
+  color: #1e293b;
+  line-height: 1.5;
+  font-weight: 500;
+}
+
+.key-points-empty {
+  font-size: 11px;
+  color: #8e98a7;
+  font-style: italic;
+  margin: 0;
+}
+

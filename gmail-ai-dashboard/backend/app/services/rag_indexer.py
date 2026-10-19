@@ -14,12 +14,13 @@ Ensures:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 import chromadb
 from chromadb.api import ClientAPI
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -89,6 +90,10 @@ class RAGIndexerService:
             subject=email.subject,
             body=email.body,
             body_html=email.body_html,
+            sender_name=email.sender_name,
+            sender_email=email.from_email,
+            gmail_message_id=email.gmail_message_id,
+            received_at=email.received_at,
         )
 
         # 3. If email has no usable body text, clean up any existing chunks and return
@@ -188,20 +193,30 @@ class RAGIndexerService:
                 )
                 db.add(embedding_obj)
 
+            rec_date_str = ""
+            rec_timestamp = 0.0
+            if email.received_at:
+                dt = email.received_at
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                rec_date_str = dt.isoformat()
+                rec_timestamp = float(dt.timestamp())
+
             ids.append(chroma_record_id)
             documents.append(record.embedding_text)
             metadatas.append({
                 "chunk_id": str(chunk_obj.id),
                 "email_id": str(email.id),
                 "user_id": user_id_str,
+                "gmail_message_id": str(email.gmail_message_id or ""),
                 "sender_id": str(email.from_email or ""),
                 "sender_email": str(email.from_email or ""),
                 "sender_name": str(email.sender_name or ""),
                 "recipient_id": str(email.to_email or ""),
                 "recipient_email": str(email.to_email or ""),
                 "subject": str(email.subject or ""),
-                "received_date": email.received_at.isoformat() if email.received_at else "",
-                "received_timestamp": float(email.received_at.timestamp()) if email.received_at else 0.0,
+                "received_date": rec_date_str,
+                "received_timestamp": rec_timestamp,
                 "chunk_index": int(record.chunk_index),
                 "chunk_strategy": str(record.chunk_strategy),
                 "content_hash": str(record.content_hash),
@@ -238,6 +253,72 @@ class RAGIndexerService:
         for chunk in existing_chunks:
             db.delete(chunk)
         db.commit()
+
+    def get_unindexed_email_ids(
+        self,
+        db: Session,
+        user_id: Optional[UUID] = None,
+        limit: Optional[int] = None,
+    ) -> List[UUID]:
+        """Find emails in PostgreSQL that do not have an INDEXED embedding in this collection.
+
+        Ensures tenant isolation when user_id is provided.
+        Only considers emails with body or HTML content.
+        """
+        indexed_subquery = (
+            select(1)
+            .select_from(EmailChunk)
+            .join(EmailEmbedding, EmailEmbedding.chunk_id == EmailChunk.id)
+            .where(
+                EmailChunk.email_id == Email.id,
+                EmailEmbedding.chroma_collection == self.collection_name,
+                EmailEmbedding.status == "INDEXED",
+            )
+        )
+        stmt = (
+            select(Email.id)
+            .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
+            .where(
+                ~exists(indexed_subquery),
+                (Email.body.is_not(None) | Email.body_html.is_not(None)),
+            )
+            .order_by(Email.received_at.desc().nullslast())
+        )
+        if user_id:
+            stmt = stmt.where(GmailAccount.user_id == user_id)
+        if limit:
+            stmt = stmt.limit(limit)
+        return list(db.scalars(stmt).all())
+
+    def index_unindexed_emails(
+        self,
+        db: Session,
+        user_id: Optional[UUID] = None,
+        batch_size: Optional[int] = None,
+    ) -> Dict[str, int]:
+        """Automatically find and index all unindexed emails for a user or across users.
+
+        Returns summary metrics dictionary.
+        """
+        unindexed_ids = self.get_unindexed_email_ids(db, user_id=user_id, limit=batch_size)
+        total_found = len(unindexed_ids)
+        indexed_count = 0
+        total_chunks = 0
+
+        for eid in unindexed_ids:
+            try:
+                chunks = self.index_email(db, email_id=eid, user_id=user_id)
+                if chunks > 0:
+                    indexed_count += 1
+                    total_chunks += chunks
+            except Exception as exc:
+                logger.warning("Error auto-indexing email %s: %s", eid, exc)
+
+        return {
+            "total_unindexed": total_found,
+            "emails_indexed": indexed_count,
+            "chunks_created": total_chunks,
+        }
 
     def search_rag(
         self,
@@ -287,9 +368,11 @@ class RAGIndexerService:
                 "chunk_id": meta.get("chunk_id"),
                 "email_id": meta.get("email_id"),
                 "user_id": meta.get("user_id"),
+                "gmail_message_id": meta.get("gmail_message_id"),
                 "subject": meta.get("subject"),
                 "sender_id": meta.get("sender_id", meta.get("sender_email")),
                 "sender_email": meta.get("sender_email"),
+                "sender_name": meta.get("sender_name"),
                 "recipient_id": meta.get("recipient_id", meta.get("recipient_email")),
                 "recipient_email": meta.get("recipient_email"),
                 "received_date": meta.get("received_date"),

@@ -51,16 +51,23 @@ router = APIRouter(prefix="/api/rag", tags=["rag"])
 # Authentication Helper with Development Fallback
 # ---------------------------------------------------------------------------
 def get_user_for_rag(request: Request, db: Session = Depends(get_db)) -> User:
-    """Retrieve authenticated user from session cookie, falling back to first user in dev."""
+    """Retrieve authenticated user from session cookie, falling back to active user in dev."""
     try:
         return get_current_user(request, db)
     except HTTPException:
-        # Development convenience: use active user with Gmail account if unauthenticated
-        user = (
-            db.query(User)
-            .join(GmailAccount, GmailAccount.user_id == User.id)
+        # Development convenience: pick the user with the most recently updated GmailAccount
+        recent_account = (
+            db.query(GmailAccount)
+            .order_by(GmailAccount.updated_at.desc().nullslast(), GmailAccount.created_at.desc().nullslast())
             .first()
-            or db.scalar(select(User).limit(1))
+        )
+        if recent_account and recent_account.user:
+            return recent_account.user
+        user = db.scalar(
+            select(User).order_by(
+                User.updated_at.desc().nullslast(),
+                User.created_at.desc().nullslast(),
+            ).limit(1)
         )
         if user:
             return user
@@ -94,12 +101,12 @@ class CitationItem(BaseModel):
     date: str
     snippet: str
     score: float
+    key_points: List[str] = Field(default_factory=list, description="Key points extracted from email as single-sentence bullets")
 
 
 class ChatResponse(BaseModel):
     answer: str
     intent: str
-    format: str = "text"
     citations: List[CitationItem]
     steps: List[Dict[str, Any]]
     plan: Optional[List[str]] = None
@@ -107,11 +114,11 @@ class ChatResponse(BaseModel):
     approval_id: Optional[str] = None
     session_id: str
     message_id: str
-    metrics: Optional[List[Dict[str, Any]]] = None
+    key_points: List[str] = Field(default_factory=list, description="Extracted key points based on user query in single-sentence bullets")
 
 
 class IndexRequest(BaseModel):
-    batch_size: int = Field(50, description="Emails processed per batch")
+    batch_size: Optional[int] = Field(None, description="Maximum emails to process; omit to process all emails")
     full_reindex: bool = Field(False, description="Whether to reprocess all emails")
 
 
@@ -164,14 +171,35 @@ def chat_with_assistant(
                 date=c.date,
                 snippet=c.snippet,
                 score=round(c.score, 4),
+                key_points=getattr(c, "key_points", []) or [],
             )
             for c in agent_res.citations
         ]
 
+        # Extract unique single-sentence key points across all retrieved citations
+        extracted_key_points: List[str] = []
+        seen_kp = set()
+        for c in agent_res.citations:
+            for kp in (getattr(c, "key_points", []) or []):
+                norm_kp = kp.strip().lower()
+                if norm_kp and norm_kp not in seen_kp:
+                    seen_kp.add(norm_kp)
+                    extracted_key_points.append(kp)
+
+        # Fallback if citations had snippets but no explicit key points
+        if not extracted_key_points and agent_res.citations:
+            from app.rag.retrieval import split_into_single_sentence_bullets
+            for c in agent_res.citations:
+                bullets = split_into_single_sentence_bullets(c.snippet, max_points=3)
+                for b in bullets:
+                    norm_b = b.strip().lower()
+                    if norm_b and norm_b not in seen_kp:
+                        seen_kp.add(norm_b)
+                        extracted_key_points.append(b)
+
         return ChatResponse(
             answer=agent_res.answer,
             intent=agent_res.intent,
-            format=getattr(agent_res, "format", "text"),
             citations=citation_items,
             steps=agent_res.steps,
             plan=agent_res.plan,
@@ -179,7 +207,7 @@ def chat_with_assistant(
             approval_id=agent_res.approval_id,
             session_id=agent_res.session_id or "",
             message_id=agent_res.message_id or "",
-            metrics=getattr(agent_res, "metrics", None),
+            key_points=extracted_key_points,
         )
     except Exception as exc:
         logger.exception("RAG assistant execution error: %s", exc)
@@ -201,6 +229,7 @@ def trigger_rag_indexing(
             db=db,
             user_id=user.id,
             batch_size=body.batch_size,
+            force=body.full_reindex,
         )
         return {
             "status": "success",

@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import os
 import re
 from typing import List, Optional
 
@@ -66,9 +67,15 @@ def get_embedding_model() -> Embeddings:
 
     Checks Azure credentials and endpoint. If available, returns AzureOpenAIEmbeddings.
     Otherwise, returns DeterministicOfflineEmbeddings to ensure reliable local execution.
+    In production environments, raises RuntimeError instead of silently falling back.
     """
     has_key = bool(settings.azure_openai_api_key and settings.azure_openai_api_key.strip())
     has_endpoint = bool(settings.azure_openai_endpoint and settings.azure_openai_endpoint.strip())
+    is_prod = (
+        os.getenv("ENVIRONMENT", "").lower() == "production"
+        or os.getenv("ENV", "").lower() == "production"
+        or getattr(settings, "environment", "").lower() == "production"
+    )
 
     if has_key and has_endpoint:
         try:
@@ -81,7 +88,17 @@ def get_embedding_model() -> Embeddings:
                 model=settings.azure_openai_embedding_model or AZURE_OPENAI_DEFAULT_MODEL,
             )
         except Exception as exc:
-            logger.warning("Could not initialize live AzureOpenAIEmbeddings (%s). Falling back to deterministic embeddings.", exc)
+            logger.warning("Could not initialize live AzureOpenAIEmbeddings (%s).", exc)
+            if is_prod:
+                raise RuntimeError(
+                    f"Production environment requires valid Azure OpenAI embeddings, but initialization failed: {exc}"
+                ) from exc
+
+    if is_prod:
+        raise RuntimeError(
+            "Production environment requires Azure OpenAI embedding credentials and endpoint "
+            "(AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT). Offline embeddings cannot silently become production embeddings."
+        )
 
     logger.info("Using DeterministicOfflineEmbeddings (dimensions=%d)", AZURE_OPENAI_LARGE_DIMENSIONS)
     return DeterministicOfflineEmbeddings(dimensions=AZURE_OPENAI_LARGE_DIMENSIONS)

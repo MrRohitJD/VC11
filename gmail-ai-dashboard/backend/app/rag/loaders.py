@@ -14,6 +14,7 @@ from uuid import UUID
 from langchain_core.documents import Document
 
 from app.models.email import Email, GmailAccount
+from app.services.email_chunker import format_embedding_text
 
 
 def compute_content_hash(text: str) -> str:
@@ -59,9 +60,16 @@ class GmailDocumentAdapter:
         # Prepare text representation
         body_content = email.body or ""
         subject_content = email.subject or ""
-        full_text = f"Subject: {subject_content}\nFrom: {email.from_email or 'Unknown'}\nDate: {email.received_at.isoformat() if email.received_at else ''}\n\n{body_content}"
+        full_text = format_embedding_text(
+            subject=subject_content,
+            chunk_text=body_content,
+            sender_name=email.sender_name,
+            sender_email=email.from_email,
+            gmail_message_id=email.gmail_message_id,
+            received_at=email.received_at,
+        )
 
-        content_hash = compute_content_hash(f"{subject_content}\n{body_content}")
+        content_hash = compute_content_hash(full_text)
 
         metadata: dict[str, Any] = {
             "user_id": resolved_user_id,
@@ -71,10 +79,13 @@ class GmailDocumentAdapter:
             "gmail_message_id": email.gmail_message_id or "",
             "subject": subject_content,
             "sender": email.from_email or "",
+            "sender_email": email.from_email or "",
+            "from_email": email.from_email or "",
             "sender_name": email.sender_name or "",
             "recipients": email.to_email or "",
             "cc": email.cc or "",
             "bcc": email.bcc or "",
+            "date": email.received_at.isoformat() if email.received_at else "",
             "received_at": email.received_at.isoformat() if email.received_at else "",
             "labels": json.dumps(label_names),
             "mime_type": "text/plain",

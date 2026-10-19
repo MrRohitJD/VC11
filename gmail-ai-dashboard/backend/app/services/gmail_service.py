@@ -412,6 +412,13 @@ def _sync_remaining_emails_worker(
 			except Exception as e:
 				logger.warning("Background AI classification trigger failed: %s", e)
 
+			# Trigger immediate RAG auto-embedding for the new batch
+			try:
+				from app.services.rag_auto_indexer import trigger_immediate_auto_indexing
+				trigger_immediate_auto_indexing()
+			except Exception:
+				pass
+
 			logger.info(
 				"Background synced %d emails (%d/%d) for account %s",
 				len(parsed), min(i + batch_chunk_size, len(remaining_ids)), len(remaining_ids), account_id,

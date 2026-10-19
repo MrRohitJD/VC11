@@ -88,6 +88,13 @@ def _run_sync_in_thread(user_id_str: str, user_id: UUID):
 			except Exception as llm_exc:
 				logger.warning("Failed to enqueue initial LLM classification: %s", llm_exc)
 
+			# Trigger RAG auto-embedding for newly synced emails
+			try:
+				from app.services.rag_auto_indexer import ensure_user_emails_embedded
+				ensure_user_emails_embedded(user.id)
+			except Exception as rag_exc:
+				logger.warning("Failed to trigger RAG auto-indexer after sync: %s", rag_exc)
+
 		_sync_state[user_id_str] = {
 			"status": "completed",
 			"stage": "ai_labels",

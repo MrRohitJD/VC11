@@ -20,6 +20,11 @@ async def lifespan(app: FastAPI):
 		start_global_ai_classifier_daemon()
 	except Exception:
 		pass
+	try:
+		from app.services.rag_auto_indexer import start_global_rag_auto_indexer_daemon
+		start_global_rag_auto_indexer_daemon()
+	except Exception:
+		pass
 	yield
 
 

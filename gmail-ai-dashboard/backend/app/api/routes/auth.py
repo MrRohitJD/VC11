@@ -89,6 +89,13 @@ def google_callback(request: Request, db: Session = Depends(get_db)):
 
 	user = upsert_google_user(db, google_id=claims["sub"], email=claims["email"], name=claims.get("name"), picture=claims.get("picture"), access_token=credentials.token, refresh_token=credentials.refresh_token, token_expiry=credentials.expiry, scope=credentials.scopes and " ".join(credentials.scopes))
 
+	# Automatically trigger RAG auto-embedding for any unindexed emails in background
+	try:
+		from app.services.rag_auto_indexer import ensure_user_emails_embedded
+		ensure_user_emails_embedded(user.id)
+	except Exception as auto_emb_exc:
+		logger.warning("Failed to launch background auto-indexer for user %s: %s", user.id, auto_emb_exc)
+
 	# Redirect to /sync so the frontend shows the sync loading screen
 	response = RedirectResponse(f"{settings.frontend_url}/sync", status_code=status.HTTP_302_FOUND)
 	response.set_cookie(SESSION_COOKIE, _encode_session(user), httponly=True, secure=settings.secure_cookies, samesite="lax", max_age=604800)
@@ -99,6 +106,11 @@ def google_callback(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/me")
 def current_user(user: User = Depends(get_current_user)):
+	try:
+		from app.services.rag_auto_indexer import ensure_user_emails_embedded
+		ensure_user_emails_embedded(user.id)
+	except Exception:
+		pass
 	return serialize_user(user)
 
 

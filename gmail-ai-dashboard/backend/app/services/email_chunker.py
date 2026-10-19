@@ -14,8 +14,9 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from html import unescape
-from typing import List, Optional
+from typing import List, Optional, Union
 from uuid import UUID
 
 from bs4 import BeautifulSoup, Comment
@@ -117,15 +118,62 @@ DEFAULT_CHUNK_OVERLAP = 250
 DEFAULT_SEPARATORS = ["\n\n", "\n", ". ", "! ", "? ", "; ", " ", ""]
 
 
-def format_embedding_text(subject: Optional[str], chunk_text: str) -> str:
+def format_embedding_text(
+    subject: Optional[str],
+    chunk_text: str,
+    sender_name: Optional[str] = None,
+    sender_email: Optional[str] = None,
+    gmail_message_id: Optional[str] = None,
+    received_at: Optional[Union[datetime, str, float, int]] = None,
+) -> str:
     """Format contextual text sent to the embedding model.
 
-    Subject is placed as primary semantic context followed by chunk content.
-    Database IDs and timestamps are deliberately excluded from the vector payload
-    and preserved in ChromaDB metadata instead.
+    Constructs a consistent text representation including all five core fields:
+    1. Email subject
+    2. Sender name and email address
+    3. Received timestamp in readable ISO 8601 format
+    4. Gmail message ID
+    5. Email body / current body chunk
     """
     clean_subj = (subject or "").strip() or "(No Subject)"
-    return f"Subject: {clean_subj}\n\nEmail content:\n{chunk_text.strip()}"
+
+    clean_name = (sender_name or "").strip()
+    clean_email = (sender_email or "").strip()
+    if clean_name and clean_email:
+        if clean_name.lower() == clean_email.lower():
+            clean_sender = clean_email
+        else:
+            clean_sender = f"{clean_name} <{clean_email}>"
+    elif clean_email:
+        clean_sender = clean_email
+    elif clean_name:
+        clean_sender = clean_name
+    else:
+        clean_sender = "(Unknown Sender)"
+
+    if isinstance(received_at, datetime):
+        if received_at.tzinfo is None:
+            clean_date = received_at.replace(tzinfo=timezone.utc).isoformat()
+        else:
+            clean_date = received_at.isoformat()
+    elif isinstance(received_at, (int, float)):
+        clean_date = datetime.fromtimestamp(received_at, tz=timezone.utc).isoformat()
+    elif received_at:
+        clean_date = str(received_at).strip()
+    else:
+        clean_date = "(Unknown Date)"
+
+    clean_msg_id = (gmail_message_id or "").strip() or "(Unknown ID)"
+    clean_chunk = (chunk_text or "").strip()
+
+    return (
+        f"Subject: {clean_subj}\n"
+        f"From: {clean_sender}\n"
+        f"Date: {clean_date}\n"
+        f"Message-ID: {clean_msg_id}\n\n"
+        f"Email content:\n"
+        f"{clean_chunk}"
+    )
 
 
 def compute_content_hash(text: str) -> str:
@@ -137,6 +185,10 @@ def create_email_chunks(
     subject: Optional[str],
     body: Optional[str],
     body_html: Optional[str] = None,
+    sender_name: Optional[str] = None,
+    sender_email: Optional[str] = None,
+    gmail_message_id: Optional[str] = None,
+    received_at: Optional[Union[datetime, str, float, int]] = None,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
     separators: Optional[List[str]] = None,
@@ -148,15 +200,22 @@ def create_email_chunks(
     2. Short emails (length <= chunk_size) remain one intact chunk.
     3. Long emails are split using LangChain's RecursiveCharacterTextSplitter.
     4. Each chunk has start/end character offsets, strategy label, and SHA-256 hash.
-    5. Each chunk formats embedding text as 'Subject: ...\\n\\nEmail content:\\n...'.
+    5. Each chunk formats embedding text containing all five core fields.
     """
     clean_body = clean_email_body(body, body_html)
     if not clean_body:
         return []
 
-    # Rule 3: Short email preservation — exactly one chunk
+    # Rule 2: Short email preservation — exactly one chunk
     if len(clean_body) <= chunk_size:
-        embedding_text = format_embedding_text(subject, clean_body)
+        embedding_text = format_embedding_text(
+            subject=subject,
+            chunk_text=clean_body,
+            sender_name=sender_name,
+            sender_email=sender_email,
+            gmail_message_id=gmail_message_id,
+            received_at=received_at,
+        )
         content_hash = compute_content_hash(embedding_text)
         return [
             ChunkRecord(
@@ -170,7 +229,7 @@ def create_email_chunks(
             )
         ]
 
-    # Rule 4 & 5: RecursiveCharacterTextSplitter for longer emails
+    # Rule 3 & 4: RecursiveCharacterTextSplitter for longer emails
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -198,7 +257,14 @@ def create_email_chunks(
         end_index = found_pos + len(stripped)
         search_start = max(search_start, start_index + max(1, len(stripped) - chunk_overlap))
 
-        embedding_text = format_embedding_text(subject, stripped)
+        embedding_text = format_embedding_text(
+            subject=subject,
+            chunk_text=stripped,
+            sender_name=sender_name,
+            sender_email=sender_email,
+            gmail_message_id=gmail_message_id,
+            received_at=received_at,
+        )
         content_hash = compute_content_hash(embedding_text)
 
         chunks.append(
