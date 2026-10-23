@@ -20,6 +20,7 @@ from app.core.security import get_current_user
 from app.database.connection import get_db
 from app.database.crud import delete_user_and_all_data, serialize_user, upsert_google_user
 from app.models.email import User
+from app.services.chat_quota import set_demo_visitor_cookie
 from app.services.demo_seed import DEMO_EMAIL, DEMO_GOOGLE_ID
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ def current_user(user: User = Depends(get_current_user)):
 
 
 @router.post("/demo")
-def enter_demo(db: Session = Depends(get_db)):
+def enter_demo(request: Request, db: Session = Depends(get_db)):
 	"""Open the seeded, read-only fictional mailbox without Google OAuth."""
 	user = db.scalar(select(User).where(User.google_id == DEMO_GOOGLE_ID,
 	                                    User.email == DEMO_EMAIL, User.is_demo.is_(True)))
@@ -130,6 +131,7 @@ def enter_demo(db: Session = Depends(get_db)):
 	response = Response(content=json.dumps(serialize_user(user)), media_type="application/json")
 	response.set_cookie(SESSION_COOKIE, _encode_session(user), httponly=True,
 	                    secure=settings.secure_cookies, samesite="lax", max_age=86400)
+	set_demo_visitor_cookie(request, response)
 	return response
 
 

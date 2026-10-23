@@ -2,9 +2,10 @@
 
 import hashlib
 import hmac
+import secrets
 from datetime import datetime, timezone
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -14,21 +15,39 @@ from app.models.chat_quota import ChatQuota
 from app.models.email import User
 
 DAILY_LIMIT = 10
+DEMO_VISITOR_COOKIE = "gmail_ai_demo_visitor"
 
 
 def _digest(value: str) -> str:
     return hmac.new(settings.session_secret.encode(), value.encode(), hashlib.sha256).hexdigest()
 
 
+def _visitor_id(request: Request) -> str | None:
+    raw_cookie = request.cookies.get(DEMO_VISITOR_COOKIE, "")
+    visitor, separator, signature = raw_cookie.partition(".")
+    if separator and visitor and len(visitor) <= 128 and hmac.compare_digest(signature, _digest(visitor)):
+        return visitor
+    return None
+
+
+def set_demo_visitor_cookie(request: Request, response: Response) -> None:
+    """Keep a signed visitor identifier across demo sessions and logouts."""
+    visitor = _visitor_id(request) or secrets.token_urlsafe(32)
+    response.set_cookie(
+        DEMO_VISITOR_COOKIE, f"{visitor}.{_digest(visitor)}",
+        httponly=True, secure=settings.secure_cookies, samesite="lax",
+        max_age=365 * 86400,
+    )
+
+
 def _identities(request: Request, user: User) -> list[str]:
     if not user.is_demo:
         return [f"user:{user.id}"]
 
-    # The demo account is shared. A browser token distinguishes visitors on a
-    # shared network; the network/browser signature also survives cookie resets.
-    raw_cookie = request.cookies.get("gmail_ai_demo_visitor", "")
-    visitor, separator, signature = raw_cookie.partition(".")
-    if not separator or not visitor or len(visitor) > 128 or not hmac.compare_digest(signature, _digest(visitor)):
+    # The demo account can be recreated. Count both its persistent browser
+    # identifier and an IP/browser signature that survives cookie resets.
+    visitor = _visitor_id(request)
+    if visitor is None:
         raise HTTPException(status_code=401, detail="Please enter the demo again")
 
     ip = request.client.host if request.client else "unknown"

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 import app.models.llm  # noqa: F401 - registers job mapper before sessions are used
+import app.models.chat_quota  # noqa: F401 - registers the assistant quota mapper
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ def get_db() -> Generator[Session, None, None]:
 REQUIRED_TABLES = frozenset({
     "users", "gmail_accounts", "emails", "labels", "email_labels",
     "ai_categories", "email_classifications", "sync_history",
-    "llm_classification_jobs",
+    "llm_classification_jobs", "chat_quotas",
 })
 
 

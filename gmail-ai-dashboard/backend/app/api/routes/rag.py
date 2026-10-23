@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user
 from app.database.connection import get_db, SessionLocal
+from app.services.chat_quota import reserve_chat_request
 from app.rag.activity import activity_context
 from app.models.email import Email, GmailAccount, User
 from app.models.rag import (
@@ -124,6 +125,7 @@ class ApprovalActionResponse(BaseModel):
 @router.post("/chat", response_model=ChatResponse)
 def chat_with_assistant(
     body: ChatRequest,
+    request: Request,
     user: User = Depends(get_user_for_rag),
     db: Session = Depends(get_db),
     x_timezone: Optional[str] = Header(None, alias="X-Timezone"),
@@ -131,13 +133,11 @@ def chat_with_assistant(
     """Execute grounded question answering or agent execution for the user's emails."""
     if not body.query or not body.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
-    if user.is_demo:
-        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        own_count = db.scalar(select(func.count(ChatMessage.id)).join(ChatSession, ChatSession.id == ChatMessage.chat_session_id).where(ChatSession.user_id == user.id, ChatMessage.role == "user", ChatMessage.created_at >= today)) or 0
-        global_count = db.scalar(select(func.count(ChatMessage.id)).join(ChatSession, ChatSession.id == ChatMessage.chat_session_id).join(User, User.id == ChatSession.user_id).where(User.is_demo.is_(True), ChatMessage.role == "user", ChatMessage.created_at >= today)) or 0
-        if own_count >= 10 or global_count >= 100:
-            raise HTTPException(status_code=429, detail="Demo assistant limit reached for today")
+    reserve_chat_request(db, request, user)
+    return _run_chat(body, user, db, x_timezone)
 
+
+def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[str]) -> ChatResponse:
     try:
         f_dict = dict(body.filter_dict or {})
         if body.sender:
@@ -221,12 +221,15 @@ def chat_with_assistant(
 @router.post("/chat/stream")
 def stream_chat(
     body: ChatRequest,
+    request: Request,
     user: User = Depends(get_user_for_rag),
+    db: Session = Depends(get_db),
     x_timezone: Optional[str] = Header(None, alias="X-Timezone"),
 ):
     """Stream observable progress and one final response; never stream reasoning."""
     if not body.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    reserve_chat_request(db, request, user)
     user_id = user.id
     events = Queue()
     disconnected = Event()
@@ -243,7 +246,7 @@ def stream_chat(
                 if scoped_user is None:
                     raise ValueError("User session is unavailable")
                 with activity_context(publish):
-                    response = chat_with_assistant(body, scoped_user, db, x_timezone)
+                    response = _run_chat(body, scoped_user, db, x_timezone)
                 if not disconnected.is_set():
                     events.put(("result", response.model_dump()))
         except Exception as exc:
