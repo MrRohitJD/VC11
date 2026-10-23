@@ -188,8 +188,11 @@ export default function AiAssistant({ user: propUser }) {
 			setMessages((prev) => [...prev, assistantMsg]);
 		} catch (error) {
 			console.warn('Backend RAG call failed:', error);
+			const rateLimited = error.status === 429 || error.response?.status === 429;
 			const responseData = {
-				text: 'I could not answer your question right now. Please try again in a moment.',
+				text: rateLimited
+					? 'You have used your 10 assistant requests for today. Your quota resets at midnight UTC.'
+					: 'I could not answer your question right now. Please try again in a moment.',
 				steps: requestSteps,
 			};
 

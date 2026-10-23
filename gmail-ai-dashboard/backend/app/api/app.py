@@ -38,7 +38,7 @@ app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_url], allow_
 
 @app.middleware("http")
 async def protect_demo_mailbox(request: Request, call_next):
-    allowed = {"/api/auth/demo", "/api/auth/logout"}
+    allowed = {"/api/auth/demo", "/api/auth/logout", "/api/rag/chat", "/api/rag/chat/stream"}
     if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path.startswith("/api/") and request.url.path not in allowed:
         with SessionLocal() as db:
             try:

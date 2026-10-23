@@ -72,7 +72,13 @@ export const sendRagChat = async (data, onProgress) => {
 		headers: { 'Content-Type': 'application/json', ...(timezone ? { 'X-Timezone': timezone } : {}) },
 		body: JSON.stringify(data),
 	});
-	if (!response.ok || !response.body) throw new Error('Mailbox search could not start.');
+	if (!response.ok) {
+		const payload = await response.json().catch(() => ({}));
+		const error = new Error(payload.detail || 'Mailbox search could not start.');
+		error.status = response.status;
+		throw error;
+	}
+	if (!response.body) throw new Error('Mailbox search could not start.');
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = '';
