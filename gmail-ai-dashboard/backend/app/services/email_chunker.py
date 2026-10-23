@@ -165,11 +165,13 @@ def format_embedding_text(
         clean_date = "(Unknown Date)"
 
     clean_msg_id = (gmail_message_id or "").strip() or "(Unknown ID)"
+    clean_recipients = (recipient_emails or "").strip() or "(Unknown Recipient)"
     clean_chunk = (chunk_text or "").strip()
 
     return (
         f"Subject: {clean_subj}\n"
         f"From: {clean_sender}\n"
+        f"To: {clean_recipients}\n"
         f"Date: {clean_date}\n"
         f"Message-ID: {clean_msg_id}\n\n"
         f"Email content:\n"
@@ -190,6 +192,7 @@ def create_email_chunks(
     sender_email: Optional[str] = None,
     gmail_message_id: Optional[str] = None,
     received_at: Optional[Union[datetime, str, float, int]] = None,
+    recipient_emails: Optional[str] = None,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
     separators: Optional[List[str]] = None,
@@ -216,6 +219,7 @@ def create_email_chunks(
             sender_email=sender_email,
             gmail_message_id=gmail_message_id,
             received_at=received_at,
+            recipient_emails=recipient_emails,
         )
         content_hash = compute_content_hash(embedding_text)
         return [
@@ -265,6 +269,7 @@ def create_email_chunks(
             sender_email=sender_email,
             gmail_message_id=gmail_message_id,
             received_at=received_at,
+            recipient_emails=recipient_emails,
         )
         content_hash = compute_content_hash(embedding_text)
 

@@ -67,6 +67,7 @@ class GmailDocumentAdapter:
             sender_email=email.from_email,
             gmail_message_id=email.gmail_message_id,
             received_at=email.received_at,
+            recipient_emails=email.to_email,
         )
 
         content_hash = compute_content_hash(full_text)

@@ -1,11 +1,8 @@
-"""Batch migration and comparison utility for OpenAI text-embedding-3-large (v2).
+"""Batch migration utility for PostgreSQL pgvector embeddings.
 
-Features:
-- Resumable batch indexing: skips chunks already indexed in gmail_email_chunks_v2
-- Progress reporting via callbacks and structured logging
-- Exponential retry handling on rate-limit errors
-- Preservation of existing gmail_email_chunks collection (zero vector mixing)
-- Side-by-side retrieval comparison between v1 and v2 collections
+This replaces the old Chroma v1/v2 migration. Existing ``email_chunks`` are
+re-embedded into ``email_embeddings`` and all metadata is written in the same
+PostgreSQL row as the vector.
 """
 
 from __future__ import annotations
@@ -13,24 +10,19 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from email.utils import getaddresses
 from typing import Any, Callable, Dict, List, Optional
 from uuid import UUID
 
-import chromadb
-from chromadb.api import ClientAPI
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.email import Email, GmailAccount
+from app.models.email import Email
 from app.models.rag import EmailChunk, EmailEmbedding
+from app.rag.pgvector_store import PostgresVectorStoreManager
 from app.services.email_chunker import format_embedding_text
-from app.services.embedding_provider import (
-    EmbeddingProvider,
-    OPENAI_LARGE_DIMENSIONS,
-    OPENAI_LARGE_MODEL,
-    default_embedding_provider,
-)
+from app.services.embedding_provider import EmbeddingProvider, default_embedding_provider
 
 logger = logging.getLogger(__name__)
 
@@ -56,264 +48,123 @@ class ComparisonResult:
     v2_latency_ms: float
 
 
-class RAGMigrationService:
-    """Manages batch migration of email chunks from v1 to text-embedding-3-large (v2)."""
+def _recipients(email: Email) -> list[str]:
+    values = [email.to_email or "", email.cc or "", email.bcc or ""]
+    return [address for _, address in getaddresses([value for value in values if value]) if address]
 
-    def __init__(
-        self,
-        chroma_client: Optional[ClientAPI] = None,
-        embedding_provider: Optional[EmbeddingProvider] = None,
-        target_collection_name: Optional[str] = None,
-    ):
-        self.target_collection = target_collection_name or settings.chroma_collection_name_v2
+
+class RAGMigrationService:
+    """Re-embed chunks into PostgreSQL, with resumable batch progress."""
+
+    def __init__(self, chroma_client=None, embedding_provider: Optional[EmbeddingProvider] = None,
+                 target_collection_name: Optional[str] = None):
+        self.target_collection = target_collection_name or "postgres_halfvec_3072"
         self.embedder = embedding_provider or default_embedding_provider
 
-        if chroma_client is not None:
-            self.client = chroma_client
-        else:
-            self.client = chromadb.PersistentClient(path=settings.chroma_persist_dir)
+    def migrate_all_chunks(self, db: Session, batch_size: int = 50,
+                           progress_callback: Optional[Callable[[MigrationProgress], None]] = None) -> MigrationProgress:
+        started = time.time()
+        chunks = db.scalars(select(EmailChunk).order_by(EmailChunk.created_at)).all()
+        total = len(chunks)
+        indexed_ids = set(db.scalars(select(EmailEmbedding.chunk_id).where(
+            EmailEmbedding.chroma_collection == self.target_collection,
+            EmailEmbedding.status == "INDEXED",
+            EmailEmbedding.embedding.is_not(None),
+            EmailEmbedding.embedding_dimensions == settings.embedding_dimensions,
+        )).all())
+        pending = [chunk for chunk in chunks if chunk.id not in indexed_ids]
+        migrated = failed = 0
 
-        self.collection_v2 = self.client.get_or_create_collection(
-            name=self.target_collection,
-            metadata={"hnsw:space": "cosine", "model": self.embedder.model_name, "dimensions": self.embedder.dimensions},
-        )
+        emails = {email.id: email for email in db.scalars(
+            select(Email).where(Email.id.in_({chunk.email_id for chunk in pending}))
+        ).all()} if pending else {}
+        provider = getattr(self.embedder, "provider", settings.embedding_provider)
+        model = getattr(self.embedder, "deployment_name", getattr(self.embedder, "model_name", settings.embedding_model_name))
 
-    def migrate_all_chunks(
-        self,
-        db: Session,
-        batch_size: int = 50,
-        progress_callback: Optional[Callable[[MigrationProgress], None]] = None,
-    ) -> MigrationProgress:
-        """Re-embed all email chunks into gmail_email_chunks_v2 in resumable batches."""
-        start_time = time.time()
-
-        # 1. Fetch all chunks from PostgreSQL
-        all_chunks = db.scalars(select(EmailChunk).order_by(EmailChunk.created_at)).all()
-        total_chunks = len(all_chunks)
-
-        if total_chunks == 0:
-            return MigrationProgress(0, 0, 0, 0, 100.0, 0.0)
-
-        # 2. Identify chunks already indexed in the target v2 collection
-        already_indexed_ids = set(
-            db.scalars(
-                select(EmailEmbedding.chunk_id).where(
-                    EmailEmbedding.chroma_collection == self.target_collection,
-                    EmailEmbedding.status == "INDEXED",
-                )
-            ).all()
-        )
-
-        pending_chunks = [c for c in all_chunks if c.id not in already_indexed_ids]
-        already_count = len(already_indexed_ids)
-        migrated_count = 0
-        failed_count = 0
-
-        logger.info(
-            "Starting RAG v2 migration: %d total chunks, %d already indexed, %d pending",
-            total_chunks,
-            already_count,
-            len(pending_chunks),
-        )
-
-        # Preload email cache for fast metadata resolution
-        email_ids = list({c.email_id for c in pending_chunks})
-        emails = {e.id: e for e in db.scalars(select(Email).where(Email.id.in_(email_ids))).all()} if email_ids else {}
-        account_ids = list({e.gmail_account_id for e in emails.values()})
-        accounts = {a.id: a for a in db.scalars(select(GmailAccount).where(GmailAccount.id.in_(account_ids))).all()} if account_ids else {}
-
-        # 3. Process pending chunks in batches
-        for i in range(0, len(pending_chunks), batch_size):
-            batch = pending_chunks[i : i + batch_size]
-            batch_texts: List[str] = []
-            batch_ids: List[str] = []
-            batch_metadatas: List[Dict[str, Any]] = []
-
-            for chunk in batch:
-                email = emails.get(chunk.email_id)
-                account = accounts.get(email.gmail_account_id) if email else None
-                user_id_str = str(account.user_id) if account else ""
-
-                subject = email.subject if email else ""
-                emb_text = format_embedding_text(
-                    subject=subject,
-                    chunk_text=chunk.chunk_text,
-                    sender_name=email.sender_name if email else None,
-                    sender_email=email.from_email if email else None,
-                    gmail_message_id=email.gmail_message_id if email else None,
-                    received_at=email.received_at if email else None,
-                )
-                chroma_rec_id = f"chunk_v2_{chunk.id}"
-
-                provider_name = getattr(self.embedder, "provider", settings.embedding_provider)
-                model_deployment = getattr(self.embedder, "deployment_name", self.embedder.model_name)
-
-                batch_texts.append(emb_text)
-                batch_ids.append(chroma_rec_id)
-                batch_metadatas.append({
-                    "chunk_id": str(chunk.id),
-                    "email_id": str(chunk.email_id),
-                    "user_id": user_id_str,
-                    "gmail_message_id": str(email.gmail_message_id or "") if email else "",
-                    "sender_id": str(email.from_email or "") if email else "",
-                    "sender_email": str(email.from_email or "") if email else "",
-                    "sender_name": str(email.sender_name or "") if email else "",
-                    "recipient_id": str(email.to_email or "") if email else "",
-                    "recipient_email": str(email.to_email or "") if email else "",
-                    "subject": str(subject or ""),
-                    "received_date": email.received_at.isoformat() if email and email.received_at else "",
-                    "received_timestamp": float(email.received_at.timestamp()) if email and email.received_at else 0.0,
-                    "chunk_index": int(chunk.chunk_index),
-                    "chunk_strategy": str(chunk.chunk_strategy or ""),
-                    "content_hash": str(chunk.content_hash or ""),
-                    "embedding_provider": str(provider_name),
-                    "embedding_model": str(model_deployment),
-                    "embedding_dimensions": int(self.embedder.dimensions),
-                })
-
+        for start in range(0, len(pending), batch_size):
+            batch = pending[start:start + batch_size]
             try:
-                # Generate vectors in batch
-                vectors = self.embedder.embed_documents(batch_texts)
-
-                # Insert into ChromaDB collection v2
-                self.collection_v2.add(
-                    ids=batch_ids,
-                    embeddings=vectors,
-                    documents=batch_texts,
-                    metadatas=batch_metadatas,
-                )
-
-                # Upsert PostgreSQL registry rows
-                for chunk, rec_id in zip(batch, batch_ids):
-                    existing_emb = db.scalar(
-                        select(EmailEmbedding).where(
-                            EmailEmbedding.chunk_id == chunk.id,
-                            EmailEmbedding.chroma_collection == self.target_collection,
+                texts = []
+                for chunk in batch:
+                    email = emails.get(chunk.email_id)
+                    texts.append(format_embedding_text(
+                        subject=email.subject if email else "",
+                        chunk_text=chunk.chunk_text,
+                        sender_name=email.sender_name if email else None,
+                        sender_email=email.from_email if email else None,
+                        gmail_message_id=email.gmail_message_id if email else None,
+                        received_at=email.received_at if email else None,
+                        recipient_emails=email.to_email if email else None,
+                    ))
+                vectors = self.embedder.embed_documents(texts)
+                if any(len(vector) != settings.embedding_dimensions for vector in vectors):
+                    raise ValueError(f"Embedding provider must return {settings.embedding_dimensions}-dimensional vectors")
+                for chunk, text, vector in zip(batch, texts, vectors):
+                    email = emails.get(chunk.email_id)
+                    embedding = db.scalar(select(EmailEmbedding).where(
+                        EmailEmbedding.chunk_id == chunk.id,
+                        EmailEmbedding.chroma_collection == self.target_collection,
+                    ))
+                    if embedding is None:
+                        embedding = EmailEmbedding(
+                            chunk_id=chunk.id,
+                            chroma_collection=self.target_collection,
+                            chroma_record_id=f"pgvector_{chunk.id}",
                         )
-                    )
-                    if existing_emb:
-                        existing_emb.embedding_provider = provider_name
-                        existing_emb.embedding_model = model_deployment
-                        existing_emb.embedding_dimensions = self.embedder.dimensions
-                        existing_emb.content_hash = chunk.content_hash
-                        existing_emb.status = "INDEXED"
-                    else:
-                        db.add(
-                            EmailEmbedding(
-                                chunk_id=chunk.id,
-                                chroma_collection=self.target_collection,
-                                chroma_record_id=rec_id,
-                                embedding_provider=provider_name,
-                                embedding_model=model_deployment,
-                                embedding_dimensions=self.embedder.dimensions,
-                                content_hash=chunk.content_hash,
-                                status="INDEXED",
-                            )
-                        )
-
+                        db.add(embedding)
+                    embedding.email_id = chunk.email_id
+                    embedding.email_subject = email.subject if email else ""
+                    embedding.sender_email = email.from_email if email else ""
+                    embedding.recipient_emails = _recipients(email) if email else []
+                    embedding.email_sent_at = email.received_at if email else None
+                    embedding.embedding_text = text
+                    embedding.embedding_type = "email"
+                    embedding.embedding_provider = str(provider)
+                    embedding.embedding_model = str(model)
+                    embedding.embedding_dimensions = settings.embedding_dimensions
+                    embedding.embedding = list(vector)
+                    embedding.content_hash = chunk.content_hash
+                    embedding.status = "INDEXED"
                 db.commit()
-                migrated_count += len(batch)
-
+                migrated += len(batch)
             except Exception as exc:
                 db.rollback()
-                failed_count += len(batch)
-                logger.error("Failed to migrate batch starting at offset %d: %s", i, exc)
+                failed += len(batch)
+                logger.error("Failed PostgreSQL embedding migration batch at %d: %s", start, exc)
 
-            elapsed = time.time() - start_time
-            pct = round(((already_count + migrated_count) / total_chunks) * 100.0, 1)
             progress = MigrationProgress(
-                total_chunks=total_chunks,
-                already_indexed=already_count,
-                migrated=migrated_count,
-                failed=failed_count,
-                percent_complete=pct,
-                elapsed_seconds=round(elapsed, 2),
+                total_chunks=total,
+                already_indexed=len(indexed_ids),
+                migrated=migrated,
+                failed=failed,
+                percent_complete=round(((len(indexed_ids) + migrated + failed) / total) * 100, 1) if total else 100.0,
+                elapsed_seconds=round(time.time() - started, 2),
             )
-
             if progress_callback:
                 progress_callback(progress)
 
-            logger.info("Migration progress: %d/%d (%.1f%%) in %.1fs", already_count + migrated_count, total_chunks, pct, elapsed)
-
-        total_elapsed = round(time.time() - start_time, 2)
         return MigrationProgress(
-            total_chunks=total_chunks,
-            already_indexed=already_count,
-            migrated=migrated_count,
-            failed=failed_count,
+            total_chunks=total,
+            already_indexed=len(indexed_ids),
+            migrated=migrated,
+            failed=failed,
             percent_complete=100.0,
-            elapsed_seconds=total_elapsed,
+            elapsed_seconds=round(time.time() - started, 2),
         )
 
-    def compare_retrieval(
-        self,
-        query: str,
-        user_id: UUID,
-        top_k: int = 5,
-        v1_collection_name: Optional[str] = None,
-    ) -> ComparisonResult:
-        """Compare retrieval results side-by-side between v1 and v2 collections."""
-        v1_name = v1_collection_name or settings.chroma_collection_name_v1
+    def compare_retrieval(self, db: Session, query: str, user_id: UUID, top_k: int = 5,
+                          v1_collection: str = "gmail_email_chunks",
+                          v2_collection: Optional[str] = None) -> ComparisonResult:
+        def search(collection: str) -> tuple[List[Dict[str, Any]], float]:
+            started = time.perf_counter()
+            manager = PostgresVectorStoreManager(embedding_function=self.embedder, db_session=db)
+            manager.collection_name = collection
+            docs = manager.search_with_scores(query, user_id, top_k=top_k,
+                                              filter_dict={"chroma_collection": collection})
+            return [{"email_id": doc.metadata.get("email_id"), "subject": doc.metadata.get("subject"),
+                     "document": doc.page_content, "score": score} for doc, score in docs], (time.perf_counter() - started) * 1000
 
-        # Search v2 (OpenAI text-embedding-3-large)
-        t0 = time.time()
-        q_vec_v2 = self.embedder.embed_query(query)
-        v2_raw = self.collection_v2.query(
-            query_embeddings=[q_vec_v2],
-            n_results=top_k,
-            where={"user_id": str(user_id)},
-        )
-        v2_latency = round((time.time() - t0) * 1000, 2)
-
-        v2_results: List[Dict[str, Any]] = []
-        if v2_raw and v2_raw.get("ids") and v2_raw["ids"][0]:
-            for r_id, doc, meta, dist in zip(
-                v2_raw["ids"][0],
-                v2_raw["documents"][0] if v2_raw.get("documents") else [],
-                v2_raw["metadatas"][0] if v2_raw.get("metadatas") else [],
-                v2_raw["distances"][0] if v2_raw.get("distances") else [],
-            ):
-                v2_results.append({
-                    "id": r_id,
-                    "subject": meta.get("subject"),
-                    "similarity": round(max(0.0, 1.0 - dist), 4),
-                    "document_snippet": doc[:140],
-                })
-
-        # Search v1 (legacy)
-        v1_results: List[Dict[str, Any]] = []
-        v1_latency = 0.0
-        try:
-            coll_v1 = self.client.get_collection(name=v1_name)
-            t1 = time.time()
-            v1_raw = coll_v1.query(
-                query_texts=[query],
-                n_results=top_k,
-                where={"user_id": str(user_id)},
-            )
-            v1_latency = round((time.time() - t1) * 1000, 2)
-            if v1_raw and v1_raw.get("ids") and v1_raw["ids"][0]:
-                for r_id, doc, meta, dist in zip(
-                    v1_raw["ids"][0],
-                    v1_raw["documents"][0] if v1_raw.get("documents") else [],
-                    v1_raw["metadatas"][0] if v1_raw.get("metadatas") else [],
-                    v1_raw["distances"][0] if v1_raw.get("distances") else [],
-                ):
-                    v1_results.append({
-                        "id": r_id,
-                        "subject": meta.get("subject"),
-                        "similarity": round(max(0.0, 1.0 - dist), 4),
-                        "document_snippet": doc[:140],
-                    })
-        except Exception as exc:
-            logger.debug("Legacy collection %s query skipped or empty: %s", v1_name, exc)
-
-        return ComparisonResult(
-            query=query,
-            v1_collection=v1_name,
-            v2_collection=self.target_collection,
-            v1_results=v1_results,
-            v2_results=v2_results,
-            v1_latency_ms=v1_latency,
-            v2_latency_ms=v2_latency,
-        )
+        v2 = v2_collection or self.target_collection
+        first, first_ms = search(v1_collection)
+        second, second_ms = search(v2)
+        return ComparisonResult(query, v1_collection, v2, first, second, first_ms, second_ms)

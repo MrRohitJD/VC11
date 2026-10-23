@@ -65,6 +65,6 @@ def restrict_to_email_ids(custom_filter: dict | None, email_ids: list[str]) -> d
     scope = {"email_id": {"$in": email_ids}}
     if not custom_filter:
         return scope
-    # Chroma requires one operator per filter expression.
+    # Keep the filter shape compatible with the vector-manager contract.
     conditions = [{key: value} for key, value in custom_filter.items()]
     return {"$and": [*conditions, scope]}

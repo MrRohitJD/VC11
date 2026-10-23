@@ -1,7 +1,7 @@
 """SQLAlchemy ORM models for RAG retrieval, vector embeddings, attachments, and chatbot sessions.
 
 Maintains relational RAG chunks and PostgreSQL pgvector embeddings,
-preserving user ownership and relational integrity. ChromaDB is an optional local fallback.
+preserving user ownership and relational integrity. PostgreSQL pgvector is the sole vector store.
 """
 
 from __future__ import annotations
@@ -86,12 +86,12 @@ class EmailEmbedding(Base):
     )
     chroma_record_id: Mapped[str] = mapped_column(String(255), nullable=False)
     embedding_provider: Mapped[str] = mapped_column(
-        String(50), default="sentence-transformers", server_default="sentence-transformers", nullable=False
+        String(50), default="azure_openai", server_default="azure_openai", nullable=False
     )
     embedding_model: Mapped[str] = mapped_column(
-        String(100), default="all-MiniLM-L6-v2", server_default="all-MiniLM-L6-v2", nullable=False
+        String(100), default="text-embedding-3-large", server_default="text-embedding-3-large", nullable=False
     )
-    embedding_dimensions: Mapped[int] = mapped_column(Integer, default=384, server_default="384", nullable=False)
+    embedding_dimensions: Mapped[int] = mapped_column(Integer, default=3072, server_default="3072", nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="INDEXED", server_default="INDEXED", nullable=False)
     created_at: Mapped[datetime] = mapped_column(

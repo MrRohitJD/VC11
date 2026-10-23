@@ -186,7 +186,7 @@ def format_context_from_citations(citations: List[RetrievedCitation]) -> str:
 
 
 from app.rag.retrieval import (
-    ChromaSemanticRetriever,
+    PostgresSemanticRetriever,
     ConditionalMultiQueryRetriever,
     ContextualCompressionRetriever,
     EmailKeyPointsCompressor,
@@ -398,7 +398,7 @@ class GroundedRAGChain:
         emit_activity("retrieve_candidates", search_plan.label, status="running", strategy=search_plan.strategy)
 
         # Primary fast retriever: LangChain + configured vector backend similarity search
-        semantic_retriever = ChromaSemanticRetriever(
+        semantic_retriever = PostgresSemanticRetriever(
             user_id=user_str,
             db_session=db,
             primary_only=True,

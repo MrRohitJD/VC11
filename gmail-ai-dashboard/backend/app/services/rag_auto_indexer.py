@@ -40,7 +40,7 @@ def ensure_user_emails_embedded(user_id: UUID, session_factory=None) -> None:
     """Non-blocking check on user login / sync.
 
     Spawns an asynchronous background worker to embed any of the user's emails
-    that are not yet indexed in ChromaDB collection 'gmail_email_chunks_v2'.
+    that are not yet indexed in the PostgreSQL ``email_embeddings`` table.
     """
     from sqlalchemy import select
     from app.models.email import User

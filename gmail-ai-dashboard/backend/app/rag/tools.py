@@ -21,7 +21,7 @@ from app.models.email import AiCategory, Email, EmailClassification, EmailLabel,
 from app.models.rag import Attachment, EmailSendApproval
 from app.rag.mailbox_scope import primary_email_condition
 from app.rag.retrieval import (
-    ChromaSemanticRetriever,
+    PostgresSemanticRetriever,
     ConditionalMultiQueryRetriever,
     GmailCustomHybridRetriever,
     MultiQueryRetriever,
@@ -141,11 +141,11 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
 
     @tool
     def search_emails(query: str, top_k: int = 5) -> str:
-        """Search emails semantically using ChromaDB vector retrieval."""
+        """Search emails semantically using PostgreSQL pgvector retrieval."""
         sanitized = sanitize_tool_args({"query": query, "top_k": top_k})
         logger.info("Tool chosen: search_emails with args: %s", sanitized)
 
-        retriever = ChromaSemanticRetriever(
+        retriever = PostgresSemanticRetriever(
             user_id=str(user_uuid),
             db_session=db,
             primary_only=True,
@@ -236,7 +236,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
 
     @tool
     def retrieve_email_context(query: str, top_k: int = 5) -> str:
-        """Perform hybrid retrieval (dense ChromaDB vector + PostgreSQL text) for RAG context."""
+        """Perform hybrid retrieval (dense pgvector + PostgreSQL text) for RAG context."""
         sanitized = sanitize_tool_args({"query": query, "top_k": top_k})
         logger.info("Tool chosen: retrieve_email_context with args: %s", sanitized)
 
@@ -316,7 +316,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         thread_id: Optional[str] = None,
         top_k: int = 10,
     ) -> str:
-        """Execute custom hybrid retrieval combining ChromaDB semantic search with PostgreSQL relational filters."""
+        """Execute custom hybrid retrieval combining pgvector semantic search with PostgreSQL relational filters."""
         s_dt, e_dt = parse_relative_or_explicit_date_range(start_date=start_date, end_date=end_date)
         sanitized = sanitize_tool_args({
             "query": query,

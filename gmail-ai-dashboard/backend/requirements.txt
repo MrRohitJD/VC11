@@ -19,4 +19,3 @@ langsmith>=0.4,<1
 langchain-core>=1.0,<2
 langchain-openai>=1.0,<2
 langchain-community>=0.4,<1
-chromadb>=1.0,<2

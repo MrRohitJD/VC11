@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_project: str = "mailbox-devLG"
     database_url: str = "sqlite:///./gmail_ai_dashboard.db"
-    # PostgreSQL pgvector is the production/default backend. Chroma remains an explicit local fallback.
+    # PostgreSQL pgvector is the sole vector backend.
     vector_backend: str = Field("postgres", validation_alias=AliasChoices("RAG_VECTOR_BACKEND"))
     gmail_sync_limit: int = Field(500, ge=1, le=5000, validation_alias=AliasChoices("GMAIL_SYNC_LIMIT"))
     database_pool_size: int = Field(5, validation_alias=AliasChoices("DATABASE_POOL_SIZE"))
@@ -51,14 +51,17 @@ class Settings(BaseSettings):
     openai_api_key: str = Field("", validation_alias=AliasChoices("OPENAI_API_KEY"))
     explabs_api_key: str = Field("", validation_alias=AliasChoices("EXPLABS_API_KEY"))
 
-    # ChromaDB & RAG configuration
-    chroma_persist_dir: str = Field(str(_BACKEND_DIR / "data" / "chroma"), validation_alias=AliasChoices("CHROMA_PERSIST_DIR", "RAG_STORAGE_PATH"))
-    chroma_collection_name_v1: str = "gmail_email_chunks"
-    chroma_collection_name_v2: str = Field("gmail_email_chunks_v2", validation_alias=AliasChoices("CHROMA_COLLECTION_NAME_V2", "CHROMA_COLLECTION_NAME"))
-    active_chroma_collection: str = Field("gmail_email_chunks_v2", validation_alias=AliasChoices("ACTIVE_CHROMA_COLLECTION"))
     embedding_provider: str = Field("azure_openai", validation_alias=AliasChoices("RAG_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"))
     embedding_model_name: str = Field("text-embedding-3-large", validation_alias=AliasChoices("RAG_EMBEDDING_MODEL", "EMBEDDING_MODEL"))
     embedding_dimensions: int = Field(3072, validation_alias=AliasChoices("RAG_EMBEDDING_DIMENSIONS", "EMBEDDING_DIMENSIONS"))
+
+    @field_validator("vector_backend")
+    @classmethod
+    def postgres_only_vector_backend(cls, value: str) -> str:
+        normalized = (value or "postgres").strip().lower()
+        if normalized != "postgres":
+            raise ValueError("Only PostgreSQL pgvector is supported; local ChromaDB storage has been removed")
+        return normalized
 
     @field_validator("database_url")
     @classmethod

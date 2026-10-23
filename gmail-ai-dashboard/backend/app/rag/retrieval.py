@@ -1,7 +1,7 @@
 """LangChain retrievers implementation for Gmail RAG system.
 
 Provides 4 specialized retrievers adhering to LangChain's BaseRetriever abstraction:
-1. ChromaSemanticRetriever: Dense semantic vector search via the configured vector backend (Postgres pgvector in production)
+1. PostgresSemanticRetriever: Dense semantic vector search in PostgreSQL pgvector
 2. GmailCustomHybridRetriever: Fuses semantic search with PostgreSQL filters (sender, date range, labels, read status, email ID, thread ID)
 3. HistoryAwareRetriever: Rewrites conversational follow-up questions into standalone queries using chat history
 4. MultiQueryRetriever: Generates alternative search queries, executes parallel retrieval, merges and deduplicates via RRF
@@ -41,7 +41,8 @@ from app.models.email import AiCategory, Email, EmailClassification, EmailLabel,
 from app.rag.mailbox_scope import primary_email_condition, primary_email_ids, restrict_to_email_ids
 from app.rag.query_constraints import is_financial_query
 from app.rag.preprocessing import clean_email_text
-from app.rag.vectorstore import ChromaVectorStoreManager, default_chroma_manager
+from app.rag.vectorstore import default_vectorstore
+from app.rag.pgvector_store import PostgresVectorStoreManager
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,7 @@ def documents_to_citations(documents: List[Document]) -> List[RetrievedCitation]
 # 1. Configured Vector Semantic Retriever
 # ============================================================================
 
-class ChromaSemanticRetriever(BaseRetriever):
+class PostgresSemanticRetriever(BaseRetriever):
     """LangChain retriever executing dense semantic vector similarity search.
 
     Features:
@@ -192,7 +193,7 @@ class ChromaSemanticRetriever(BaseRetriever):
     - Optional MMR mode (search_type="mmr", fetch_k=20, lambda_mult=0.7) to reduce redundant chunks.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
     user_id: str = Field(..., description="Authenticated user UUID string for tenant isolation")
     db_session: Optional[Any] = Field(None, description="Database for current Gmail category labels")
@@ -213,7 +214,7 @@ class ChromaSemanticRetriever(BaseRetriever):
     start_timestamp: Optional[Union[float, int]] = Field(None, description="Filter emails on or after POSIX timestamp")
     end_timestamp: Optional[Union[float, int]] = Field(None, description="Filter emails before POSIX timestamp")
 
-    chroma_manager: Any = Field(default_factory=lambda: default_chroma_manager)
+    vector_manager: Any = Field(default_factory=lambda: default_vectorstore, alias="chroma_manager")
 
     @traceable(name="vector_retrieval", run_type="retriever")
     def _get_relevant_documents(
@@ -239,7 +240,16 @@ class ChromaSemanticRetriever(BaseRetriever):
             custom_filter = restrict_to_email_ids(custom_filter, allowed_ids)
             allowed_ids = set(allowed_ids)
 
-        combined_filter = self.chroma_manager.build_filter(
+        vector_manager = self.vector_manager
+        if self.db_session is not None and isinstance(vector_manager, PostgresVectorStoreManager):
+            collection_name = vector_manager.collection_name
+            vector_manager = PostgresVectorStoreManager(
+                embedding_function=vector_manager.embedding_function,
+                db_session=self.db_session,
+            )
+            vector_manager.collection_name = collection_name
+
+        combined_filter = vector_manager.build_filter(
             user_id=self.user_id,
             sender=self.sender,
             gmail_message_id=self.gmail_message_id,
@@ -251,7 +261,7 @@ class ChromaSemanticRetriever(BaseRetriever):
         )
 
         if self.search_type == "mmr":
-            results = self.chroma_manager.search_mmr_with_scores(
+            results = vector_manager.search_mmr_with_scores(
                 query=query.strip(),
                 user_id=self.user_id,
                 top_k=self.top_k,
@@ -261,7 +271,7 @@ class ChromaSemanticRetriever(BaseRetriever):
             )
         else:
             # Default HNSW cosine similarity search with single query embedding
-            results = self.chroma_manager.search_with_scores(
+            results = vector_manager.search_with_scores(
                 query=query.strip(),
                 user_id=self.user_id,
                 top_k=self.top_k,
@@ -278,7 +288,7 @@ class ChromaSemanticRetriever(BaseRetriever):
 
             meta = dict(doc.metadata or {})
             meta["score"] = round(float(score) if score is not None else 0.85, 4)
-            meta.setdefault("source", "chromadb")
+            meta.setdefault("source", "postgresql")
             meta["retrieval_mode"] = self.search_type
             meta["search_type"] = self.search_type
             docs.append(Document(page_content=doc.page_content, metadata=meta))
@@ -290,6 +300,10 @@ class ChromaSemanticRetriever(BaseRetriever):
     def retrieve_citations(self, query: str) -> List[RetrievedCitation]:
         """Convenience method returning structured RetrievedCitation objects."""
         return documents_to_citations(self.invoke(query))
+
+
+# Compatibility import name for integrations that still use the old class.
+ChromaSemanticRetriever = PostgresSemanticRetriever
 
 
 # ============================================================================
@@ -392,7 +406,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
     - thread_id (thread correspondence)
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
     user_id: str = Field(..., description="Authenticated user UUID string for tenant isolation")
     db_session: Optional[Any] = Field(None, description="SQLAlchemy Session for relational queries")
@@ -417,7 +431,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
     lambda_mult: float = Field(0.7, description="MMR diversity parameter")
     semantic_weight: float = Field(0.6, description="Weight for semantic vector scores in RRF")
     keyword_weight: float = Field(0.4, description="Weight for structured SQL matches in RRF")
-    chroma_manager: Any = Field(default_factory=lambda: default_chroma_manager)
+    vector_manager: Any = Field(default_factory=lambda: default_vectorstore, alias="chroma_manager")
 
     @traceable(name="hybrid_retrieval", run_type="retriever")
     def _get_relevant_documents(
@@ -426,13 +440,21 @@ class GmailCustomHybridRetriever(BaseRetriever):
         *,
         run_manager: Optional[CallbackManagerForRetrieverRun] = None,
     ) -> List[Document]:
-        """Execute hybrid search blending ChromaDB semantic vectors and PostgreSQL metadata via RRF."""
+        """Execute hybrid search blending pgvector similarity and PostgreSQL metadata via RRF."""
         if not self.user_id or not str(self.user_id).strip():
             raise ValueError("user_id is mandatory for tenant isolation on every retrieval path")
 
         user_uuid = UUID(str(self.user_id))
         semantic_docs: List[Document] = []
         sql_docs: List[Document] = []
+        vector_manager = self.vector_manager
+        if self.db_session is not None and isinstance(vector_manager, PostgresVectorStoreManager):
+            collection_name = vector_manager.collection_name
+            vector_manager = PostgresVectorStoreManager(
+                embedding_function=vector_manager.embedding_function,
+                db_session=self.db_session,
+            )
+            vector_manager.collection_name = collection_name
 
         allowed_ids = None
         if self.primary_only:
@@ -440,7 +462,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
             if not allowed_ids:
                 return []
 
-        # 1. Semantic search via ChromaDB
+        # 1. Semantic search via PostgreSQL pgvector
         try:
             custom_f: Dict[str, Any] = {}
             if self.email_id:
@@ -451,7 +473,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
                 custom_f = restrict_to_email_ids(custom_f, allowed_ids)
                 allowed_ids = set(allowed_ids)
 
-            combined_chroma_filter = self.chroma_manager.build_filter(
+            combined_chroma_filter = vector_manager.build_filter(
                 user_id=self.user_id,
                 sender=self.sender,
                 gmail_message_id=self.gmail_message_id,
@@ -463,7 +485,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
             )
 
             if self.search_type == "mmr":
-                raw_semantic = self.chroma_manager.search_mmr_with_scores(
+                raw_semantic = vector_manager.search_mmr_with_scores(
                     query=query,
                     user_id=self.user_id,
                     top_k=self.top_k * 2,
@@ -472,7 +494,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
                     filter_dict=combined_chroma_filter,
                 )
             else:
-                raw_semantic = self.chroma_manager.search_with_scores(
+                raw_semantic = vector_manager.search_with_scores(
                     query=query,
                     user_id=self.user_id,
                     top_k=self.top_k * 2,
@@ -484,10 +506,10 @@ class GmailCustomHybridRetriever(BaseRetriever):
                     continue
                 meta = dict(doc.metadata or {})
                 meta["score"] = round(float(score) if score is not None else 0.85, 4)
-                meta.setdefault("source", "chromadb")
+                meta.setdefault("source", "postgresql")
                 semantic_docs.append(Document(page_content=doc.page_content, metadata=meta))
         except Exception as exc:
-            logger.debug("ChromaDB semantic search error: %s", exc)
+            logger.debug("PostgreSQL vector search error: %s", exc)
 
         # 2. Structured & keyword search via PostgreSQL
         if self.db_session:
@@ -654,11 +676,11 @@ class GmailCustomHybridRetriever(BaseRetriever):
         top_k: int = 5,
         filter_dict: Optional[dict[str, Any]] = None,
     ) -> List[RetrievedCitation]:
-        retriever = ChromaSemanticRetriever(
+        retriever = PostgresSemanticRetriever(
             user_id=str(user_id),
             top_k=top_k,
             filter_dict=filter_dict,
-            chroma_manager=self.chroma_manager,
+            vector_manager=self.vector_manager,
         )
         return retriever.retrieve_citations(query)
 
@@ -776,7 +798,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
             is_read=filters.get("is_read"),
             email_id=filters.get("email_id"),
             thread_id=filters.get("thread_id"),
-            chroma_manager=self.chroma_manager,
+            vector_manager=self.vector_manager,
         )
         docs = retriever.invoke(query)
         return documents_to_citations(docs)
@@ -1064,7 +1086,7 @@ class MultiQueryRetriever(BaseRetriever):
         for did in sorted_ids:
             doc = doc_store[did]
             doc.metadata["fused_score"] = round(fused_scores[did], 4)
-            doc.metadata.setdefault("source", "chromadb")
+            doc.metadata.setdefault("source", "postgresql")
             top_docs.append(doc)
 
         return top_docs
@@ -1081,7 +1103,7 @@ class ConditionalMultiQueryRetriever(BaseRetriever):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    base_retriever: BaseRetriever = Field(..., description="Underlying retriever (e.g. GmailCustomHybridRetriever or ChromaSemanticRetriever)")
+    base_retriever: BaseRetriever = Field(..., description="Underlying retriever (e.g. GmailCustomHybridRetriever or PostgresSemanticRetriever)")
     llm: Optional[Any] = Field(None, description="LangChain BaseChatModel for query routing and expansion")
     query_count: int = Field(3, description="Number of alternative query perspectives for MultiQueryRetriever")
     min_confidence_score: float = Field(0.65, description="Threshold below which normal retrieval escalates to MultiQueryRetriever")
@@ -1454,7 +1476,7 @@ class RetrievalStrategyEvaluator:
         recall = len(ground_truth_indices & clustered_indices) / float(k)
 
         assessment = (
-            f"For typical user mailbox scale (N={vector_count} chunks), flat ChromaDB HNSW search "
+            f"For typical user mailbox scale (N={vector_count} chunks), PostgreSQL pgvector HNSW search "
             f"executes in {t_flat_ms:.2f}ms with 100% recall. Cluster-based routing incurs centroid "
             f"overhead ({t_cluster_ms:.2f}ms) and suffers boundary loss (Recall@{k}={recall * 100:.1f}%). "
             "Clustering is only justified when N > 100,000 vectors."

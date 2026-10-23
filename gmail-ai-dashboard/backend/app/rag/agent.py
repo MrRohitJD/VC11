@@ -9,7 +9,7 @@ Implemented Patterns:
 6. Human-in-the-Loop: Strict approval gating for email drafts and actions
 7. Query Transformation: Standalone question rewriting from conversational history
 8. Contextual Compression: Relevance filtering and deduplication of retrieved chunks
-9. Hybrid Retrieval: Combining dense ChromaDB vector search with SQL metadata filters
+9. Hybrid Retrieval: Combining dense PostgreSQL pgvector search with SQL metadata filters
 10. Fallback Routing: SQL keyword and deterministic extraction fallbacks
 """
 
