@@ -4,7 +4,7 @@ The `ai-powered-gmail` app runs in a single web container containing both the Re
 
 This deployment is based on the **`devLG`** branch, which contains the latest LangGraph mailbox orchestration, Gmail MCP integration, updated vector database migrations, and chat rate limiting.
 
-> **Note:** Do not use the `main` branch for deployment. Always use `devLG` as the base branch, deployed via the `codex/heroku-pgvector-deploy` branch.
+> **Note:** Do not use the `main` branch for deployment. Always use `devLG` as the base branch, deployed via the `heroku_deploy_dev_lg` branch.
 
 ## Heroku Settings
 
@@ -24,9 +24,9 @@ Set these config vars on `ai-powered-gmail`:
 | `BACKEND_URL` | `https://ai-powered-gmail-0007703734bc.herokuapp.com` |
 | `OAUTH_GOOGLE_REDIRECT_URI` | `https://ai-powered-gmail-0007703734bc.herokuapp.com/api/auth/callback` |
 | `SECURE_COOKIES` | `true` |
-| `AZURE_OPENAI_ENDPOINT` | `https://rg-openai-sea.cognitiveservices.azure.com/` |
-| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | `text-embedding-3-large`|
-| `AZURE_OPENAI_CHAT_DEPLOYMENT` | `gpt-4.1-mini` |
+| `AZURE_OPENAI_ENDPOINT` | Your Azure OpenAI resource endpoint, e.g. `https://<RESOURCE>.openai.azure.com/` |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Name of your 3072-dimensional `text-embedding-3-large` deployment |
+| `AZURE_OPENAI_CHAT_DEPLOYMENT` | Name of your chat deployment (defaults to `gpt-4.1-mini`) |
 
 Keep `SESSION_SECRET`, `AZURE_OPENAI_API_KEY`, `OAUTH_GOOGLE_CLIENT_ID`, and `OAUTH_GOOGLE_CLIENT_SECRET` as Heroku config vars. Do not commit them.
 
@@ -45,12 +45,12 @@ The Heroku app uses the `container` stack. The repository root contains `heroku.
 ### Deploying Changes
 
 If using GitHub connected deployments on Heroku Dashboard:
-- Connect the **`codex/heroku-pgvector-deploy`** branch (based on `devLG`) and trigger manual or automatic deploys. Do not connect `main`.
+- Connect the **`heroku_deploy_dev_lg`** branch (based on `devLG`) and trigger manual or automatic deploys. Do not connect `main`.
 
 If deploying via Heroku Git CLI:
 ```powershell
 heroku git:remote -a ai-powered-gmail
-git push heroku codex/heroku-pgvector-deploy:main --force
+git push heroku heroku_deploy_dev_lg:main --force
 ```
 
 After release, open `https://ai-powered-gmail-0007703734bc.herokuapp.com/health` to confirm the service is healthy.
