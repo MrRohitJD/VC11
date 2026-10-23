@@ -13,7 +13,7 @@ backend/credentials/credentials.json
 .env.*
 !.env.example
 
-/data/
+/data
 # Python
 __pycache__/
 *.py[cod]
