@@ -133,3 +133,64 @@ def test_malformed_batch_recovers_with_individual_strict_decisions():
     assert not result.failed
     assert result.evaluated == 2
     assert len(result.documents) == 2
+
+
+@pytest.mark.parametrize('words,digits', [('two weeks','2 weeks'), ('three months','3 months'), ('a year','1 year')])
+def test_spelled_out_receipt_windows(words, digits):
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    assert received_date_bounds('last ' + words, now) == received_date_bounds('last ' + digits, now)
+
+
+def test_sender_constraints_do_not_confuse_dates_or_topic_mentions():
+    from app.rag.search_plan import requested_sender, sender_only_request, sender_matches
+    assert requested_sender('all emails from last two weeks') is None
+    assert requested_sender('all emails from 2026-10-01') is None
+    assert requested_sender('all emails from October') is None
+    assert requested_sender('all emails from ChatGPT and summarize them') == 'ChatGPT'
+    assert not sender_only_request('all emails from ChatGPT and summarize them')
+    assert sender_only_request('all emails from ChatGPT in the last two weeks')
+    assert sender_matches('ChatGPT', 'ChatGPT <noreply@example.com>')
+    assert not sender_matches('ChatGPT', 'NotChatGPT <other@example.com>')
+    assert sender_matches('alice@example.com', 'Alice <alice@example.com>')
+    assert not sender_matches('alice@example.com', 'alice@example.com.evil.test')
+
+
+def test_later_provider_failure_retains_verified_matches():
+    def respond(messages):
+        c = json.loads(messages[-1].content)['candidates'][0]
+        if c['email_id'] == 'two':
+            raise TimeoutError()
+        return AIMessage(content=json.dumps({'decisions': [decision(c['email_id'])]}))
+    result = validate_email_relevance([candidate('one'), candidate('two')], 'interviews', RunnableLambda(respond), batch_size=1)
+    assert result.failed and result.error_type == 'timeout'
+    assert result.evaluated == 1
+    assert [d.metadata['email_id'] for d in result.documents] == ['one']
+
+
+def test_bad_single_decision_does_not_discard_other_decisions():
+    def respond(messages):
+        cs = json.loads(messages[-1].content)['candidates']
+        if len(cs) > 1 or cs[0]['email_id'] == 'bad':
+            return AIMessage(content='invalid JSON')
+        return AIMessage(content=json.dumps({'decisions': [decision(cs[0]['email_id'])]}))
+    result = validate_email_relevance([candidate('one'), candidate('bad'), candidate('three')], 'interviews', RunnableLambda(respond))
+    assert result.failed
+    assert result.evaluated == 2
+    assert [d.metadata['email_id'] for d in result.documents] == ['one', 'three']
+
+
+def test_schema_failure_is_not_hidden_by_broken_fallback_credentials():
+    def respond(messages):
+        cs = json.loads(messages[-1].content)['candidates']
+        return AIMessage(content='bad JSON' if len(cs) > 1 else json.dumps({'decisions': [decision(cs[0]['email_id'])]}))
+    calls = []
+    class AuthError(Exception):
+        status_code = 401
+    def broken(_):
+        calls.append(1)
+        raise AuthError()
+    model = RunnableLambda(respond).with_fallbacks([RunnableLambda(broken)])
+    result = validate_email_relevance([candidate('one'), candidate('two')], 'interviews', model)
+    assert not result.failed
+    assert len(result.documents) == 2
+    assert len(calls) == 1

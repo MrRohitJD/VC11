@@ -32,12 +32,20 @@ def mailbox_now() -> datetime:
     return datetime.now(_client_timezone.get())
 
 
+def normalize_date_words(query: str) -> str:
+    numbers = dict(zip('one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty'.split(), range(1, 21)))
+    numbers.update(a=1, an=1)
+    return re.sub(r'\b(last|past)\s+(' + '|'.join(numbers) + r')\s+(days?|weeks?|months?|years?)\b',
+                  lambda m: f'{m[1]} {numbers[m[2].lower()]} {m[3]}', query, flags=re.I)
+
+
 def received_date_bounds(query: str, now: datetime | None = None):
     """Translate email calendar requests into a half-open UTC interval.
 
     Payment deadlines are dates in the message, not its receipt timestamp.
     Those continue to be checked separately by billing_email_matches.
     """
+    query = normalize_date_words(query)
     if is_financial_query(query) and re.search(r"\b(?:due|pending|unpaid|outstanding)\b", query, re.I):
         return None
     now = now or mailbox_now()

@@ -409,6 +409,34 @@ def test_llm_failure_does_not_display_keyword_matches_as_validated_results(mailb
     assert "could not validate" in result["answer"]
 
 
+def test_sender_listing_works_without_any_ai_and_ignores_body_mentions(mailbox):
+    db, user_id, emails, _ = mailbox
+    emails['personal'].from_email = 'ChatGPT <noreply@example.com>'
+    emails['inbox'].body = 'An article about ChatGPT.'
+    db.commit()
+    def unavailable(_):
+        pytest.fail('Sender listing must not call AI')
+    result = GroundedRAGChain(model=RunnableLambda(unavailable)).answer_query(db, 'Give all mails from ChatGPT.', user_id)
+    assert [c.email_id for c in result['citations']] == [str(emails['personal'].id)]
+    assert result['relevance_validated']
+
+
+def test_partial_validation_returns_citations_with_incomplete_notice(mailbox, monkeypatch):
+    import app.rag.chains as chains
+    from app.rag.relevance import RelevanceResult
+    db, user_id, emails, _ = mailbox
+    def partial(docs, *args):
+        doc = docs[0]
+        doc.metadata['key_points'] = ['Verified planning details.']
+        return RelevanceResult(documents=[doc], evaluated=1, failed=True, error_type='timeout')
+    monkeypatch.setattr(chains, 'validate_email_relevance', partial)
+    result = GroundedRAGChain(model=planning_model()).answer_query(db, 'Find all planning emails', user_id)
+    assert result['context_count'] == 1
+    assert not result['relevance_validated']
+    assert 'Search is incomplete' in result['answer']
+    assert 'Verified matches so far' in result['answer']
+
+
 def test_local_month_boundary_excludes_previous_month_and_next_month(mailbox, monkeypatch):
     from app.rag.query_constraints import mailbox_time_context
     db, user_id, emails, _ = mailbox

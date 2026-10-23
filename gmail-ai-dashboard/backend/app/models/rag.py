@@ -1,7 +1,7 @@
 """SQLAlchemy ORM models for RAG retrieval, vector embeddings, attachments, and chatbot sessions.
 
-Maintains clean relational mapping between PostgreSQL and ChromaDB vector collections,
-preserving user ownership and relational integrity.
+Maintains relational RAG chunks and PostgreSQL pgvector embeddings,
+preserving user ownership and relational integrity. ChromaDB is an optional local fallback.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    ARRAY,
     BigInteger,
     CheckConstraint,
     DateTime,
@@ -24,6 +25,8 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import JSON
+from pgvector.sqlalchemy import HALFVEC
 
 from app.models.email import Base, Email, User, utcnow
 
@@ -56,11 +59,7 @@ class EmailChunk(Base):
 
 
 class EmailEmbedding(Base):
-    """Metadata mapping between PostgreSQL email chunk and ChromaDB vector store.
-
-    Actual dense vector embeddings reside in ChromaDB collection 'gmail_email_chunks';
-    this table tracks synchronization status, model metadata, and content hashes.
-    """
+    """Dense pgvector embedding and searchable email metadata for one chunk."""
 
     __tablename__ = "email_embeddings"
     __table_args__ = (
@@ -74,8 +73,16 @@ class EmailEmbedding(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     chunk_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("email_chunks.id", ondelete="CASCADE"), nullable=False)
+    embedding: Mapped[list[float] | None] = mapped_column(HALFVEC(3072).with_variant(JSON(), "sqlite"))
+    email_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("emails.id", ondelete="CASCADE"), nullable=True)
+    email_subject: Mapped[str | None] = mapped_column(Text)
+    sender_email: Mapped[str | None] = mapped_column(Text)
+    recipient_emails: Mapped[list[str] | None] = mapped_column(ARRAY(Text).with_variant(JSON(), "sqlite"))
+    email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    embedding_text: Mapped[str | None] = mapped_column(Text)
+    embedding_type: Mapped[str | None] = mapped_column(String(30), default="email", server_default="email")
     chroma_collection: Mapped[str] = mapped_column(
-        String(100), default="gmail_email_chunks", server_default="gmail_email_chunks", nullable=False
+        String(100), default="postgres_halfvec_3072", server_default="postgres_halfvec_3072", nullable=False
     )
     chroma_record_id: Mapped[str] = mapped_column(String(255), nullable=False)
     embedding_provider: Mapped[str] = mapped_column(

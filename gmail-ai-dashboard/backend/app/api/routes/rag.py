@@ -49,6 +49,7 @@ from app.rag.query_constraints import mailbox_time_context
 from app.rag.indexing import default_pipeline
 from app.rag.memory import list_user_sessions
 from app.rag.vectorstore import default_vectorstore
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -59,32 +60,8 @@ router = APIRouter(prefix="/api/rag", tags=["rag"])
 # Authentication Helper with Development Fallback
 # ---------------------------------------------------------------------------
 def get_user_for_rag(request: Request, db: Session = Depends(get_db)) -> User:
-    """Retrieve authenticated user from session cookie, falling back to active user in dev."""
-    try:
-        return get_current_user(request, db)
-    except HTTPException:
-        # Development convenience: pick the user with the most recently updated GmailAccount
-        recent_account = (
-            db.query(GmailAccount)
-            .order_by(GmailAccount.updated_at.desc().nullslast(), GmailAccount.created_at.desc().nullslast())
-            .first()
-        )
-        if recent_account and recent_account.user:
-            return recent_account.user
-        user = db.scalar(
-            select(User).order_by(
-                User.updated_at.desc().nullslast(),
-                User.created_at.desc().nullslast(),
-            ).limit(1)
-        )
-        if user:
-            return user
-        # Auto-create dev user if table is empty
-        dev_user = User(id=uuid4(), google_id="dev_google_id", email="dev@example.com", name="Development User")
-        db.add(dev_user)
-        db.commit()
-        db.refresh(dev_user)
-        return dev_user
+    """Never substitute another account when a session is absent or invalid."""
+    return get_current_user(request, db)
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +131,12 @@ def chat_with_assistant(
     """Execute grounded question answering or agent execution for the user's emails."""
     if not body.query or not body.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    if user.is_demo:
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        own_count = db.scalar(select(func.count(ChatMessage.id)).join(ChatSession, ChatSession.id == ChatMessage.chat_session_id).where(ChatSession.user_id == user.id, ChatMessage.role == "user", ChatMessage.created_at >= today)) or 0
+        global_count = db.scalar(select(func.count(ChatMessage.id)).join(ChatSession, ChatSession.id == ChatMessage.chat_session_id).join(User, User.id == ChatSession.user_id).where(User.is_demo.is_(True), ChatMessage.role == "user", ChatMessage.created_at >= today)) or 0
+        if own_count >= 10 or global_count >= 100:
+            raise HTTPException(status_code=429, detail="Demo assistant limit reached for today")
 
     try:
         f_dict = dict(body.filter_dict or {})
@@ -325,7 +308,7 @@ def get_rag_system_status(
     db: Session = Depends(get_db),
 ):
     """Return live status of ChromaDB vector collection, chunks, and pending approvals."""
-    chroma_count = default_vectorstore.count()
+    vector_count = default_vectorstore.count(user.id) if settings.vector_backend == "postgres" else default_vectorstore.count()
 
     total_chunks = db.scalar(
         select(func.count(EmailChunk.id))
@@ -355,15 +338,17 @@ def get_rag_system_status(
 
     return {
         "status": "operational",
-        "chromadb": {
+        "vector_store": {
             "collection_name": default_vectorstore.collection_name,
-            "persist_directory": str(default_vectorstore.persist_directory),
-            "total_vectors": chroma_count,
+            "backend": settings.vector_backend,
+            "total_vectors": vector_count,
         },
         "postgresql": {
             "user_emails": user_email_count,
             "total_chunks": total_chunks,
             "indexed_embeddings": total_embeddings_indexed,
+            "indexed_emails": db.scalar(select(func.count(func.distinct(Email.id))).join(EmailChunk, EmailChunk.email_id == Email.id).join(EmailEmbedding, EmailEmbedding.chunk_id == EmailChunk.id).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(GmailAccount.user_id == user.id, EmailEmbedding.status == "INDEXED")) or 0,
+            "pending_emails": max(0, user_email_count - (db.scalar(select(func.count(func.distinct(Email.id))).join(EmailChunk, EmailChunk.email_id == Email.id).join(EmailEmbedding, EmailEmbedding.chunk_id == EmailChunk.id).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(GmailAccount.user_id == user.id, EmailEmbedding.status == "INDEXED")) or 0)),
             "pending_approvals": pending_approvals,
         },
         "timestamp": datetime.utcnow().isoformat(),

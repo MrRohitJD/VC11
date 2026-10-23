@@ -258,5 +258,9 @@ class ChromaVectorStoreManager:
             return 0
 
 
-default_chroma_manager = ChromaVectorStoreManager()
+if settings.vector_backend == "postgres":
+    from app.rag.pgvector_store import PostgresVectorStoreManager
+    default_chroma_manager = PostgresVectorStoreManager()
+else:
+    default_chroma_manager = ChromaVectorStoreManager()
 default_vectorstore = default_chroma_manager

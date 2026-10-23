@@ -83,3 +83,11 @@ def test_timezone_context_is_restored_after_request():
     with mailbox_time_context("UTC"):
         assert str(mailbox_now().tzinfo) == "UTC"
     assert str(mailbox_now().tzinfo) == original
+
+
+def test_simple_sender_search_routes_without_calling_ai():
+    from app.rag.agent import GmailAIAssistant
+    from langchain_core.runnables import RunnableLambda
+    def unavailable(_):
+        pytest.fail('Sender search routing must not need AI')
+    assert GmailAIAssistant(model=RunnableLambda(unavailable)).route_intent('Give all mails from ChatGPT') == 'RAG_QUERY'

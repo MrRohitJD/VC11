@@ -112,6 +112,7 @@ export default function SyncPage() {
 						? 'Gmail Sync Complete'
 						: 'Syncing Your Gmail'}
 				</h1>
+				{syncState.coverage_limit && <p>For this showcase, we sync up to the {syncState.coverage_limit} most recent Gmail messages. Older messages are outside this search.</p>}
 
 				{isError && (
 					<p className="sync-error-msg">{startError || syncState.error || 'An unexpected error occurred.'}</p>

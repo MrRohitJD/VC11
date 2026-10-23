@@ -9,6 +9,8 @@ from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.rag.query_constraints import mailbox_now
+from app.rag.service_errors import error_code
+from app.rag.activity import emit_activity
 
 logger = logging.getLogger(__name__)
 
@@ -74,27 +76,36 @@ def _parse_decisions(response, candidates):
     return payload
 
 
-def _invoke_decisions(model, messages, candidates):
+def _invoke_decisions(model, messages, candidates, disabled=None):
     # Runnable fallbacks only catch invocation errors. Parse/schema failures must
     # also advance to the next configured provider, inside this boundary.
     providers = [getattr(model, "runnable", model), *getattr(model, "fallbacks", [])]
     last_error = None
+    schema_error = None
     for provider in providers:
+        if disabled is not None and id(provider) in disabled:
+            continue
         try:
             return _parse_decisions(provider.invoke(messages), candidates)
         except Exception as exc:
             last_error = exc
-            logger.warning("Relevance provider %s failed: %s", type(provider).__name__, type(exc).__name__)
-    raise last_error
+            code = error_code(exc)
+            if code == 'invalid_response':
+                schema_error = exc
+            if code == 'authentication' and disabled is not None:
+                disabled.add(id(provider))
+            logger.warning("Relevance provider %s failed: %s", type(provider).__name__, code)
+    raise schema_error or last_error or RuntimeError('No available relevance provider')
 
 
-def validate_email_relevance(documents, query, model, batch_size=5):
+def validate_email_relevance(documents, query, model, batch_size=5, _disabled=None):
     """Accept only schema-valid model decisions for actual candidate IDs.
 
     Missing, malformed, or failed decisions never become lexical/random matches.
-    A failed batch invalidates the response rather than implying no email exists.
+    Keep verified matches and report incomplete coverage if a batch fails.
     """
     result = RelevanceResult()
+    disabled = set() if _disabled is None else _disabled
     for offset in range(0, len(documents), batch_size):
         batch = documents[offset:offset + batch_size]
         candidates = []
@@ -117,7 +128,7 @@ def validate_email_relevance(documents, query, model, batch_size=5):
                     "query": query, "current_datetime": mailbox_now().isoformat(),
                     "candidates": candidates,
                 }, ensure_ascii=False)),
-            ], candidates)
+            ], candidates, disabled)
             decisions = payload["decisions"]
             by_id = {item["email_id"]: item for item in decisions}
             for doc in batch:
@@ -127,15 +138,21 @@ def validate_email_relevance(documents, query, model, batch_size=5):
                     meta.update(relevance_validated=True, relevance_reason=item["reason"], key_points=item["key_points"][:5])
                     result.documents.append(Document(page_content="\n".join(item["key_points"][:5]), metadata=meta))
             result.evaluated += len(batch)
+            emit_activity('validate_evidence', f'Checked {result.evaluated} of {len(documents)} emails; {len(result.documents)} matches verified',
+                          count=len(result.documents), evaluated=result.evaluated, status='running')
         except Exception as exc:
-            logger.warning("Email relevance validation failed: %s", type(exc).__name__)
+            logger.warning("Email relevance validation failed: %s", error_code(exc))
             if len(batch) > 1 and isinstance(exc, (ValueError, KeyError, TypeError)):
                 # A malformed multi-email response must not strand valid emails.
                 # Retry smaller units, still requiring the same strict evidence.
-                retried = validate_email_relevance(batch, query, model, batch_size=1)
-                if not retried.failed:
-                    result.documents.extend(retried.documents)
-                    result.evaluated += retried.evaluated
-                    continue
-            return RelevanceResult(failed=True, evaluated=result.evaluated, error_type=type(exc).__name__)
+                retried = validate_email_relevance(batch, query, model, batch_size=1, _disabled=disabled)
+                result.documents.extend(retried.documents)
+                result.evaluated += retried.evaluated
+                result.failed |= retried.failed
+                result.error_type = retried.error_type or result.error_type
+                continue
+            result.failed = True
+            result.error_type = error_code(exc)
+            if result.error_type != 'invalid_response':
+                break
     return result

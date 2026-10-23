@@ -5,6 +5,8 @@ uvicorn[standard]
 pydantic-settings
 sqlalchemy
 psycopg[binary]
+pgvector>=0.4,<1
+alembic>=1.13,<2
 google-auth
 google-auth-oauthlib
 google-api-python-client
@@ -12,6 +14,7 @@ beautifulsoup4
 sse-starlette
 langgraph>=1.0,<2
 langgraph-checkpoint-sqlite>=3.0,<4
+langgraph-checkpoint-postgres>=3.0,<4
 langsmith>=0.4,<1
 langchain-core>=1.0,<2
 langchain-openai>=1.0,<2

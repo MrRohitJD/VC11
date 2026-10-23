@@ -13,11 +13,18 @@ from app.rag.search_plan import gmail_search_query
 async def _search(user_id, query):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
+    from sqlalchemy.engine import make_url
+
+    database_url = make_url(settings.database_url)
+    if database_url.drivername.startswith('sqlite') and database_url.database not in (None, '', ':memory:'):
+        database_url = database_url.set(database=str(Path(database_url.database).resolve()))
 
     params = StdioServerParameters(
         command=sys.executable, args=["-m", "app.services.gmail_mcp_server"],
         cwd=str(Path(__file__).resolve().parents[2]),
-        env={**os.environ, "GMAIL_MCP_USER_ID": str(user_id)},
+        env={**os.environ, "GMAIL_MCP_USER_ID": str(user_id),
+             "DATABASE_URL": database_url.render_as_string(hide_password=False),
+             "GMAIL_MCP_TIMEOUT_SECONDS": str(settings.gmail_mcp_timeout_seconds)},
     )
     async with asyncio.timeout(settings.gmail_mcp_timeout_seconds):
         async with stdio_client(params) as (reader, writer):

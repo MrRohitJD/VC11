@@ -152,13 +152,13 @@ def sync_all_labels(
 # List all message IDs (paginated)
 # ------------------------------------------------------------------
 
-def _list_all_message_ids(service, *, progress_callback=None) -> list[str]:
+def _list_all_message_ids(service, *, progress_callback=None, max_messages: int | None = None) -> list[str]:
 	"""Fetch every message ID in the user's mailbox using pagination."""
 	message_ids: list[str] = []
 	page_token = None
 
 	while True:
-		kwargs: dict = {"userId": "me", "maxResults": 500}
+		kwargs: dict = {"userId": "me", "maxResults": min(500, max_messages - len(message_ids)) if max_messages else 500}
 		if page_token:
 			kwargs["pageToken"] = page_token
 
@@ -167,12 +167,14 @@ def _list_all_message_ids(service, *, progress_callback=None) -> list[str]:
 		)
 		for msg in response.get("messages", []):
 			message_ids.append(msg["id"])
+			if max_messages and len(message_ids) >= max_messages:
+				break
 
 		if progress_callback:
 			progress_callback("listing", len(message_ids), 0)
 
 		page_token = response.get("nextPageToken")
-		if not page_token:
+		if not page_token or (max_messages and len(message_ids) >= max_messages):
 			break
 
 	return message_ids
@@ -469,7 +471,9 @@ def sync_all_emails(
 	# 2. List all message IDs
 	if progress_callback:
 		progress_callback("listing", 0, 0)
-	message_ids = _list_all_message_ids(service, progress_callback=progress_callback)
+	from app.core.config import settings
+	message_ids = _list_all_message_ids(service, progress_callback=progress_callback,
+	                                   max_messages=settings.gmail_sync_limit if settings.vector_backend == "postgres" else None)
 	total_found = len(message_ids)
 
 	if total_found == 0:

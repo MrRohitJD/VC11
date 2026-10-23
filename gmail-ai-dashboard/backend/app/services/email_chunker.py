@@ -125,6 +125,7 @@ def format_embedding_text(
     sender_email: Optional[str] = None,
     gmail_message_id: Optional[str] = None,
     received_at: Optional[Union[datetime, str, float, int]] = None,
+    recipient_emails: Optional[str] = None,
 ) -> str:
     """Format contextual text sent to the embedding model.
 

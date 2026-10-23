@@ -23,6 +23,8 @@ def upsert_google_user(
 	user = db.scalar(select(User).where(User.google_id == google_id))
 	if user is None:
 		user = db.scalar(select(User).where(User.email == email))
+	if user is not None and user.is_demo:
+		raise ValueError("The public demo account cannot be linked to Google")
 	if user is None:
 		user = User(google_id=google_id, email=email)
 		db.add(user)
@@ -62,6 +64,7 @@ def serialize_user(user: User) -> dict[str, Any]:
 		"email": user.email,
 		"name": user.name,
 		"picture": user.picture,
+		"is_demo": user.is_demo,
 	}
 
 

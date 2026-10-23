@@ -1,7 +1,7 @@
 """LangChain retrievers implementation for Gmail RAG system.
 
 Provides 4 specialized retrievers adhering to LangChain's BaseRetriever abstraction:
-1. ChromaSemanticRetriever: Dense semantic vector search via ChromaDB (Azure OpenAI text-embedding-3-large)
+1. ChromaSemanticRetriever: Dense semantic vector search via the configured vector backend (Postgres pgvector in production)
 2. GmailCustomHybridRetriever: Fuses semantic search with PostgreSQL filters (sender, date range, labels, read status, email ID, thread ID)
 3. HistoryAwareRetriever: Rewrites conversational follow-up questions into standalone queries using chat history
 4. MultiQueryRetriever: Generates alternative search queries, executes parallel retrieval, merges and deduplicates via RRF
@@ -178,14 +178,14 @@ def documents_to_citations(documents: List[Document]) -> List[RetrievedCitation]
 
 
 # ============================================================================
-# 1. ChromaDB Semantic Retriever
+# 1. Configured Vector Semantic Retriever
 # ============================================================================
 
 class ChromaSemanticRetriever(BaseRetriever):
-    """LangChain retriever executing dense semantic vector similarity search via ChromaDB HNSW.
+    """LangChain retriever executing dense semantic vector similarity search.
 
     Features:
-    - Default retrieval method using ChromaDB HNSW cosine similarity.
+    - Uses the configured vector manager (Postgres HNSW cosine search in production).
     - Single query embedding per request for low latency.
     - Mandatory tenant isolation (user_id) enforced on every query path.
     - Structured metadata filtering (sender, gmail_message_id, received_date, received_timestamp).
@@ -202,7 +202,7 @@ class ChromaSemanticRetriever(BaseRetriever):
     search_type: str = Field("similarity", description="Retrieval method: 'similarity' (default HNSW) or 'mmr'")
     fetch_k: int = Field(20, description="Candidate chunks to evaluate for MMR diversity")
     lambda_mult: float = Field(0.7, description="Diversity tradeoff for MMR (0.0=max diversity, 1.0=max relevance)")
-    filter_dict: Optional[Dict[str, Any]] = Field(None, description="Optional raw metadata filters for ChromaDB")
+    filter_dict: Optional[Dict[str, Any]] = Field(None, description="Optional raw metadata filters for the configured vector backend")
     score_threshold: Optional[float] = Field(None, description="Minimum similarity threshold")
 
     # Structured metadata filters
@@ -215,14 +215,14 @@ class ChromaSemanticRetriever(BaseRetriever):
 
     chroma_manager: Any = Field(default_factory=lambda: default_chroma_manager)
 
-    @traceable(name="chroma_retrieval", run_type="retriever")
+    @traceable(name="vector_retrieval", run_type="retriever")
     def _get_relevant_documents(
         self,
         query: str,
         *,
         run_manager: Optional[CallbackManagerForRetrieverRun] = None,
     ) -> List[Document]:
-        """Retrieve relevant email chunks using ChromaDB dense semantic embeddings."""
+        """Retrieve relevant email chunks using dense semantic embeddings."""
         if not query or not query.strip():
             return []
 
@@ -293,7 +293,7 @@ class ChromaSemanticRetriever(BaseRetriever):
 
 
 # ============================================================================
-# 2. Custom Hybrid Retriever (ChromaDB + PostgreSQL Filters with RRF)
+# 2. Custom Hybrid Retriever (Vector Search + PostgreSQL Filters with RRF)
 # ============================================================================
 
 def email_label_condition(label: str):
@@ -380,7 +380,7 @@ def should_fallback_to_hybrid(
 
 
 class GmailCustomHybridRetriever(BaseRetriever):
-    """Hybrid retriever combining ChromaDB semantic search with PostgreSQL metadata filters.
+    """Hybrid retriever combining configured vector search with PostgreSQL metadata filters.
 
     Supports structured filtering by:
     - sender (from_email or sender_name)

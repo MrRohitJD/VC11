@@ -35,12 +35,15 @@ except ImportError:
 
 
 from app.core.config import settings
+from app.models.email import User
 from app.rag.retrieval import RetrievedCitation, default_retriever
 from app.rag.query_constraints import mailbox_now, is_financial_query
 from app.rag.mailbox_scope import primary_email_ids
 from app.rag.relevance import validate_email_relevance, RelevanceResult
 from app.rag.adaptive import plan_retrieval, bm25_rank, fuse_rankings
 from app.rag.activity import emit_activity
+from app.rag.search_plan import sender_only_request
+from app.rag.service_errors import error_code, error_hint
 
 logger = logging.getLogger(__name__)
 
@@ -306,10 +309,10 @@ class GroundedRAGChain:
     """LangChain runnable pipeline for grounded email question answering with optimized retriever composition.
 
     Retrieval Strategy:
-    1. Default: LangChain + ChromaDB HNSW cosine similarity search with a single query embedding (k=5..10).
+    1. Default: LangChain + configured vector backend, using Postgres pgvector HNSW cosine similarity in production.
     2. Tenant Isolation: user_id is strictly validated and enforced on every retrieval path.
-    3. Metadata Filtering: sender, gmail_message_id, received_date, received_timestamp applied directly in Chroma.
-    4. Optional Fallback: Hybrid keyword (PostgreSQL) + vector (ChromaDB) retrieval with Reciprocal Rank Fusion (RRF)
+    3. Metadata Filtering: sender, gmail_message_id, received_date, received_timestamp applied in the vector backend.
+    4. Optional Fallback: Hybrid keyword (PostgreSQL) + vector retrieval with Reciprocal Rank Fusion (RRF)
        for exact terms, names, IDs, and low-confidence searches.
     5. Optional MMR: search_type="mmr" supported for chunk diversity, disabled by default for low latency.
     6. Conditional MultiQuery: only executed for complex multi-topic queries or explicit escalation.
@@ -366,11 +369,15 @@ class GroundedRAGChain:
         search_plan = plan_retrieval(effective_query, filters, use_multi_query, retrieval_mode)
         all_requested = search_plan.exhaustive
         date_only = search_plan.date_only
+        sender_only = sender_only_request(effective_query)
+        envelope_only = date_only or sender_only
         use_multi_query = search_plan.multi_query
         emit_activity("plan_search", search_plan.label, plan=search_plan.public())
         live_status = None
         live_failed = False
-        if settings.gmail_mcp_enabled:
+        live_error = ''
+        current_user = db.get(User, UUID(str(user_id)))
+        if settings.gmail_mcp_enabled and not (current_user and current_user.is_demo):
             emit_activity("gmail_search", "Searching live Primary mail", status="running")
             try:
                 from app.rag.gmail_mcp import search_live_primary
@@ -378,7 +385,8 @@ class GroundedRAGChain:
                 db.expire_all()
                 emit_activity("gmail_search", f"Read {len(live_status['email_ids'])} live Primary emails", count=len(live_status["email_ids"]), status="completed" if live_status["complete"] else "warning")
             except Exception as exc:
-                logger.warning("Gmail MCP discovery unavailable: %s", type(exc).__name__)
+                live_error = error_code(exc)
+                logger.warning("Gmail MCP discovery unavailable: %s", live_error)
                 live_failed = True
                 emit_activity("gmail_search", "Live search unavailable; using synced Primary mail", status="warning")
         candidate_k = max(top_k * 4, 20)
@@ -389,7 +397,7 @@ class GroundedRAGChain:
         search_type = "mmr" if search_plan.diverse else "similarity"
         emit_activity("retrieve_candidates", search_plan.label, status="running", strategy=search_plan.strategy)
 
-        # Primary fast retriever: LangChain + ChromaDB HNSW similarity search
+        # Primary fast retriever: LangChain + configured vector backend similarity search
         semantic_retriever = ChromaSemanticRetriever(
             user_id=user_str,
             db_session=db,
@@ -409,8 +417,8 @@ class GroundedRAGChain:
         retrieval_strategy_used = "standard"
         docs: List[Document] = []
 
-        if not all_requested and not date_only and not is_hybrid_mode and not has_exact and use_multi_query is not True:
-            # Fast default path: single query embedding through ChromaDB HNSW cosine search
+        if not all_requested and not envelope_only and not is_hybrid_mode and not has_exact and use_multi_query is not True:
+            # Fast default path: single query embedding through the configured vector backend
             docs = semantic_retriever.invoke(effective_query)
             if docs:
                 retrieval_strategy_used = "standard"
@@ -423,7 +431,7 @@ class GroundedRAGChain:
             min_confidence_score=0.65,
         )
 
-        if not (all_requested or date_only) and (is_hybrid_mode or has_exact or needs_fallback or use_multi_query is True):
+        if not (all_requested or envelope_only) and (is_hybrid_mode or has_exact or needs_fallback or use_multi_query is True):
             logger.info(
                 "Using Hybrid Keyword + Vector Retrieval with RRF (exact=%s: %s, fallback=%s: %s)",
                 has_exact,
@@ -464,7 +472,7 @@ class GroundedRAGChain:
                 docs = hybrid_retriever.invoke(effective_query)
                 retrieval_strategy_used = "standard"
 
-        if all_requested or date_only:
+        if all_requested or envelope_only:
             # Enumerate records, not chunks: no rank cutoff or missing-index loss.
             docs = scoped_mailbox_documents(db, user_id, effective_query, filters)
             retrieval_strategy_used = "exhaustive_primary"
@@ -495,21 +503,23 @@ class GroundedRAGChain:
         # The LLM receives real envelope metadata and content, then explicitly
         # accepts/rejects each candidate before it can become a cited source.
         # Date-only membership is proven by account, labels and receipt bounds.
-        emit_activity("validate_evidence", "Checking receipt dates and Primary labels" if date_only else "Checking which emails answer your question", status="running")
-        validation = RelevanceResult(documents=docs, evaluated=len(docs)) if date_only else validate_email_relevance(docs, effective_query, self.model)
-        if not date_only and not all_requested and not validation.failed and not validation.documents:
+        emit_activity("validate_evidence", "Checking sender, receipt dates and Primary labels" if envelope_only else "Checking which emails answer your question", status="running")
+        candidate_count = len(docs)
+        validation = RelevanceResult(documents=docs, evaluated=len(docs)) if envelope_only else validate_email_relevance(docs, effective_query, self.model)
+        if not envelope_only and not all_requested and not validation.failed and not validation.documents:
             # One bounded corrective pass over lower ranked lexical candidates.
             seen = {str(doc.metadata["email_id"]) for doc in docs}
             recovery = [doc for doc in bm25_rank(lexical_pool, effective_query, limit=max(60, candidate_k * 3))
                         if str(doc.metadata["email_id"]) not in seen]
             if recovery:
                 recovery = hydrate_email_documents(recovery, db, user_id, full_body=True)
+                candidate_count += len(recovery)
                 emit_activity("corrective_search", f"Checking {len(recovery)} additional keyword matches", count=len(recovery))
                 corrected = validate_email_relevance(recovery, effective_query, self.model)
                 corrected.evaluated += validation.evaluated
                 validation = corrected
-        emit_activity("validate_evidence", f"Validated {len(validation.documents)} matching emails" if not validation.failed else "AI evidence check unavailable", count=len(validation.documents), evaluated=validation.evaluated, status="warning" if validation.failed else "completed")
-        accepted = validation.documents if all_requested or date_only else validation.documents[:top_k]
+        emit_activity("validate_evidence", f"Validated {len(validation.documents)} matching emails" if not validation.failed else f"Search incomplete; kept {len(validation.documents)} verified matches", count=len(validation.documents), evaluated=validation.evaluated, status="warning" if validation.failed else "completed")
+        accepted = validation.documents if all_requested or envelope_only else validation.documents[:top_k]
         citations = documents_to_citations(accepted)
 
         # 5. Format context from deduplicated citations with compressed key points
@@ -528,9 +538,15 @@ class GroundedRAGChain:
 
         # 6. Step 5: Generate grounded answer through traced LangChain runnable
         if validation.failed:
-            answer_text = (f"I found {len(docs)} candidate emails in Primary, but the AI relevance service failed. "
-                           "I could not validate which match or summarize your request. "
-                           "This does not mean there are no matching emails. Please retry once the AI service is available.")
+            answer_text = (f"Search is incomplete: checked {validation.evaluated} of {candidate_count} candidate emails in Primary. "
+                           + error_hint(validation.error_type))
+            if citations:
+                answer_text += '\n\nVerified matches so far:\n\n' + format_grounded_key_points_summary(citations, effective_query)
+            else:
+                answer_text += ' I could not validate any matches; this does not mean there are no matching emails.'
+        elif sender_only and citations:
+            answer_text = f'I found {len(citations)} matching emails in Primary:\n\n' + '\n'.join(
+                f'- **{c.subject}** — {c.sender} ({c.date}) [{i}]' for i, c in enumerate(citations, 1))
         elif not citations:
             answer_text = format_grounded_key_points_summary(citations, effective_query)
         else:
@@ -538,7 +554,7 @@ class GroundedRAGChain:
             try:
                 answer_text = generate_grounded_answer(self.chain, context_str, effective_query)
             except Exception as exc:
-                logger.warning("LLM invocation error: %s. Using deterministic grounded summary with single-sentence bullets.", exc)
+                logger.warning("LLM invocation error: %s. Using verified source details.", error_code(exc))
                 if date_only:
                     previews = [f"- **{c.subject}** — {c.sender} ({c.date}): {c.snippet}" for c in citations]
                     answer_text = (f"I found {len(citations)} matching Primary emails. The AI summary service is unavailable; "
@@ -549,8 +565,16 @@ class GroundedRAGChain:
 
         if live_failed:
             answer_text += "\n\nLive Gmail search is unavailable; this result covers synced Primary emails only and may be incomplete."
+            answer_text += ' ' + error_hint(live_error, 'Gmail')
         elif live_status and not live_status["complete"]:
-            answer_text += "\n\nLive Gmail search reached its message limit; this result may be incomplete. Narrow the date range to check the remainder."
+            if live_status.get('error_code'):
+                answer_text += "\n\nLive Gmail search is incomplete; results include synced Primary mail. " + error_hint(live_status['error_code'], 'Gmail')
+            else:
+                answer_text += "\n\nLive Gmail search reached its message limit; this result may be incomplete. Narrow the date range to check the remainder."
+        if current_user and current_user.is_demo:
+            answer_text += "\n\nDemo mode: these are fictional sample emails."
+        elif settings.vector_backend == "postgres" and not settings.gmail_mcp_enabled:
+            answer_text += f"\n\nThis answer covers only the most recent {settings.gmail_sync_limit} synced Gmail messages."
 
         emit_activity("answer_ready", f"Answer ready with {len(citations)} supporting emails", count=len(citations))
         return {
@@ -561,6 +585,8 @@ class GroundedRAGChain:
             "retrieval_strategy": retrieval_strategy_used,
             "relevance_validated": not validation.failed,
             "candidates_evaluated": validation.evaluated,
+            "validation_error": validation.error_type,
+            "live_search_error": live_error or (live_status or {}).get('error_code', ''),
             "search_plan": search_plan.public(),
         }
 

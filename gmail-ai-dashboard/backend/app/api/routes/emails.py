@@ -40,7 +40,7 @@ SYSTEM_CATEGORY_LABELS = {
 }
 
 GMAIL_CATEGORY_NAMES = {
-	"CATEGORY_PERSONAL": "Personal",
+	"CATEGORY_PERSONAL": "Primary",
 	"CATEGORY_SOCIAL": "Social",
 	"CATEGORY_PROMOTIONS": "Promotions",
 	"CATEGORY_UPDATES": "Updates",
@@ -323,6 +323,8 @@ def analytics_charts(
 	for email_id, label_id, name in category_rows:
 		if label_id in SYSTEM_CATEGORY_LABELS:
 			continue
+		if user.is_demo and label_id not in GMAIL_CATEGORY_NAMES:
+			continue
 		category_name = GMAIL_CATEGORY_NAMES.get(label_id, name)
 		if category_name:
 			email_categories.setdefault(email_id, set()).add(category_name)
@@ -344,7 +346,10 @@ def analytics_charts(
 
 	all_email_ids = {eid for eid, _, _ in category_rows} | set(ai_categories_by_email.keys())
 	for eid in all_email_ids:
-		if eid in ai_categories_by_email:
+		if user.is_demo and eid in email_categories and email_categories[eid]:
+			for cat_name in email_categories[eid]:
+				category_counts[cat_name] = category_counts.get(cat_name, 0) + 1
+		elif eid in ai_categories_by_email:
 			cat_name = ai_categories_by_email[eid]
 			category_counts[cat_name] = category_counts.get(cat_name, 0) + 1
 		elif eid in email_categories and email_categories[eid]:
@@ -457,16 +462,17 @@ def list_emails(
 ):
 	"""List emails for the authenticated user with pagination, search and label filtering."""
 	account = _get_account(db, user)
-	try:
-		from app.services.llm_classification_service import ensure_user_emails_classified
-		ensure_user_emails_classified(account.id)
-	except Exception:
-		pass
-	try:
-		from app.services.rag_auto_indexer import ensure_user_emails_embedded
-		ensure_user_emails_embedded(user.id)
-	except Exception:
-		pass
+	if not user.is_demo:
+		try:
+			from app.services.llm_classification_service import ensure_user_emails_classified
+			ensure_user_emails_classified(account.id)
+		except Exception:
+			pass
+		try:
+			from app.services.rag_auto_indexer import ensure_user_emails_embedded
+			ensure_user_emails_embedded(user.id)
+		except Exception:
+			pass
 	start_at = None
 	end_at = None
 	if range_key is not None:
@@ -539,7 +545,7 @@ def get_email(
 	)
 	if email is None:
 		raise HTTPException(status_code=404, detail="Email not found")
-	if not email.body_html:
+	if not user.is_demo and not email.body_html:
 		try:
 			service = build_gmail_service_for_user(db, user)
 			raw_message = service.users().messages().get(
@@ -579,6 +585,9 @@ def list_labels(
 
 def _serialize_email(email: Email, include_body: bool = False) -> dict:
 	ai_category_name = None
+	gmail_category = next((GMAIL_CATEGORY_NAMES[link.label.label_id]
+	                       for link in (email.labels or [])
+	                       if link.label and link.label.label_id in GMAIL_CATEGORY_NAMES), None)
 	# First check classifications relationship
 	if email.classifications:
 		for c in email.classifications:
@@ -624,6 +633,7 @@ def _serialize_email(email: Email, include_body: bool = False) -> dict:
 		"has_attachment": email.has_attachment,
 		"size_estimate": email.size_estimate,
 		"ai_label": ai_category_name,
+		"gmail_category": gmail_category,
 		"labels": labels_list,
 	}
 	if include_body:

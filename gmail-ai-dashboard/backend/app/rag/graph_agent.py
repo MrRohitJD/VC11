@@ -20,6 +20,7 @@ from langsmith import Client, trace, tracing_context
 
 from app.core.config import settings
 from app.models.rag import ChatMessage
+from app.models.email import User
 from app.rag.agent import (
     GmailAIAssistant, AgentResponse, AGENT_SYSTEM_PROMPT,
     extract_citations_from_tool_observation,
@@ -56,7 +57,9 @@ class MailboxState(TypedDict, total=False):
 def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                         filter_dict, use_multi_query, citations, checkpointer):
     # The legacy send tool does not deliver mail. Never expose it to the model.
-    tools = {t.name: t for t in create_gmail_tools(db, user_id) if t.name != "send_email"}
+    owner = db.get(User, UUID(str(user_id)))
+    excluded = {"send_email", "draft_email"} if owner and owner.is_demo else {"send_email"}
+    tools = {t.name: t for t in create_gmail_tools(db, user_id) if t.name not in excluded}
 
     def context(state):
         query = assistant.transform_query(state["query"], history[-20:])
@@ -202,9 +205,16 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
         memory = PostgresChatMessageHistory(db, session.id)
         history = memory.messages
         citations = []
-        checkpoint_path = Path(settings.langgraph_checkpoint_path)
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        with SqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
+        if settings.vector_backend == "postgres":
+            from langgraph.checkpoint.postgres import PostgresSaver
+            checkpoint_context = PostgresSaver.from_conn_string(
+                settings.database_url.replace("postgresql+psycopg://", "postgresql://", 1)
+            )
+        else:
+            checkpoint_path = Path(settings.langgraph_checkpoint_path)
+            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint_context = SqliteSaver.from_conn_string(str(checkpoint_path))
+        with checkpoint_context as saver:
             graph = build_mailbox_graph(
                 self, db=db, user_id=user_id, history=history, top_k=top_k,
                 filter_dict=filter_dict, use_multi_query=use_multi_query,

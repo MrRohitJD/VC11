@@ -364,6 +364,9 @@ class GmailAIAssistant:
     def route_intent(self, query: str) -> str:
         """Classify user query into an actionable routing category."""
         clean_q = query.strip().lower()
+        from app.rag.search_plan import sender_only_request
+        if sender_only_request(query):
+            return 'RAG_QUERY'
 
         # Pure greeting check - don't let it swallow search queries
         greeting_phrases = ["hello", "hi", "hey", "good morning", "good afternoon", "good evening", "howdy", "greetings"]

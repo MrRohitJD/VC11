@@ -25,6 +25,7 @@ from app.models.rag import EmailChunk, EmailEmbedding
 from app.rag.chunking import default_chunker
 from app.rag.loaders import GmailDocumentAdapter
 from app.rag.vectorstore import default_chroma_manager
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,9 @@ class RAGIndexingPipeline:
         if not chunk_docs:
             self.delete_email(db, email_uuid)
             return 0
+
+        if settings.vector_backend == "postgres":
+            return self._index_email_postgres(db, email_uuid, chunk_docs, force=force)
 
         # 4. Idempotency Check: Compare hashes with existing chunks in PostgreSQL
         existing_chunks = db.scalars(
@@ -133,6 +137,49 @@ class RAGIndexingPipeline:
         logger.info("Indexed %d chunks for email %s", len(chunk_docs), email_id)
         return len(chunk_docs)
 
+    def _index_email_postgres(self, db: Session, email_id: UUID, chunk_docs, *, force: bool) -> int:
+        """Write chunks and vectors in one PostgreSQL transaction."""
+        existing = list(db.scalars(select(EmailChunk).where(EmailChunk.email_id == email_id)
+                                   .order_by(EmailChunk.chunk_index)))
+        hashes = [doc.metadata.get("content_hash", "") for doc in chunk_docs]
+        if not force and [chunk.content_hash for chunk in existing] == hashes and existing:
+            valid = db.scalar(select(func.count(EmailEmbedding.id)).where(
+                EmailEmbedding.chunk_id.in_([chunk.id for chunk in existing]),
+                EmailEmbedding.status == "INDEXED", EmailEmbedding.embedding.is_not(None),
+                EmailEmbedding.embedding_dimensions == 3072,
+            )) or 0
+            if valid == len(existing):
+                return len(existing)
+
+        vectors = self.chroma.embedding_function.embed_documents([doc.page_content for doc in chunk_docs])
+        if any(len(vector) != 3072 for vector in vectors):
+            raise ValueError("Production indexing requires 3072-dimensional embeddings")
+        db.execute(delete(EmailChunk).where(EmailChunk.email_id == email_id))
+        db.flush()
+        for idx, (doc, vector) in enumerate(zip(chunk_docs, vectors)):
+            chunk = EmailChunk(
+                email_id=email_id, chunk_index=idx, chunk_text=doc.page_content,
+                start_index=0, end_index=len(doc.page_content),
+                chunk_strategy=doc.metadata.get("chunk_strategy", "recursive_character"),
+                content_hash=hashes[idx],
+            )
+            db.add(chunk)
+            db.flush()
+            recipients = [value.strip() for value in (email.to_email or "").split(",") if value.strip()]
+            db.add(EmailEmbedding(
+                chunk_id=chunk.id, email_id=email.id,
+                email_subject=email.subject or "", sender_email=email.from_email or "",
+                recipient_emails=recipients, email_sent_at=email.received_at,
+                embedding_text=doc.page_content, embedding_type="email",
+                chroma_collection=self.chroma.collection_name,
+                chroma_record_id=str(chunk.id), embedding=list(vector),
+                embedding_provider=settings.embedding_provider,
+                embedding_model=settings.embedding_model_name,
+                embedding_dimensions=3072, content_hash=hashes[idx], status="INDEXED",
+            ))
+        db.commit()
+        return len(chunk_docs)
+
     def index_user_emails(
         self,
         db: Session,
@@ -178,7 +225,8 @@ class RAGIndexingPipeline:
     def delete_email(self, db: Session, email_id: UUID | str) -> None:
         """Remove all chunks of an email from ChromaDB and PostgreSQL."""
         email_uuid = UUID(str(email_id))
-        self.chroma.delete_by_email_id(email_uuid)
+        if settings.vector_backend != "postgres":
+            self.chroma.delete_by_email_id(email_uuid)
         db.execute(delete(EmailChunk).where(EmailChunk.email_id == email_uuid))
         db.commit()
 

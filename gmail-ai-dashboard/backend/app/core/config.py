@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent  # backend/
@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_project: str = "mailbox-devLG"
     database_url: str = "sqlite:///./gmail_ai_dashboard.db"
+    # PostgreSQL pgvector is the production/default backend. Chroma remains an explicit local fallback.
+    vector_backend: str = Field("postgres", validation_alias=AliasChoices("RAG_VECTOR_BACKEND"))
+    gmail_sync_limit: int = Field(500, ge=1, le=5000, validation_alias=AliasChoices("GMAIL_SYNC_LIMIT"))
     database_pool_size: int = Field(5, validation_alias=AliasChoices("DATABASE_POOL_SIZE"))
     database_max_overflow: int = Field(10, validation_alias=AliasChoices("DATABASE_MAX_OVERFLOW"))
     google_client_id: str = Field("", validation_alias=AliasChoices("GOOGLE_CLIENT_ID", "OAUTH_GOOGLE_CLIENT_ID"))
@@ -56,6 +59,15 @@ class Settings(BaseSettings):
     embedding_provider: str = Field("azure_openai", validation_alias=AliasChoices("RAG_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"))
     embedding_model_name: str = Field("text-embedding-3-large", validation_alias=AliasChoices("RAG_EMBEDDING_MODEL", "EMBEDDING_MODEL"))
     embedding_dimensions: int = Field(3072, validation_alias=AliasChoices("RAG_EMBEDDING_DIMENSIONS", "EMBEDDING_DIMENSIONS"))
+
+    @field_validator("database_url")
+    @classmethod
+    def normalize_database_url(cls, value: str) -> str:
+        if value.startswith("postgres://"):
+            return "postgresql+psycopg://" + value[len("postgres://"):]
+        if value.startswith("postgresql://"):
+            return "postgresql+psycopg://" + value[len("postgresql://"):]
+        return value
 
     model_config = SettingsConfigDict(
         env_file=str(_BACKEND_DIR / ".env"),

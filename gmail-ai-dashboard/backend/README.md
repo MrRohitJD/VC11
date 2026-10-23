@@ -44,7 +44,19 @@ provider first, with configured Azure/OpenAI and ExperientialLabs fallbacks.
 "Find all" requests validate the full retrieved candidate set in batches and
 retain all accepted sources instead of silently truncating the result to five.
 
-## PostgreSQL setup
+## PostgreSQL and pgvector setup
+
+Production retrieval uses the configured PostgreSQL database with pgvector. Set
+`RAG_VECTOR_BACKEND=postgres` (the application default) and ensure the database
+has the `vector` extension. ChromaDB is retained only as an explicit local
+fallback with `RAG_VECTOR_BACKEND=chroma`.
+
+Apply the migrations, including the pgvector embedding metadata and HNSW index,
+before indexing mail:
+
+```bash
+alembic upgrade head
+```
 
 The configured database name is `gmail_ai_dashboard`.
 
@@ -139,3 +151,29 @@ uvicorn app.api.app:app --reload --port 8000
 ```
 
 Open `http://localhost:5173/login` or `http://localhost:5173/signup`. Both Google buttons use the same OAuth flow. Google `sub` is stored as `users.google_id`; repeated sign-ins update the existing `users` and `gmail_accounts` records instead of creating duplicates. The API sets an HttpOnly session cookie after the callback.
+## Public demo mailbox
+
+The login and signup pages offer a read-only `demo@gmail.com` mailbox. Its
+messages, Gmail categories, and AI labels are fictional database records; it
+has no Google OAuth token and does not call Gmail. The demo assistant stays
+unavailable until embeddings are added in a later step.
+
+Apply the versioned migrations, then seed the mailbox from `backend/`:
+
+```sh
+alembic upgrade head
+python scripts/seed_demo_mailbox.py
+python scripts/seed_demo_mailbox.py --verify
+python scripts/verify_demo_api.py
+```
+
+The seed is idempotent and does not create chunks or embeddings. When migrating
+a database whose schema was cloned from the `20261013_0002` revision but whose
+`alembic_version` table is empty, verify the schema first, then stamp that
+revision before upgrading:
+
+```sh
+python scripts/seed_demo_mailbox.py --check
+alembic stamp 20261013_0002
+alembic upgrade head
+```

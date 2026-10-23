@@ -279,6 +279,7 @@ class RAGIndexerService:
             select(Email.id)
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
             .where(
+                GmailAccount.provider != "demo",
                 ~exists(indexed_subquery),
                 (Email.body.is_not(None) | Email.body_html.is_not(None)),
             )
@@ -385,4 +386,40 @@ class RAGIndexerService:
         return formatted_results
 
 
-default_rag_service = RAGIndexerService()
+if settings.vector_backend == "postgres":
+    from app.rag.indexing import default_pipeline
+
+    class PostgresRAGService:
+        def get_unindexed_email_ids(self, db, user_id=None, limit=None):
+            indexed = (select(1).select_from(EmailChunk)
+                       .join(EmailEmbedding, EmailEmbedding.chunk_id == EmailChunk.id)
+                       .where(EmailChunk.email_id == Email.id,
+                              EmailEmbedding.status == "INDEXED",
+                              EmailEmbedding.embedding.is_not(None),
+                              EmailEmbedding.embedding_dimensions == 3072))
+            stmt = (select(Email.id)
+                    .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
+                    .where(GmailAccount.provider != "demo", ~exists(indexed),
+                           (Email.body.is_not(None) | Email.body_html.is_not(None)))
+                    .order_by(Email.received_at.desc().nullslast()))
+            if user_id:
+                stmt = stmt.where(GmailAccount.user_id == user_id)
+            if limit:
+                stmt = stmt.limit(limit)
+            return list(db.scalars(stmt))
+
+        def index_unindexed_emails(self, db, user_id=None, batch_size=None):
+            ids = self.get_unindexed_email_ids(db, user_id=user_id, limit=batch_size)
+            done = chunks = 0
+            for email_id in ids:
+                try:
+                    chunks += default_pipeline.index_email(db, email_id, user_id=user_id)
+                    done += 1
+                except Exception:
+                    db.rollback()
+                    logger.exception("Postgres indexing failed for email %s", email_id)
+            return {"total_unindexed": len(ids), "emails_indexed": done, "chunks_created": chunks}
+
+    default_rag_service = PostgresRAGService()
+else:
+    default_rag_service = RAGIndexerService()

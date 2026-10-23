@@ -1,6 +1,6 @@
 	import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8000' : window.location.origin);
 
 const api = axios.create({ baseURL: API_BASE, withCredentials: true, headers: { 'Content-Type': 'application/json' } });
 
@@ -25,6 +25,7 @@ api.interceptors.request.use((config) => {
 });
 
 export const getCurrentUser = () => api.get('/api/auth/me');
+export const enterDemo = () => api.post('/api/auth/demo');
 export const logout = () => api.post('/api/auth/logout');
 export const eraseAllData = () => api.delete('/api/auth/erase');
 
