@@ -189,7 +189,7 @@ export default function AiAssistant({ user: propUser }) {
 		} catch (error) {
 			console.warn('Backend RAG call failed:', error);
 			const responseData = {
-				text: 'I could not answer your question right now. Please try again in a moment.',
+				text: error.message || 'I could not answer your question right now. Please try again in a moment.',
 				steps: requestSteps,
 			};
 
