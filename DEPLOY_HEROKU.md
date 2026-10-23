@@ -24,9 +24,9 @@ Set these config vars on `ai-powered-gmail`:
 | `BACKEND_URL` | `https://ai-powered-gmail-0007703734bc.herokuapp.com` |
 | `OAUTH_GOOGLE_REDIRECT_URI` | `https://ai-powered-gmail-0007703734bc.herokuapp.com/api/auth/callback` |
 | `SECURE_COOKIES` | `true` |
-| `AZURE_OPENAI_ENDPOINT` | Your Azure OpenAI resource endpoint, e.g. `https://<RESOURCE>.openai.azure.com/` |
-| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Name of your 3072-dimensional `text-embedding-3-large` deployment |
-| `AZURE_OPENAI_CHAT_DEPLOYMENT` | Name of your chat deployment (defaults to `gpt-4.1-mini`) |
+| `AZURE_OPENAI_ENDPOINT` | `https://rg-openai-sea.cognitiveservices.azure.com/` |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | `text-embedding-3-large`|
+| `AZURE_OPENAI_CHAT_DEPLOYMENT` | `gpt-4.1-mini` |
 
 Keep `SESSION_SECRET`, `AZURE_OPENAI_API_KEY`, `OAUTH_GOOGLE_CLIENT_ID`, and `OAUTH_GOOGLE_CLIENT_SECRET` as Heroku config vars. Do not commit them.
 
