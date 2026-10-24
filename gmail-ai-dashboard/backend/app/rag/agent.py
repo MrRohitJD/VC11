@@ -147,6 +147,7 @@ class AgentResponse:
     plan: Optional[List[str]] = None
     approval_required: bool = False
     approval_id: Optional[str] = None
+    approval_preview: Optional[Dict[str, Any]] = None
     session_id: Optional[str] = None
     message_id: Optional[str] = None
     trace_id: Optional[str] = None
@@ -961,6 +962,7 @@ class GmailAIAssistant:
         answer: str = ""
         approval_required: bool = False
         approval_id: Optional[str] = None
+        approval_preview: Optional[Dict[str, Any]] = None
 
         # 4. Dispatch based on intent
         if intent == "PLAN_AND_EXECUTE":
@@ -1011,6 +1013,13 @@ class GmailAIAssistant:
             if pending_appr:
                 approval_required = True
                 approval_id = str(pending_appr.id)
+                approval_preview = {
+                    "id": approval_id,
+                    "recipient_email": pending_appr.recipient_email,
+                    "subject": pending_appr.subject or "",
+                    "draft_body": pending_appr.draft_body,
+                    "status": pending_appr.status,
+                }
                 answer += f"\n\n[Action Required] Created draft for '{pending_appr.recipient_email}' (Approval ID: {approval_id}). Please approve before sending."
         elif intent == "ACTION_SEND":
             # Pattern 6: Human-in-the-Loop Send Authorization
@@ -1092,6 +1101,7 @@ class GmailAIAssistant:
             plan=plan,
             approval_required=approval_required,
             approval_id=approval_id,
+            approval_preview=approval_preview,
             session_id=str(session.id),
             message_id=str(asst_msg.id),
         )

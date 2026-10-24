@@ -4,7 +4,7 @@ import {
 	AlertCircle, Bot, CalendarDays, Check, CircleDot, Cpu, Database, ExternalLink,
 	FileText, Inbox, LayoutDashboard, ListChecks, Mail, Menu, MoreHorizontal, PanelLeftClose,
 	PanelRightClose, PanelRightOpen, PenLine, RefreshCw, Search, Send,
-	Settings, Sparkles, Star, Tag, X, Zap,
+	Settings, ShieldCheck, Sparkles, Star, Tag, X, Zap,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import EmailDetailsModal, { formatEmailDate } from '../components/EmailDetailsModal';
@@ -104,6 +104,7 @@ export default function AiAssistant({ user: propUser }) {
 	const [sessionId, setSessionId] = useState(null);
 	const [ragStatus, setRagStatus] = useState(null);
 	const [approvalFeedback, setApprovalFeedback] = useState({});
+	const [draftReview, setDraftReview] = useState(null);
 	const [showExecutionDetails, setShowExecutionDetails] = useState(false);
 	const [navigationOpen, setNavigationOpen] = useState(true);
 	const [sidePanelOpen, setSidePanelOpen] = useState(true);
@@ -141,6 +142,27 @@ export default function AiAssistant({ user: propUser }) {
 	useEffect(() => {
 		messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
 	}, [messages, isTyping]);
+
+	useEffect(() => {
+		if (!draftReview) return undefined;
+		const handleEscape = (event) => {
+			if (event.key === 'Escape') setDraftReview(null);
+		};
+		document.addEventListener('keydown', handleEscape);
+		return () => document.removeEventListener('keydown', handleEscape);
+	}, [draftReview]);
+
+	const openDraftReview = (preview, approvalId) => {
+		if (!preview) {
+			setDraftReview({
+				id: approvalId,
+				loading: false,
+				error: 'The draft content could not be loaded. Nothing can be sent until the subject and body are available for review.',
+			});
+			return;
+		}
+		setDraftReview({ ...preview, id: preview.id || approvalId, loading: false, error: null });
+	};
 
 	const handleSend = async (queryText) => {
 		const text = (queryText || input).trim();
@@ -219,6 +241,7 @@ export default function AiAssistant({ user: propUser }) {
 					source_count: mappedEmails.length,
 					approval_required: data.approval_required,
 					approval_id: data.approval_id,
+									approval_preview: data.approval_preview,
 					entities: [],
 					emails: mappedEmails,
 					key_points: collectedKeyPoints,
@@ -228,6 +251,9 @@ export default function AiAssistant({ user: propUser }) {
 
 			setIsTyping(false);
 			setMessages((prev) => [...prev, assistantMsg]);
+			if (data.approval_required && data.approval_id) {
+				openDraftReview(data.approval_preview, data.approval_id);
+			}
 		} catch (error) {
 			console.warn('Backend RAG call failed:', error);
 			const rateLimited = error.status === 429 || error.response?.status === 429;
@@ -262,11 +288,13 @@ export default function AiAssistant({ user: propUser }) {
 					message: response.data?.message || 'Your email has been delivered.',
 				},
 			}));
+			return true;
 		} catch (err) {
 			setApprovalFeedback((prev) => ({
 				...prev,
 				[approvalId]: { status: 'ERROR', message: 'Your email could not be sent. Please try again.' },
 			}));
+			return false;
 		}
 	};
 
@@ -277,11 +305,13 @@ export default function AiAssistant({ user: propUser }) {
 				...prev,
 				[approvalId]: { status: 'REJECTED', message: 'Your draft was discarded.' },
 			}));
+			return true;
 		} catch (err) {
 			setApprovalFeedback((prev) => ({
 				...prev,
 				[approvalId]: { status: 'ERROR', message: 'Your draft could not be discarded. Please try again.' },
 			}));
+			return false;
 		}
 	};
 
@@ -594,33 +624,26 @@ export default function AiAssistant({ user: propUser }) {
 
 													{/* Human-in-the-Loop Email Draft Approval Card */}
 													{message.response.approval_required && message.response.approval_id && (
-														<div className="assistant-approval-card" style={{ marginTop: 12, padding: 12, background: '#fef3c7', borderRadius: 8, border: '1px solid #f59e0b' }}>
-															<div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#92400e', fontWeight: 600 }}>
+										<div className="assistant-approval-card">
+											<div className="assistant-approval-heading">
 																<AlertCircle size={18} />
 																<span>Review before sending</span>
 															</div>
-															<p style={{ margin: '6px 0', fontSize: 13, color: '#78350f' }}>
-																Review the draft above. Send it when you are ready, or discard it. Nothing is sent until you confirm.
+											<p className="assistant-approval-copy">
+												Review the exact subject and body in the secure review window before approving delivery.
 															</p>
 															{approvalFeedback[message.response.approval_id] ? (
-															<div style={{ fontSize: 13, fontWeight: 600, color: ['APPROVED', 'SCHEDULED', 'SENT'].includes(approvalFeedback[message.response.approval_id].status) ? '#16a34a' : '#dc2626' }}>
+											<div className={`assistant-approval-status ${['APPROVED', 'SCHEDULED', 'SENT'].includes(approvalFeedback[message.response.approval_id].status) ? 'success' : 'error'}`}>
 																	{approvalFeedback[message.response.approval_id].message}
 																</div>
 															) : (
-																<div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-																	<button
-																		style={{ padding: '6px 14px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
-																		onClick={() => handleApprove(message.response.approval_id)}
-																	>
-															<Check size={14} /> Approve delivery
-																	</button>
-																	<button
-																		style={{ padding: '6px 14px', background: '#dc2626', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
-																		onClick={() => handleReject(message.response.approval_id)}
-																	>
-																		<X size={14} /> Discard draft
-																	</button>
-																</div>
+												<button
+													className="assistant-review-draft-btn"
+													type="button"
+													onClick={() => openDraftReview(message.response.approval_preview, message.response.approval_id)}
+												>
+													<Mail size={14} /> Review subject &amp; body
+												</button>
 															)}
 														</div>
 													)}
@@ -795,6 +818,96 @@ export default function AiAssistant({ user: propUser }) {
                     onClose={() => setSelectedEmailModal(null)}
                 />
             )}
+
+			{draftReview && (
+				<div
+					className="draft-review-overlay"
+					onClick={() => setDraftReview(null)}
+					role="presentation"
+				>
+					<section
+						className="draft-review-modal"
+						role="dialog"
+						aria-modal="true"
+						aria-labelledby="draft-review-title"
+						onClick={(event) => event.stopPropagation()}
+					>
+						<header className="draft-review-header">
+							<div>
+								<span className="draft-review-eyebrow"><AlertCircle size={15} /> Human review required</span>
+								<h2 id="draft-review-title">Review email before sending</h2>
+								<p>Confirm the exact recipient, subject, and message body. Nothing is sent until you approve it.</p>
+							</div>
+							<button
+								className="draft-review-close"
+								type="button"
+								aria-label="Close email review"
+								onClick={() => setDraftReview(null)}
+							>
+								<X size={20} />
+							</button>
+						</header>
+
+						{draftReview.error ? (
+							<div className="draft-review-error" role="alert">
+								<AlertCircle size={18} />
+								<span>{draftReview.error}</span>
+							</div>
+						) : draftReview.loading ? (
+							<div className="draft-review-loading" role="status">Loading the saved draft for review…</div>
+						) : (
+							<>
+								<div className="draft-review-recipient">
+									<span>To</span>
+									<strong>{draftReview.recipient_email}</strong>
+								</div>
+								<label className="draft-review-field">
+									<span>Subject</span>
+									<input value={draftReview.subject || ''} readOnly aria-label="Draft subject" />
+								</label>
+								<label className="draft-review-field draft-review-body-field">
+									<span>Message body</span>
+									<textarea value={draftReview.draft_body || ''} readOnly aria-label="Draft message body" />
+								</label>
+								<div className="draft-review-notice">
+									<ShieldCheck size={17} />
+									<span>Review complete? Approving below authorizes Gmail delivery.</span>
+								</div>
+							</>
+						)}
+
+						<footer className="draft-review-footer">
+							<button className="draft-review-secondary" type="button" onClick={() => setDraftReview(null)}>
+								Close
+							</button>
+							{!draftReview.error && !draftReview.loading && (
+								<>
+									<button
+										className="draft-review-reject"
+										type="button"
+										onClick={async () => {
+											const rejected = await handleReject(draftReview.id);
+											if (rejected) setDraftReview(null);
+										}}
+									>
+										<X size={15} /> Discard draft
+									</button>
+									<button
+										className="draft-review-approve"
+										type="button"
+										onClick={async () => {
+											const approved = await handleApprove(draftReview.id);
+											if (approved) setDraftReview(null);
+										}}
+									>
+										<Check size={15} /> Approve &amp; send
+									</button>
+								</>
+							)}
+						</footer>
+					</section>
+				</div>
+			)}
 		</div>
 	);
 }

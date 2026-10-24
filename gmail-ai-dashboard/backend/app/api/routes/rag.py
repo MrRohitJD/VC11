@@ -101,6 +101,7 @@ class ChatResponse(BaseModel):
     plan: Optional[List[str]] = None
     approval_required: bool = False
     approval_id: Optional[str] = None
+    approval_preview: Optional[Dict[str, Any]] = None
     session_id: str
     message_id: str
     key_points: List[str] = Field(default_factory=list, description="Extracted key points based on user query in single-sentence bullets")
@@ -210,6 +211,7 @@ def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[s
             plan=agent_res.plan,
             approval_required=agent_res.approval_required,
             approval_id=agent_res.approval_id,
+            approval_preview=agent_res.approval_preview,
             session_id=agent_res.session_id or "",
             message_id=agent_res.message_id or "",
             key_points=extracted_key_points,
