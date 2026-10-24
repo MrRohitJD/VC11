@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.security import get_current_user
 from app.database.connection import get_db
@@ -305,22 +305,18 @@ def analytics_charts(
 	if end_at is not None:
 		time_conditions.append(Email.received_at < end_at)
 
+	# This single label query feeds both charts. Previously the same filtered
+	# email set was scanned twice: once for activity and once for categories.
 	rows = db.execute(
-		select(Email.id, Email.received_at, Label.label_id)
+		select(Email.id, Email.received_at, Label.label_id, Label.name)
 		.join(EmailLabel, EmailLabel.email_id == Email.id, isouter=True)
 		.join(Label, Label.id == EmailLabel.label_id, isouter=True)
 		.where(*time_conditions)
 	).all()
 
 	category_counts: dict[str, int] = {}
-	category_rows = db.execute(
-		select(Email.id, Label.label_id, Label.name)
-		.join(EmailLabel, EmailLabel.email_id == Email.id, isouter=True)
-		.join(Label, Label.id == EmailLabel.label_id, isouter=True)
-		.where(*time_conditions)
-	).all()
 	email_categories: dict[object, set[str]] = {}
-	for email_id, label_id, name in category_rows:
+	for email_id, _, label_id, name in rows:
 		if label_id in SYSTEM_CATEGORY_LABELS:
 			continue
 		if user.is_demo and label_id not in GMAIL_CATEGORY_NAMES:
@@ -344,7 +340,7 @@ def analytics_charts(
 		eid: cat_name for eid, cat_name in ai_class_rows if cat_name
 	}
 
-	all_email_ids = {eid for eid, _, _ in category_rows} | set(ai_categories_by_email.keys())
+	all_email_ids = {eid for eid, _, _, _ in rows} | set(ai_categories_by_email.keys())
 	for eid in all_email_ids:
 		if user.is_demo and eid in email_categories and email_categories[eid]:
 			for cat_name in email_categories[eid]:
@@ -380,9 +376,9 @@ def analytics_charts(
 			"breakdown": other_categories,
 		})
 
-	total_emails = db.scalar(
-		select(func.count(Email.id)).where(*time_conditions)
-	) or 0
+	# The outer join returns at least one row for every email, so the unique IDs
+	# already represent the total and avoid a fourth scan of the time range.
+	total_emails = len({eid for eid, _, _, _ in rows})
 
 	return {
 		"range": range_key,
@@ -390,7 +386,8 @@ def analytics_charts(
 		"total_emails": total_emails,
 		"categories": categories,
 		"activity": _activity_points(
-			rows, start_date, end_date, granularity, client_tz
+			[(email_id, received_at, label_id) for email_id, received_at, label_id, _ in rows],
+			start_date, end_date, granularity, client_tz
 		),
 	}
 
@@ -516,7 +513,10 @@ def list_emails(
 
 	# Paginated results
 	emails = db.scalars(
-		query.order_by(Email.received_at.desc().nullslast())
+		query.options(
+			selectinload(Email.labels).selectinload(EmailLabel.label),
+			selectinload(Email.classifications).selectinload(EmailClassification.category),
+		).order_by(Email.received_at.desc().nullslast())
 		.offset((page - 1) * per_page)
 		.limit(per_page)
 	).all()

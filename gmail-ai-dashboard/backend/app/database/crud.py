@@ -4,7 +4,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.chat_quota import ChatQuota
+from app.models.llm import LlmClassificationJob
 from app.models.email import GmailAccount, User
+from app.models.rag import ChatSession, EmailSendApproval
 
 
 def upsert_google_user(
@@ -69,12 +72,50 @@ def serialize_user(user: User) -> dict[str, Any]:
 
 
 def delete_user_gmail_data(db: Session, user: User) -> None:
-	"""Delete Gmail accounts and their related stored data, preserving the user."""
+	"""Erase a user's stored mailbox data while preserving the user and labels.
+
+	Labels are owned by ``gmail_accounts`` in the schema, so the account rows
+	must remain as structural parents for the labels.  The account's OAuth and
+	sync state is cleared, while emails and every record that depends on an
+	email are deleted.  User-owned assistant history and pending send approvals
+	are also removed; the ``users`` row itself is intentionally untouched.
+	"""
 	accounts = db.scalars(
 		select(GmailAccount).where(GmailAccount.user_id == user.id)
 	).all()
 	for account in accounts:
-		db.delete(account)
+		# These jobs can outlive an email while it is being classified, so they
+		# must be deleted explicitly before the account is reused.
+		for job in list(account.classification_jobs):
+			db.delete(job)
+		for history in list(account.sync_history):
+			db.delete(history)
+		for email in list(account.emails):
+			db.delete(email)
+
+		# Keep the account as the parent of the labels, but remove credentials
+		# and mailbox cursor data so the erase does not retain usable OAuth data.
+		account.access_token = ""
+		account.refresh_token = None
+		account.token_expiry = None
+		account.scope = None
+		account.gmail_user_id = None
+		account.sync_status = "IDLE"
+		account.last_synced_at = None
+		account.history_id = None
+
+	for session in db.scalars(
+		select(ChatSession).where(ChatSession.user_id == user.id)
+	).all():
+		db.delete(session)
+	for approval in db.scalars(
+		select(EmailSendApproval).where(EmailSendApproval.user_id == user.id)
+	).all():
+		db.delete(approval)
+	for quota in db.scalars(
+		select(ChatQuota).where(ChatQuota.identity == f"user:{user.id}")
+	).all():
+		db.delete(quota)
 	db.commit()
 
 

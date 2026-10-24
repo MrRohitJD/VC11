@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parseaddr
@@ -26,7 +28,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.retrievers import BaseRetriever
 from pydantic import ConfigDict, Field
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 try:
     from langsmith import traceable
@@ -43,6 +45,7 @@ from app.rag.query_constraints import is_financial_query
 from app.rag.preprocessing import clean_email_text
 from app.rag.vectorstore import default_vectorstore
 from app.rag.pgvector_store import PostgresVectorStoreManager
+from app.rag.activity import emit_activity
 
 logger = logging.getLogger(__name__)
 
@@ -1060,25 +1063,71 @@ class MultiQueryRetriever(BaseRetriever):
         if len(queries) == 1:
             queries.extend([f"{query} email", f"{query} details"])
 
-        # Execute retrieval for each perspective
+        # Execute retrieval for each perspective concurrently.  A SQLAlchemy
+        # Session is not thread-safe, so DB-backed retrievers receive a fresh
+        # worker session; retrievers without a session already own/use their
+        # backend's thread-safe connection path.
         fused_scores: Dict[str, float] = {}
         doc_store: Dict[str, Document] = {}
 
-        for q in queries[:self.query_count + 1]:
+        branches = queries[:self.query_count + 1]
+        emit_activity("multi_query", f"Searching {len(branches)} query perspectives", status="running",
+                      branch_count=len(branches), parallel=True)
+
+        parent_context = copy_context()
+
+        def invoke_branch(branch_query: str, branch_context) -> List[Document]:
+            retriever = self.base_retriever
+            branch_session = None
+            if getattr(retriever, "db_session", None) is not None:
+                source_session = retriever.db_session
+                # Bind the worker session to the same engine as the caller;
+                # this also keeps test/in-memory databases isolated from the
+                # application's default SessionLocal factory.
+                branch_factory = sessionmaker(bind=source_session.get_bind(), autoflush=False, autocommit=False)
+                branch_session = branch_factory()
+                try:
+                    retriever = retriever.model_copy(update={"db_session": branch_session})
+                except AttributeError:
+                    branch_session.close()
+                    raise RuntimeError("DB-backed retriever cannot be safely cloned for parallel search")
             try:
-                sub_docs = self.base_retriever.invoke(q)
-                for rank, doc in enumerate(sub_docs):
-                    doc_id = str(doc.metadata.get("email_id") or "") or doc.page_content[:50]
-                    # Reciprocal Rank Fusion
-                    fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + (1.0 / (60 + rank))
-                    if doc_id not in doc_store:
-                        doc_store[doc_id] = doc
-                    else:
-                        for k, v in doc.metadata.items():
-                            if k not in doc_store[doc_id].metadata or doc_store[doc_id].metadata[k] is None:
-                                doc_store[doc_id].metadata[k] = v
-            except Exception as exc:
-                logger.debug("Error executing sub-query '%s': %s", q, exc)
+                # ContextVars do not cross ThreadPoolExecutor workers by
+                # default. Copy the request activity context into each
+                # branch so public progress events still reach the SSE queue.
+                return branch_context.run(retriever.invoke, branch_query)
+            finally:
+                if branch_session is not None:
+                    branch_session.close()
+
+        max_workers = min(4, max(1, len(branches)))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="rag-branch") as executor:
+            future_to_index = {
+                executor.submit(invoke_branch, branch_query, parent_context.copy()): index
+                for index, branch_query in enumerate(branches)
+            }
+            for future in as_completed(future_to_index):
+                branch_index = future_to_index[future]
+                try:
+                    sub_docs = future.result()
+                    for rank, doc in enumerate(sub_docs):
+                        doc_id = str(doc.metadata.get("email_id") or "") or doc.page_content[:50]
+                        # Reciprocal Rank Fusion
+                        fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + (1.0 / (60 + rank))
+                        if doc_id not in doc_store:
+                            doc_store[doc_id] = doc
+                        else:
+                            for k, v in doc.metadata.items():
+                                if k not in doc_store[doc_id].metadata or doc_store[doc_id].metadata[k] is None:
+                                    doc_store[doc_id].metadata[k] = v
+                    emit_activity("retrieval_branch", "Query perspective completed", branch=branch_index + 1,
+                                  branch_count=len(branches), count=len(sub_docs))
+                except Exception as exc:
+                    logger.debug("Error executing sub-query branch %d: %s", branch_index, exc)
+                    emit_activity("retrieval_branch", "Query perspective failed; continuing with other sources",
+                                  branch=branch_index + 1, branch_count=len(branches), status="warning")
+
+        emit_activity("multi_query", f"Merged {len(doc_store)} unique candidates", count=len(doc_store))
 
         # Sort by fused score
         sorted_ids = sorted(fused_scores.keys(), key=lambda k: fused_scores[k], reverse=True)

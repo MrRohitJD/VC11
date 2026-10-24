@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.security import get_current_user
 from app.database.connection import get_db
-from app.database.crud import delete_user_and_all_data, serialize_user, upsert_google_user
+from app.database.crud import delete_user_gmail_data, serialize_user, upsert_google_user
 from app.models.email import User
 from app.services.chat_quota import set_demo_visitor_cookie
 from app.services.demo_seed import DEMO_EMAIL, DEMO_GOOGLE_ID
@@ -148,12 +148,12 @@ def erase_all_data(
 	user: User = Depends(get_current_user),
 	db: Session = Depends(get_db),
 ):
-	"""Permanently delete the user and all associated data.
+	"""Erase stored mailbox data while preserving the profile and labels.
 
-	Removes: emails, email_labels, labels, oauth tokens (gmail_accounts),
-	and the user record itself. Does NOT touch the user's actual Gmail.
+	This removes synchronized emails and all email-dependent records without
+	deleting the ``users`` row, the user's labels, or the user's actual Gmail.
 	"""
-	delete_user_and_all_data(db, user)
+	delete_user_gmail_data(db, user)
 	response = Response(status_code=status.HTTP_204_NO_CONTENT)
 	response.delete_cookie(SESSION_COOKIE)
 	return response

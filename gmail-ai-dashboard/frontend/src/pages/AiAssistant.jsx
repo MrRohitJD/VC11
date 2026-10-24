@@ -123,6 +123,7 @@ export default function AiAssistant({ user: propUser }) {
 		setIsTyping(true);
 		setActivitySteps([]);
 		const requestSteps = [];
+		const requestStartedAt = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
 
 		try {
 			// Call the LangGraph mailbox workflow.
@@ -170,11 +171,15 @@ export default function AiAssistant({ user: propUser }) {
 				response: {
 					type: 'summary',
 					text: data.answer,
-					steps: data.steps || [],
+					// The stream has the observable timings/statuses; keep it for the
+					// completed trace instead of replacing it with the compact step log.
+					steps: requestSteps.length ? requestSteps : (data.steps || []),
 					search_plan: data.search_plan,
 					trace_url: data.trace_url,
 					trace_id: data.trace_id,
 					tracing_enabled: data.tracing_enabled,
+					elapsed_ms: Math.round((typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) - requestStartedAt),
+					source_count: mappedEmails.length,
 					approval_required: data.approval_required,
 					approval_id: data.approval_id,
 					entities: [],
@@ -194,6 +199,9 @@ export default function AiAssistant({ user: propUser }) {
 					? 'You have used your 10 assistant requests for today. Your quota resets at midnight UTC.'
 					: 'I could not answer your question right now. Please try again in a moment.',
 				steps: requestSteps,
+				elapsed_ms: Math.round((typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) - requestStartedAt),
+				source_count: 0,
+				status: 'error',
 			};
 
 			setIsTyping(false);
@@ -420,7 +428,16 @@ export default function AiAssistant({ user: propUser }) {
 											</div>
 											<div className="msg-content-wrapper">
 												<div className="msg-bubble assistant-bubble">
-													<SearchActivity steps={message.response.steps} plan={message.response.search_plan} traceUrl={message.response.trace_url} traceId={message.response.trace_id} tracingEnabled={message.response.tracing_enabled} />
+									<SearchActivity
+										steps={message.response.steps}
+										plan={message.response.search_plan}
+										traceUrl={message.response.trace_url}
+										traceId={message.response.trace_id}
+										tracingEnabled={message.response.tracing_enabled}
+										elapsedMs={message.response.elapsed_ms}
+										sourceCount={message.response.source_count}
+										failed={message.response.status === 'error'}
+									/>
 													<div className="assistant-lead-text">
 														{renderAnswer(message.response.text)}
 													</div>
@@ -547,7 +564,11 @@ export default function AiAssistant({ user: propUser }) {
 												<span className="typing-dot" />
 												<span className="typing-label" role="status">{activitySteps.at(-1)?.observation || 'Checking your emails...'}</span>
 											</div>
-											<SearchActivity steps={activitySteps} pending plan={activitySteps.find((step) => step.plan)?.plan} />
+											<SearchActivity
+												steps={activitySteps}
+												pending
+												plan={activitySteps.find((step) => step.plan)?.plan}
+											/>
 										</div>
 									</div>
 								)}

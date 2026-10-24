@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     @classmethod
     def postgres_only_vector_backend(cls, value: str) -> str:
         normalized = (value or "postgres").strip().lower()
+        # Older deployments may still carry RAG_VECTOR_BACKEND=chroma in
+        # their environment. Chroma is no longer used, but that stale value
+        # should not prevent the API from starting after the pgvector
+        # migration.
+        if normalized in {"", "chroma", "chromadb", "pgvector"}:
+            return "postgres"
         if normalized != "postgres":
             raise ValueError("Only PostgreSQL pgvector is supported; local ChromaDB storage has been removed")
         return normalized
