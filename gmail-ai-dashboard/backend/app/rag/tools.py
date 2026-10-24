@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.models.email import AiCategory, Email, EmailClassification, EmailLabel, GmailAccount, Label
 from app.models.rag import Attachment, EmailSendApproval
-from app.rag.mailbox_scope import primary_email_condition
+from app.rag.mailbox_scope import mailbox_email_condition
 from app.rag.retrieval import (
     PostgresSemanticRetriever,
     ConditionalMultiQueryRetriever,
@@ -136,7 +136,7 @@ def parse_relative_or_explicit_date_range(
 
 
 def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
-    """Factory creating user-scoped, Primary-only tools for agent execution."""
+    """Factory creating user-scoped tools across all non-junk Gmail categories."""
     user_uuid = UUID(str(user_id))
 
     @tool
@@ -148,7 +148,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         retriever = PostgresSemanticRetriever(
             user_id=str(user_uuid),
             db_session=db,
-            primary_only=True,
+            primary_only=False,
             top_k=top_k,
         )
         docs = retriever.invoke(query)
@@ -186,7 +186,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             select(Email)
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
             .where(Email.id == eid, GmailAccount.user_id == user_uuid)
-            .where(primary_email_condition())
+            .where(mailbox_email_condition())
         )
         if not email:
             logger.info("Tool get_email_by_id returned 0 row(s) for ID: %s", email_id)
@@ -214,7 +214,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             select(Email)
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
             .where(Email.thread_id == thread_id, GmailAccount.user_id == user_uuid)
-            .where(primary_email_condition())
+            .where(mailbox_email_condition())
             .order_by(Email.received_at.asc().nullslast())
         ).all()
 
@@ -243,7 +243,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         base_retriever = GmailCustomHybridRetriever(
             user_id=str(user_uuid),
             db_session=db,
-            primary_only=True,
+            primary_only=False,
             top_k=top_k,
         )
         retriever = ConditionalMultiQueryRetriever(
@@ -279,7 +279,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         base_retr = GmailCustomHybridRetriever(
             user_id=str(user_uuid),
             db_session=db,
-            primary_only=True,
+            primary_only=False,
             top_k=top_k,
         )
         mq_retriever = MultiQueryRetriever(
@@ -333,7 +333,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         retriever = GmailCustomHybridRetriever(
             user_id=str(user_uuid),
             db_session=db,
-            primary_only=True,
+            primary_only=False,
             top_k=top_k,
             sender=sender,
             start_date=s_dt,
@@ -377,7 +377,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             start_date=s_dt,
             end_date=e_dt,
             limit=limit,
-            primary_only=True,
+            primary_only=False,
         )
         returned_ids = [c.email_id for c in citations]
         logger.info("Tool filter_emails_by_date returned %d row(s), email_ids: %s", len(citations), returned_ids)
@@ -395,7 +395,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             user_id=user_uuid,
             sender=clean_sender,
             limit=limit,
-            primary_only=True,
+            primary_only=False,
         )
         returned_ids = [c.email_id for c in citations]
         logger.info("Tool filter_emails_by_sender returned %d row(s), email_ids: %s", len(citations), returned_ids)
@@ -413,7 +413,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             user_id=user_uuid,
             label=clean_lbl,
             limit=limit,
-            primary_only=True,
+            primary_only=False,
         )
         returned_ids = [c.email_id for c in citations]
         logger.info("Tool filter_emails_by_label returned %d row(s), email_ids: %s", len(citations), returned_ids)
@@ -431,7 +431,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             select(Email)
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
             .where(Email.id == eid, GmailAccount.user_id == user_uuid)
-            .where(primary_email_condition())
+            .where(mailbox_email_condition())
         )
         if not email:
             return f"Email {email_id} not found."
@@ -453,7 +453,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             .join(Email, Email.id == EmailClassification.email_id)
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
             .where(EmailClassification.email_id == eid, EmailClassification.is_current.is_(True))
-            .where(GmailAccount.user_id == user_uuid, primary_email_condition())
+            .where(GmailAccount.user_id == user_uuid, mailbox_email_condition())
         )
         return classification or "Uncategorized"
 
@@ -469,7 +469,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             select(Attachment)
             .join(Email, Email.id == Attachment.email_id)
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
-            .where(Attachment.email_id == eid, GmailAccount.user_id == user_uuid, primary_email_condition())
+            .where(Attachment.email_id == eid, GmailAccount.user_id == user_uuid, mailbox_email_condition())
         ).all()
         if not attachments:
             return "No attachments registered for this email."

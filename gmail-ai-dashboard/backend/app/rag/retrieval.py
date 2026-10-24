@@ -40,7 +40,7 @@ except ImportError:
 
 
 from app.models.email import AiCategory, Email, EmailClassification, EmailLabel, GmailAccount, Label
-from app.rag.mailbox_scope import primary_email_condition, primary_email_ids, restrict_to_email_ids
+from app.rag.mailbox_scope import mailbox_email_condition, mailbox_email_ids, primary_email_condition, restrict_to_email_ids
 from app.rag.query_constraints import is_financial_query
 from app.rag.preprocessing import clean_email_text
 from app.rag.vectorstore import default_vectorstore
@@ -56,13 +56,13 @@ MIN_SEMANTIC_CONFIDENCE = 0.65
 
 
 def scoped_mailbox_documents(db, user_id, query, filters, email_ids=None):
-    """Enumerate authorized Primary records, preserving explicit API filters.
+    """Enumerate authorized non-junk mailbox records, preserving filters.
 
     ``email_ids`` is used by the live Gmail branch to hydrate messages that
     were just synchronized by MCP but have not been embedded yet.  Keeping
     this as an optional fast path avoids a second full mailbox scope scan.
     """
-    ids = [UUID(str(eid)) for eid in (email_ids if email_ids is not None else primary_email_ids(db, user_id, query))]
+    ids = [UUID(str(eid)) for eid in (email_ids if email_ids is not None else mailbox_email_ids(db, user_id, query))]
     if not ids:
         return []
     stmt = select(Email).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(
@@ -215,7 +215,7 @@ class PostgresSemanticRetriever(BaseRetriever):
 
     user_id: str = Field(..., description="Authenticated user UUID string for tenant isolation")
     db_session: Optional[Any] = Field(None, description="Database for current Gmail category labels")
-    primary_only: bool = Field(False, description="Restrict retrieval to Gmail Primary")
+    primary_only: bool = Field(False, description="Deprecated compatibility flag; mailbox retrieval includes all categories")
     scope_query: Optional[str] = Field(None, description="Original query whose date scope must survive expansions")
     top_k: int = Field(5, description="Number of top similar chunks to return (default 5, configurable 5-10)")
     search_type: str = Field("similarity", description="Retrieval method: 'similarity' (default HNSW) or 'mmr'")
@@ -251,8 +251,8 @@ class PostgresSemanticRetriever(BaseRetriever):
 
         custom_filter = self.filter_dict
         allowed_ids = None
-        if self.primary_only:
-            allowed_ids = primary_email_ids(self.db_session, self.user_id, self.scope_query or query)
+        if self.db_session is not None:
+            allowed_ids = mailbox_email_ids(self.db_session, self.user_id, self.scope_query or query)
             if not allowed_ids:
                 return []
             custom_filter = restrict_to_email_ids(custom_filter, allowed_ids)
@@ -433,7 +433,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
 
     user_id: str = Field(..., description="Authenticated user UUID string for tenant isolation")
     db_session: Optional[Any] = Field(None, description="SQLAlchemy Session for relational queries")
-    primary_only: bool = Field(False, description="Restrict retrieval to Gmail Primary")
+    primary_only: bool = Field(False, description="Deprecated compatibility flag; mailbox retrieval includes all categories")
     scope_query: Optional[str] = Field(None, description="Original query whose date scope must survive expansions")
     top_k: int = Field(5, description="Total ranked documents to return (default 5, configurable 5-10)")
 
@@ -480,8 +480,8 @@ class GmailCustomHybridRetriever(BaseRetriever):
             vector_manager.collection_name = collection_name
 
         allowed_ids = None
-        if self.primary_only:
-            allowed_ids = primary_email_ids(self.db_session, self.user_id, self.scope_query or query)
+        if self.db_session is not None:
+            allowed_ids = mailbox_email_ids(self.db_session, self.user_id, self.scope_query or query)
             if not allowed_ids:
                 return []
 
@@ -543,8 +543,8 @@ class GmailCustomHybridRetriever(BaseRetriever):
                     .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
                     .where(GmailAccount.user_id == user_uuid)
                 )
-                if self.primary_only:
-                    db_query = db_query.where(primary_email_condition())
+                db_query = db_query.where(mailbox_email_condition())
+                if allowed_ids is not None:
                     db_query = db_query.where(Email.id.in_([UUID(eid) for eid in allowed_ids]))
 
                 if self.email_id:
@@ -592,7 +592,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
                     clean_query,
                     flags=re.IGNORECASE,
                 ).strip()
-                if cleaned_kw and len(cleaned_kw) > 1 and not (self.email_id or self.thread_id or self.gmail_message_id) and not (self.primary_only and is_financial_query(query)):
+                if cleaned_kw and len(cleaned_kw) > 1 and not (self.email_id or self.thread_id or self.gmail_message_id) and not is_financial_query(query):
                     search_pat = f"%{cleaned_kw}%"
                     phrase_cond = or_(
                         Email.subject.ilike(search_pat),
@@ -733,9 +733,9 @@ class GmailCustomHybridRetriever(BaseRetriever):
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
             .where(GmailAccount.user_id == user_uuid)
         )
+        stmt = stmt.where(mailbox_email_condition())
         if primary_only:
-            stmt = stmt.where(primary_email_condition())
-            ids = primary_email_ids(db, user_id, keyword or "")
+            ids = mailbox_email_ids(db, user_id, keyword or "")
             stmt = stmt.where(Email.id.in_([UUID(eid) for eid in ids]))
 
         if email_id:
@@ -764,7 +764,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
             lbl = label.strip()
             if lbl:
                 stmt = stmt.where(email_label_condition(lbl))
-        if keyword and not (primary_only and is_financial_query(keyword)):
+        if keyword and not is_financial_query(keyword):
             kw_clean = keyword.strip()
             if kw_clean:
                 stmt = stmt.where(

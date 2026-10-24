@@ -359,7 +359,7 @@ export default function AiAssistant({ user: propUser }) {
 					<div className="search-box">
 						<Search size={16} />
 						<input
-							placeholder="Search your Primary emails..."
+							placeholder="Search all your emails..."
 							value={input}
 							onChange={(e) => setInput(e.target.value)}
 							onKeyDown={(e) => {
@@ -397,7 +397,7 @@ export default function AiAssistant({ user: propUser }) {
 									</div>
 									<div>
 										<h2>Mailbox Assistant · LangGraph</h2>
-										<p>Answers use only your Primary category emails.</p>
+										<p>Answers search all non-junk Gmail categories.</p>
 									</div>
 								</div>
 								<div className="assistant-header-controls">
@@ -626,7 +626,7 @@ export default function AiAssistant({ user: propUser }) {
 							<div className="assistant-composer-wrap">
 								<textarea
 									rows={2}
-									placeholder="Ask about your Primary emails (e.g. interview schedules or action items)..."
+								placeholder="Ask about all your emails (e.g. interview schedules or action items)..."
 									value={input}
 									onChange={(e) => setInput(e.target.value)}
 									onKeyDown={(e) => {

@@ -108,7 +108,7 @@ Return ONLY valid JSON.""",
     ("human", "{query}"),
 ])
 
-AGENT_SYSTEM_PROMPT = """You are a Gmail assistant with account-scoped Primary mailbox tools.
+AGENT_SYSTEM_PROMPT = """You are a Gmail assistant with account-scoped mailbox tools covering all Gmail categories.
 You assist users by searching emails, summarizing correspondence, extracting details, and drafting emails.
 
 GUIDELINES:
@@ -302,7 +302,7 @@ class GmailAIAssistant:
                 )
             context_block = "\n\n".join(items)
         else:
-            context_block = "No matching emails found in the Primary category for this query."
+            context_block = "No matching emails found in the mailbox for this query."
 
         tool_obs_block = ""
         if steps:
@@ -732,7 +732,7 @@ class GmailAIAssistant:
         user_id: UUID | str,
         tools: List[Any],
     ) -> tuple[str, List[RetrievedCitation], List[Dict[str, Any]]]:
-        """Attempt primary tool-calling loop; fall back to hybrid RAG and SQL search."""
+        """Attempt mailbox tool-calling loop; fall back to hybrid RAG and SQL search."""
         try:
             ans, citations, steps = self.execute_react_agent(query, db, user_id, tools)
             if citations:
@@ -742,7 +742,7 @@ class GmailAIAssistant:
 
         # Direct SQL search fallback
         citations = default_retriever.retrieve_structured_sql(
-            db=db, user_id=user_id, keyword=query, limit=5, primary_only=True,
+            db=db, user_id=user_id, keyword=query, limit=5, primary_only=False,
         )
         step_log = [{"step": 1, "thought": "Direct SQL Fallback", "action": "sql_search", "observation": f"Found {len(citations)} emails"}]
         ans = self.generate_llm_response(query=query, citations=citations, steps=step_log)

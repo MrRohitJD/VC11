@@ -68,10 +68,9 @@ def date_only_request(query):
 
 
 def gmail_search_query(query):
-    # Mirror the database's positive Primary-label evidence, including archived
-    # CATEGORY_PERSONAL messages, and exclude every conflicting category.
-    parts = ["{category:primary in:inbox}", "-category:social", "-category:promotions",
-             "-category:updates", "-category:forums", "-in:spam", "-in:trash", "-in:drafts"]
+    # Search every Gmail category, including archived mail, while excluding
+    # junk and incomplete messages that should never enter RAG context.
+    parts = ["-in:spam", "-in:trash", "-in:drafts"]
     bounds = received_date_bounds(query)
     if bounds:
         # Epoch seconds avoid Gmail's date-string timezone interpretation.

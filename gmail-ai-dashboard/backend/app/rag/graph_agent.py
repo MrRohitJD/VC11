@@ -188,7 +188,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
     def chat(state):
         try:
             response = assistant.model.invoke([
-                SystemMessage(content="You help the user search Primary mail and prepare drafts. Sending is unavailable."),
+                SystemMessage(content="You help the user search all non-junk Gmail categories and prepare drafts. Sending is unavailable."),
                 *history[-20:], HumanMessage(content=state["query"]),
             ])
             answer = str(response.content)
@@ -253,7 +253,7 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
             with tracing_context(enabled=enabled, project_name=settings.langsmith_project, client=client):
                 with (trace("Mailbox assistant", run_type="chain", inputs={"query": query},
                             project_name=settings.langsmith_project, client=client,
-                            metadata={"session_id": session_id, "scope": "Primary"}) if enabled else nullcontext(None)) as run:
+                            metadata={"session_id": session_id, "scope": "all_categories"}) if enabled else nullcontext(None)) as run:
                     response = self._run(query, db, user_id, session_id, top_k, filter_dict, use_multi_query)
                     response.steps = list(activity.steps)
                     response.tracing_enabled = enabled

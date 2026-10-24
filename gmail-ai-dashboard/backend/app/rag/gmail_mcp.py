@@ -30,7 +30,7 @@ async def _search(user_id, query):
         async with stdio_client(params) as (reader, writer):
             async with ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=settings.gmail_mcp_timeout_seconds)) as session:
                 await session.initialize()
-                result = await session.call_tool("search_primary_emails", {
+                result = await session.call_tool("search_mailbox_emails", {
                     "query": gmail_search_query(query),
                     "max_messages": settings.gmail_mcp_max_messages,
                 })
@@ -44,5 +44,9 @@ async def _search(user_id, query):
                 return payload
 
 
-def search_live_primary(user_id, query):
+def search_live_mailbox(user_id, query):
     return asyncio.run(_search(user_id, query))
+
+
+# Compatibility alias for callers that still use the old function name.
+search_live_primary = search_live_mailbox

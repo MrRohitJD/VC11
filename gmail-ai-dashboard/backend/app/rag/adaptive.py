@@ -41,9 +41,9 @@ def plan_retrieval(query, filters=None, use_multi_query=None, mode="similarity",
                    mcp_enabled=None):
     """Choose the retrieval strategy and the providers worth paying for.
 
-    The local index is the fast default.  Live Gmail discovery is reserved for
-    freshness-sensitive or broad Primary queries, where it provides current
-    label/date membership.  Exact and structured requests stay local because
+    The local index is the fast default. Live Gmail discovery is reserved for
+    freshness-sensitive or broad mailbox queries, where it provides current
+    label/date membership. Exact and structured requests stay local because
     their SQL/BM25 path is both faster and more precise than broad Gmail
     discovery.  Complex requests fan out to vector and BM25, with live Gmail
     added when freshness is part of the request.
@@ -68,7 +68,7 @@ def plan_retrieval(query, filters=None, use_multi_query=None, mode="similarity",
         query, re.I,
     ))
     if exhaustive or date_only:
-        strategy, label, multi = "exhaustive_primary", "Read every matching Primary email", False
+        strategy, label, multi = "exhaustive_mailbox", "Read every matching mailbox email", False
     elif any((filters or {}).get(key) for key in ("email_id", "gmail_message_id", "thread_id")):
         strategy, label, multi = "structured", "Look up exact messages and threads", False
     elif multi:
@@ -80,7 +80,7 @@ def plan_retrieval(query, filters=None, use_multi_query=None, mode="similarity",
 
     if exhaustive or date_only:
         providers = ["bm25"]
-        routing_reason = "Broad or date-scoped Primary membership needs lexical coverage"
+        routing_reason = "Broad or date-scoped mailbox membership needs lexical coverage"
     elif exact_filter:
         providers = ["bm25", "vector"]
         routing_reason = "Explicit sender/label/identifier filters use precise local retrieval"
@@ -93,7 +93,7 @@ def plan_retrieval(query, filters=None, use_multi_query=None, mode="similarity",
 
     if mcp_enabled and (exhaustive or date_only or freshness or multi or diverse):
         providers.append("gmail_mcp")
-        routing_reason += "; live Gmail validates current Primary membership"
+        routing_reason += "; live Gmail validates current mailbox membership"
 
     return RetrievalPlan(strategy, exhaustive, date_only, multi, diverse or mode == "mmr", label,
                          bounds[0].isoformat() if bounds else None,

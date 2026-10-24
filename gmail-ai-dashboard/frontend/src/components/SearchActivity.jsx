@@ -185,7 +185,7 @@ export default function SearchActivity({
 	const scopeStart = formatPlanDate(plan?.date_start);
 	const scopeEnd = formatPlanDate(plan?.date_end);
 	const scopeDate = scopeStart && scopeEnd ? `${scopeStart} – ${scopeEnd}` : scopeStart || scopeEnd;
-	const scopeLabel = plan?.label || plan?.strategy || 'Primary mail';
+	const scopeLabel = plan?.label || plan?.strategy || 'All mailbox categories';
 
 	return (
 		<details className={`search-activity ${pending ? 'search-activity-live' : ''} ${failed ? 'search-activity-failed' : ''}`} open={pending || undefined}>

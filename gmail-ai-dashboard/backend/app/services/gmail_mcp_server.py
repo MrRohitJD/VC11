@@ -14,12 +14,12 @@ from sqlalchemy.orm import load_only
 
 from app.database.connection import SessionLocal
 from app.models.email import Email, EmailLabel, GmailAccount, Label, User
-from app.rag.mailbox_scope import NON_PRIMARY_LABELS
+from app.rag.mailbox_scope import EXCLUDED_MAILBOX_LABELS
 from app.core.config import settings
 from app.rag.service_errors import error_code
 from app.services.gmail_service import build_gmail_service_for_user, _parse_message
 
-mcp = FastMCP("Primary Gmail Search")
+mcp = FastMCP("Gmail Mailbox Search")
 
 
 def fetch_page(service, items):
@@ -42,7 +42,7 @@ def fetch_page(service, items):
     return [messages[item['id']] for item in items]
 
 
-def search_primary(db, user_id, query, max_messages):
+def search_mailbox(db, user_id, query, max_messages):
     deadline = time.monotonic() + max(1, settings.gmail_mcp_timeout_seconds - 20)
     user = db.scalar(select(User).options(load_only(User.id)).where(User.id == UUID(str(user_id))))
     if user is None:
@@ -72,8 +72,7 @@ def search_primary(db, user_id, query, max_messages):
         scanned += len(page.get('messages', []))
         for message in messages:
             labels = set(message.get("labelIds", []))
-            excluded = {*NON_PRIMARY_LABELS, "SPAM", "TRASH", "DRAFT"}
-            if not labels.intersection({"CATEGORY_PERSONAL", "INBOX"}) or labels.intersection(excluded):
+            if labels.intersection(EXCLUDED_MAILBOX_LABELS):
                 continue
             record = _parse_message(message)
             email = db.scalar(select(Email).where(
@@ -111,14 +110,14 @@ def search_primary(db, user_id, query, max_messages):
 
 
 @mcp.tool()
-def search_primary_emails(query: str, max_messages: int = 1000) -> dict:
-    """Search and read Primary emails; return persisted application email IDs."""
+def search_mailbox_emails(query: str, max_messages: int = 1000) -> dict:
+    """Search and read all non-junk Gmail categories; return persisted email IDs."""
     if not 1 <= max_messages <= 10000:
         raise ValueError("max_messages must be between 1 and 10000")
     user_id = UUID(os.environ["GMAIL_MCP_USER_ID"])
     with SessionLocal() as db:
         try:
-            return search_primary(db, user_id, query, max_messages)
+            return search_mailbox(db, user_id, query, max_messages)
         except Exception as exc:
             db.rollback()
             return {"email_ids": [], "complete": False, "source": "gmail_mcp", "error_code": error_code(exc)}

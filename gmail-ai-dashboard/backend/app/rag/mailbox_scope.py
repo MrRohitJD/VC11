@@ -1,4 +1,4 @@
-"""Primary-category scope shared by all mailbox assistant retrieval paths."""
+"""Safe mailbox scope shared by all mailbox assistant retrieval paths."""
 
 from uuid import UUID
 
@@ -11,32 +11,36 @@ from app.rag.preprocessing import clean_email_text
 from app.rag.search_plan import requested_sender, sender_matches
 
 
-NON_PRIMARY_LABELS = (
+EXCLUDED_MAILBOX_LABELS = ("SPAM", "TRASH", "DRAFT")
+NON_PRIMARY_CATEGORY_LABELS = (
     "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS",
 )
 
 
-def primary_email_condition():
-    """Use Gmail system label IDs, never AI categories or custom label names.
+def mailbox_email_condition():
+    """Include every Gmail category while excluding junk and incomplete mail."""
+    def has_label(*label_ids):
+        return Email.labels.any(EmailLabel.label.has(Label.label_id.in_(label_ids)))
 
-    Primary messages can carry CATEGORY_PERSONAL or just INBOX without another
-    category. Require positive label evidence so unsynced/unlabelled records
-    are not assumed to be Primary. Exclude conflicting categories and junk.
-    """
+    return ~has_label(*EXCLUDED_MAILBOX_LABELS)
+
+
+def primary_email_condition():
+    """Return the explicit Primary-category condition for label filters."""
     def has_label(*label_ids):
         return Email.labels.any(EmailLabel.label.has(Label.label_id.in_(label_ids)))
 
     return and_(
         or_(has_label("CATEGORY_PERSONAL"), has_label("INBOX")),
-        ~has_label(*NON_PRIMARY_LABELS, "SPAM", "TRASH", "DRAFT"),
+        ~has_label(*NON_PRIMARY_CATEGORY_LABELS, *EXCLUDED_MAILBOX_LABELS),
     )
 
 
-def primary_email_ids(db: Session, user_id: UUID | str, query: str = "") -> list[str]:
+def _email_ids(db: Session, user_id: UUID | str, query: str, condition) -> list[str]:
     """Read current relational labels, including for already indexed chunks."""
     if db is None:
-        raise ValueError("A database session is required for Primary-only retrieval")
-    scope = [GmailAccount.user_id == UUID(str(user_id)), primary_email_condition()]
+        raise ValueError("A database session is required for mailbox retrieval")
+    scope = [GmailAccount.user_id == UUID(str(user_id)), condition()]
     bounds = received_date_bounds(query)
     if bounds:
         scope.extend([Email.received_at >= bounds[0], Email.received_at < bounds[1]])
@@ -58,6 +62,16 @@ def primary_email_ids(db: Session, user_id: UUID | str, query: str = "") -> list
         .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
         .where(*scope)
     )]
+
+
+def mailbox_email_ids(db: Session, user_id: UUID | str, query: str = "") -> list[str]:
+    """Return all non-junk mailbox email IDs, across every Gmail category."""
+    return _email_ids(db, user_id, query, mailbox_email_condition)
+
+
+def primary_email_ids(db: Session, user_id: UUID | str, query: str = "") -> list[str]:
+    """Compatibility helper for callers explicitly requesting Primary mail."""
+    return _email_ids(db, user_id, query, primary_email_condition)
 
 
 def restrict_to_email_ids(custom_filter: dict | None, email_ids: list[str]) -> dict:
