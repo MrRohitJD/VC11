@@ -182,8 +182,9 @@ class EmailClassification(Base):
         # Keeping this index partial avoids indexing historical, pending, and
         # failed classifications while making the email_id join selective.
         Index(
-            "ix_email_classifications_dashboard_current",
+            "ix_email_classifications_dashboard_lookup",
             "email_id",
+            "category_id",
             postgresql_where=text("is_current = true AND classification_status = 'SUCCEEDED'"),
             sqlite_where=text("is_current = 1 AND classification_status = 'SUCCEEDED'"),
         ),

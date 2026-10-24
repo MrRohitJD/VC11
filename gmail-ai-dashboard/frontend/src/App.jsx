@@ -862,12 +862,10 @@ function Dashboard() {
 	const handleRangeChange = (newRange) => {
 		setRange(newRange);
 		setActivityRange(newRange);
-		loadDashboardData(newRange, newRange);
 	};
 
 	const handleActivityRangeChange = (newRange) => {
 		setActivityRange(newRange);
-		loadDashboardData(range, newRange);
 	};
 
 	const handleRefresh = async () => {
