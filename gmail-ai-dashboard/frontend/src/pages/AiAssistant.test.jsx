@@ -47,3 +47,28 @@ it('lets the user collapse both side panels to expand the chat area', async () =
     expect(screen.getByRole('button', { name: 'Open navigation and composer panel' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open key points panel' })).toBeInTheDocument();
 });
+
+it('opens a full-size human review window with the exact draft subject and body', async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    getRagStatus.mockResolvedValue({ data: {} });
+    sendRagChat.mockResolvedValue({ data: {
+        answer: 'A draft is ready for your review.', session_id: 'session-draft', citations: [], steps: [],
+        approval_required: true, approval_id: 'approval-one', approval_preview: {
+            id: 'approval-one', recipient_email: 'adijadhav651@gmail.com', subject: 'Education load follow-up',
+            draft_body: 'Hello,\n\nI am writing to discuss the education load.\n\nBest regards,\nRohini', status: 'PENDING',
+        },
+    } });
+
+    render(<MemoryRouter><AiAssistant /></MemoryRouter>);
+    fireEvent.change(screen.getByPlaceholderText(/Ask about all your emails/), {
+        target: { value: 'Draft a professional mail to adijadhav651@gmail.com related to education load' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^Send$/ }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Review email before sending' });
+    expect(within(dialog).getByText('adijadhav651@gmail.com')).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue('Education load follow-up')).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue(/I am writing to discuss the education load/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Approve & send' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Discard draft' })).toBeInTheDocument();
+});

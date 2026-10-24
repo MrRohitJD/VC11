@@ -31,7 +31,7 @@ except ImportError:
 from langsmith import Client, trace, tracing_context
 
 from app.core.config import settings
-from app.models.rag import ChatMessage
+from app.models.rag import ChatMessage, EmailSendApproval
 from app.models.email import User
 from app.rag.agent import (
     GmailAIAssistant, AgentResponse, AGENT_SYSTEM_PROMPT,
@@ -377,9 +377,24 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
         citations = self.ensure_citation_key_points(query, citations)
         if citations:
             record_retrieval_citations(db, session.id, message.id, citations)
+        approval_preview = None
+        if result.get("approval_id"):
+            approval = db.query(EmailSendApproval).filter(
+                EmailSendApproval.id == UUID(str(result["approval_id"])),
+                EmailSendApproval.user_id == user_id,
+            ).first()
+            if approval:
+                approval_preview = {
+                    "id": str(approval.id),
+                    "recipient_email": approval.recipient_email,
+                    "subject": approval.subject or "",
+                    "draft_body": approval.draft_body,
+                    "status": approval.status,
+                }
         return AgentResponse(answer=result["answer"], intent=result["intent"],
                              approval_required=bool(result.get("approval_id")),
                              approval_id=result.get("approval_id"),
+                             approval_preview=approval_preview,
                              citations=citations, steps=result["steps"],
                              plan=result.get("plan"), search_plan=result.get("search_plan"),
                              session_id=str(session.id), message_id=str(message.id))
