@@ -26,7 +26,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
-from pgvector.sqlalchemy import HALFVEC
+try:
+    from pgvector.sqlalchemy import HALFVEC
+    EMBEDDING_COLUMN_TYPE = HALFVEC(3072).with_variant(JSON(), "sqlite")
+except ImportError:
+    HALFVEC = None
+    EMBEDDING_COLUMN_TYPE = JSON()
 
 from app.models.email import Base, Email, User, utcnow
 
@@ -73,7 +78,7 @@ class EmailEmbedding(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     chunk_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("email_chunks.id", ondelete="CASCADE"), nullable=False)
-    embedding: Mapped[list[float] | None] = mapped_column(HALFVEC(3072).with_variant(JSON(), "sqlite"))
+    embedding: Mapped[list[float] | None] = mapped_column(EMBEDDING_COLUMN_TYPE)
     email_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("emails.id", ondelete="CASCADE"), nullable=True)
     email_subject: Mapped[str | None] = mapped_column(Text)
     sender_email: Mapped[str | None] = mapped_column(Text)

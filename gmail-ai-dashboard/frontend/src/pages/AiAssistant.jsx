@@ -192,7 +192,7 @@ export default function AiAssistant({ user: propUser }) {
 			const responseData = {
 				text: rateLimited
 					? 'You have used your 10 assistant requests for today. Your quota resets at midnight UTC.'
-					: 'I could not answer your question right now. Please try again in a moment.',
+					: (error.message || 'I could not answer your question right now. Please try again in a moment.'),
 				steps: requestSteps,
 			};
 

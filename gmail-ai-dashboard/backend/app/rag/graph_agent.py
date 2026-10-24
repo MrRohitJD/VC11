@@ -24,6 +24,7 @@ from app.models.email import User
 from app.rag.agent import (
     GmailAIAssistant, AgentResponse, AGENT_SYSTEM_PROMPT,
     extract_citations_from_tool_observation,
+    select_deterministic_tool_fallback,
 )
 from app.rag.memory import (
     PostgresChatMessageHistory, get_or_create_chat_session, record_retrieval_citations,
@@ -31,6 +32,7 @@ from app.rag.memory import (
 from app.rag.tools import create_gmail_tools
 from app.rag.activity import activity_context, emit_activity
 from app.rag.adaptive import plan_retrieval
+from app.rag.service_errors import error_code, error_hint
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +59,24 @@ class MailboxState(TypedDict, total=False):
 def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                         filter_dict, use_multi_query, citations, checkpointer):
     # The legacy send tool does not deliver mail. Never expose it to the model.
-    owner = db.get(User, UUID(str(user_id)))
-    excluded = {"send_email", "draft_email"} if owner and owner.is_demo else {"send_email"}
+    try:
+        owner = db.get(User, UUID(str(user_id))) if db and user_id else None
+    except Exception:
+        owner = None
+    excluded = {"send_email", "draft_email"} if owner and getattr(owner, "is_demo", False) else {"send_email"}
     tools = {t.name: t for t in create_gmail_tools(db, user_id) if t.name not in excluded}
 
     def context(state):
-        query = assistant.transform_query(state["query"], history[-20:])
-        intent = assistant.route_intent(query)
+        try:
+            query = assistant.transform_query(state["query"], history[-20:])
+        except Exception as exc:
+            logger.warning("Query transformation failed: %s. Using original query.", exc)
+            query = state["query"]
+        try:
+            intent = assistant.route_intent(query)
+        except Exception as exc:
+            logger.warning("Intent routing failed: %s. Falling back to RAG_QUERY.", exc)
+            intent = "RAG_QUERY"
         emit_activity("route_request", "Mailbox request selected" if intent != "GENERAL_CHAT" else "Conversational reply selected", intent=intent)
         return {"effective_query": query, "intent": intent}
 
@@ -75,15 +88,23 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         return {"plan": tasks, "search_plan": retrieval.public()}
 
     def retrieve(state):
-        result = assistant.rag_chain.answer_query(
-            db=db, query=state["effective_query"], user_id=user_id,
-            top_k=top_k, filter_dict=filter_dict, use_multi_query=use_multi_query,
-        )
-        citations.extend(result["citations"])
-        return {"answer": result["answer"], "search_plan": result.get("search_plan", state.get("search_plan", {})),
-                "evidence_validated": result.get("relevance_validated", True), "steps": [{
-            "action": "retrieve_mailbox", "observation": f"Retrieved {len(citations)} sources."
-        }]}
+        try:
+            result = assistant.rag_chain.answer_query(
+                db=db, query=state["effective_query"], user_id=user_id,
+                top_k=top_k, filter_dict=filter_dict, use_multi_query=use_multi_query,
+            )
+            citations.extend(result["citations"])
+            return {"answer": result["answer"], "search_plan": result.get("search_plan", state.get("search_plan", {})),
+                    "evidence_validated": result.get("relevance_validated", True), "steps": [{
+                "action": "retrieve_mailbox", "observation": f"Retrieved {len(citations)} sources."
+            }]}
+        except Exception as exc:
+            logger.warning("Mailbox retrieval error: %s", exc)
+            return {
+                "answer": f"I encountered an issue searching your mailbox: {error_hint(error_code(exc))}",
+                "evidence_validated": False,
+                "steps": [{"action": "retrieve_mailbox", "observation": f"Retrieval failed: {type(exc).__name__}"}],
+            }
 
     def agent(state):
         providers = [getattr(assistant.model, "runnable", assistant.model),
@@ -95,7 +116,8 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
             except (AttributeError, NotImplementedError):
                 continue
         if not bound:
-            raise RuntimeError("The configured model must support tool calling for mailbox actions.")
+            fallback_answer = assistant._generate_dynamic_fallback(state.get("effective_query", state.get("query", "")), citations)
+            return {"messages": state.get("messages", []), "iterations": state.get("iterations", 0) + 1, "answer": fallback_answer}
         model = bound[0].with_fallbacks(bound[1:]) if len(bound) > 1 else bound[0]
         messages = state["messages"] or [
             SystemMessage(content=AGENT_SYSTEM_PROMPT +
@@ -105,10 +127,25 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
             *history[-20:], HumanMessage(content=state["effective_query"]),
         ]
         emit_activity("tool_agent", "Selecting the next mailbox action", status="running")
-        response = model.invoke(messages)
-        return {"messages": [*messages, response],
-                "iterations": state["iterations"] + 1,
-                "answer": str(response.content) if not response.tool_calls else ""}
+        try:
+            response = model.invoke(messages)
+            return {"messages": [*messages, response],
+                    "iterations": state["iterations"] + 1,
+                    "answer": str(response.content) if not response.tool_calls else ""}
+        except Exception as exc:
+            logger.warning("Tool agent model invocation failed (%s). Attempting fallback.", exc)
+            tool_sel = select_deterministic_tool_fallback(state["effective_query"], tools)
+            if tool_sel:
+                tool_name, tool_args = tool_sel
+                tool = tools.get(tool_name)
+                if tool:
+                    try:
+                        obs = str(tool.invoke(tool_args))
+                        citations.extend(extract_citations_from_tool_observation(obs))
+                    except Exception as tool_err:
+                        logger.warning("Fallback tool invocation failed: %s", tool_err)
+            fallback_answer = assistant._generate_dynamic_fallback(state["effective_query"], citations)
+            return {"messages": messages, "iterations": state["iterations"] + 1, "answer": fallback_answer}
 
     def execute_tools(state):
         messages = list(state["messages"])
@@ -135,11 +172,22 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         return {"messages": messages, "steps": steps, "approval_id": approval_id}
 
     def chat(state):
-        response = assistant.model.invoke([
-            SystemMessage(content="You help the user search Primary mail and prepare drafts. Sending is unavailable."),
-            *history[-20:], HumanMessage(content=state["query"]),
-        ])
-        return {"answer": str(response.content)}
+        try:
+            response = assistant.model.invoke([
+                SystemMessage(content="You help the user search Primary mail and prepare drafts. Sending is unavailable."),
+                *history[-20:], HumanMessage(content=state["query"]),
+            ])
+            answer = str(response.content)
+        except Exception as exc:
+            logger.warning("Chat model invocation failed: %s", exc)
+            q = state.get("query", "").strip().lower()
+            if any(w in q for w in ["hello", "hi", "hey", "greetings", "good morning", "good afternoon", "good evening"]):
+                answer = "Hello! I am your mailbox assistant. How can I help you search, summarize, or manage your emails today?"
+            else:
+                code = error_code(exc)
+                hint = error_hint(code)
+                answer = f"I could not connect to the AI model ({hint}). Please try again shortly."
+        return {"answer": answer}
 
     def limit(state):
         return {"answer": "I reached the workflow step limit. Please narrow your request. Any created drafts still require review."}
@@ -147,7 +195,12 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
     def review(state):
         valid = state.get("evidence_validated", True)
         emit_activity("review_answer", "Checked source coverage and answer status" if valid else "Answer reports the unavailable evidence check", status="completed" if valid else "warning", source_count=len(citations))
-        return {"answer": state["answer"].strip() or "I could not produce an answer. Please retry your request."}
+        ans = (state.get("answer") or "").strip()
+        if not ans and citations:
+            ans = assistant._generate_dynamic_fallback(state.get("effective_query", state.get("query", "")), citations)
+        if not ans:
+            ans = "I could not produce an answer for your mailbox request. Please refine or retry your request."
+        return {"answer": ans}
 
     def route(state):
         if state["intent"] == "GENERAL_CHAT":
@@ -205,16 +258,50 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
         memory = PostgresChatMessageHistory(db, session.id)
         history = memory.messages
         citations = []
-        if settings.vector_backend == "postgres":
-            from langgraph.checkpoint.postgres import PostgresSaver
-            checkpoint_context = PostgresSaver.from_conn_string(
-                settings.database_url.replace("postgresql+psycopg://", "postgresql://", 1)
-            )
-        else:
-            checkpoint_path = Path(settings.langgraph_checkpoint_path)
-            checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            checkpoint_context = SqliteSaver.from_conn_string(str(checkpoint_path))
-        with checkpoint_context as saver:
+        saver = None
+        checkpoint_cm = None
+        is_postgres = (
+            settings.vector_backend == "postgres"
+            and settings.database_url.startswith(("postgres://", "postgresql://", "postgresql+psycopg://"))
+        )
+        if is_postgres:
+            try:
+                from langgraph.checkpoint.postgres import PostgresSaver
+                checkpoint_conn = settings.database_url.replace("postgresql+psycopg://", "postgresql://", 1)
+                checkpoint_cm = PostgresSaver.from_conn_string(checkpoint_conn)
+                saver = checkpoint_cm.__enter__()
+                if hasattr(saver, "setup"):
+                    saver.setup()
+            except Exception as exc:
+                logger.warning("PostgresSaver setup failed (%s). Falling back.", exc)
+                if checkpoint_cm:
+                    try:
+                        checkpoint_cm.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                saver = None
+                checkpoint_cm = None
+
+        if saver is None:
+            try:
+                checkpoint_path = Path(settings.langgraph_checkpoint_path)
+                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                checkpoint_cm = SqliteSaver.from_conn_string(str(checkpoint_path))
+                saver = checkpoint_cm.__enter__()
+                if hasattr(saver, "setup"):
+                    saver.setup()
+            except Exception as exc:
+                logger.warning("SqliteSaver setup failed (%s). Falling back to MemorySaver.", exc)
+                if checkpoint_cm:
+                    try:
+                        checkpoint_cm.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                from langgraph.checkpoint.memory import MemorySaver
+                saver = MemorySaver()
+                checkpoint_cm = nullcontext(saver)
+
+        try:
             graph = build_mailbox_graph(
                 self, db=db, user_id=user_id, history=history, top_k=top_k,
                 filter_dict=filter_dict, use_multi_query=use_multi_query,
@@ -228,6 +315,12 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
                         "tags": ["devLG", "mailbox"],
                         "metadata": {"session_id": str(session.id)}},
             )
+        finally:
+            if checkpoint_cm and hasattr(checkpoint_cm, "__exit__"):
+                try:
+                    checkpoint_cm.__exit__(None, None, None)
+                except Exception:
+                    pass
         # SQL history remains the source of truth for the existing session UI.
         memory.add_message(HumanMessage(content=query))
         message = ChatMessage(chat_session_id=session.id, role="assistant", content=result["answer"])

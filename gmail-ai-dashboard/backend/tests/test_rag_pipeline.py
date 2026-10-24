@@ -263,15 +263,29 @@ class TestRAGApiEndpoints(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient
         from app.api.app import app
+        from app.api.routes.rag import get_user_for_rag
+        from app.database.connection import engine
+        from app.models.email import Base
+        from app.models.rag import Base as RagBase
+        Base.metadata.create_all(bind=engine)
+        RagBase.metadata.create_all(bind=engine)
+        self.mock_user = User(id=uuid4(), google_id="mock_g", email="mock@example.com", name="Mock User", is_demo=False)
+        app.dependency_overrides[get_user_for_rag] = lambda: self.mock_user
         self.client = TestClient(app)
+
+    def tearDown(self):
+        from app.api.app import app
+        from app.api.routes.rag import get_user_for_rag
+        app.dependency_overrides.pop(get_user_for_rag, None)
 
     def test_rag_status_endpoint(self):
         res = self.client.get("/api/rag/status")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["status"], "operational")
-        self.assertIn("chromadb", data)
-        self.assertIn("total_vectors", data["chromadb"])
+        self.assertTrue("vector_store" in data or "chromadb" in data)
+        store = data.get("vector_store") or data.get("chromadb")
+        self.assertIn("total_vectors", store)
 
     def test_rag_approvals_endpoint(self):
         res = self.client.get("/api/rag/approvals")

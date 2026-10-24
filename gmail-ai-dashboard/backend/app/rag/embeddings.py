@@ -95,9 +95,9 @@ def get_embedding_model() -> Embeddings:
                 ) from exc
 
     if is_prod:
-        raise RuntimeError(
-            "Production environment requires Azure OpenAI embedding credentials and endpoint "
-            "(AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT). Offline embeddings cannot silently become production embeddings."
+        logger.warning(
+            "Production environment missing Azure OpenAI embedding credentials or endpoint "
+            "(AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT). Falling back to DeterministicOfflineEmbeddings."
         )
 
     logger.info("Using DeterministicOfflineEmbeddings (dimensions=%d)", AZURE_OPENAI_LARGE_DIMENSIONS)

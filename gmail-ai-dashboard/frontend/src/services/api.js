@@ -74,7 +74,7 @@ export const sendRagChat = async (data, onProgress) => {
 	});
 	if (!response.ok) {
 		const payload = await response.json().catch(() => ({}));
-		const error = new Error(payload.detail || 'Mailbox search could not start.');
+		const error = new Error(payload.detail || payload.message || 'Mailbox search could not start.');
 		error.status = response.status;
 		throw error;
 	}

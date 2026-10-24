@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent  # backend/
@@ -68,6 +68,13 @@ class Settings(BaseSettings):
         if value.startswith("postgresql://"):
             return "postgresql+psycopg://" + value[len("postgresql://"):]
         return value
+
+    @model_validator(mode="after")
+    def align_local_vector_backend(self):
+        """Use the local vector store when the configured database is SQLite."""
+        if self.database_url.startswith("sqlite") and self.vector_backend == "postgres":
+            self.vector_backend = "chroma"
+        return self
 
     model_config = SettingsConfigDict(
         env_file=str(_BACKEND_DIR / ".env"),

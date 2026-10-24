@@ -249,6 +249,10 @@ def stream_chat(
                     response = _run_chat(body, scoped_user, db, x_timezone)
                 if not disconnected.is_set():
                     events.put(("result", response.model_dump()))
+        except HTTPException as exc:
+            logger.warning("Streaming mailbox request failed with HTTP error: %s", exc.detail)
+            if not disconnected.is_set():
+                events.put(("error", {"message": str(exc.detail)}))
         except Exception as exc:
             logger.warning("Streaming mailbox request failed: %s", type(exc).__name__)
             if not disconnected.is_set():
