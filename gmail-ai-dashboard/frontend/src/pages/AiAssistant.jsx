@@ -334,7 +334,7 @@ export default function AiAssistant({ user: propUser }) {
 	return (
 		<div className={`app-shell assistant-shell-view ${navigationOpen ? '' : 'navigation-collapsed'} ${sidePanelOpen ? '' : 'side-panel-collapsed'}`}>
 			{/* Shared Universal Sidebar */}
-			<aside className="sidebar">
+			<aside className="sidebar" id="assistant-navigation">
 				<div className="brand">
 					<div className="brand-mark"><Mail size={18} /></div>
 					<span>Gmail AI <strong>Dashboard</strong></span>
@@ -392,6 +392,8 @@ export default function AiAssistant({ user: propUser }) {
 						className="panel-toggle-button"
 						type="button"
 						onClick={() => setNavigationOpen((open) => !open)}
+						aria-controls="assistant-navigation"
+						aria-expanded={navigationOpen}
 						aria-label={navigationOpen ? 'Close navigation and composer panel' : 'Open navigation and composer panel'}
 						title={navigationOpen ? 'Close navigation panel' : 'Open navigation panel'}
 					>
@@ -455,11 +457,13 @@ export default function AiAssistant({ user: propUser }) {
 										<RefreshCw size={14} /> Clear
 									</button>
 									<button
-										className="panel-toggle-button"
+						className={`panel-toggle-button planner-toggle-button ${sidePanelOpen ? '' : 'is-closed'}`}
 										type="button"
 										onClick={() => setSidePanelOpen((open) => !open)}
+						aria-controls="assistant-planner-panel"
+						aria-expanded={sidePanelOpen}
 										aria-label={sidePanelOpen ? 'Close key points panel' : 'Open key points panel'}
-										title={sidePanelOpen ? 'Close key points panel' : 'Open key points panel'}
+						title={sidePanelOpen ? 'Close assistant planner' : 'Open assistant planner'}
 									>
 										{sidePanelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
 									</button>
@@ -714,7 +718,25 @@ export default function AiAssistant({ user: propUser }) {
 						</section>
 
 						{/* Right: RAG Pipeline Info & Grounding Panel */}
-						{sidePanelOpen && <aside className="assistant-side-panel">
+						{sidePanelOpen && <aside className="assistant-side-panel" id="assistant-planner-panel" aria-label="Assistant planner">
+							<div className="assistant-side-panel-heading">
+								<div>
+									<span className="assistant-side-panel-eyebrow">WORKSPACE PANEL</span>
+									<h2><ListChecks size={17} /> Assistant planner</h2>
+									<p>Keep the latest answer and its sources in view.</p>
+								</div>
+								<button
+									className="panel-toggle-button assistant-side-panel-close"
+									type="button"
+									onClick={() => setSidePanelOpen(false)}
+									aria-controls="assistant-planner-panel"
+									aria-expanded={sidePanelOpen}
+									aria-label="Close assistant planner"
+									title="Close assistant planner"
+								>
+									<PanelRightClose size={16} />
+								</button>
+							</div>
 							{/* Key Points Based on User Query */}
 							<section className="panel side-info-card key-points-card">
 								<div className="side-card-header">

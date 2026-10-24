@@ -60,6 +60,7 @@
   gap: 20px;
   align-items: start;
   height: 100%;
+  transition: grid-template-columns .24s ease, gap .24s ease;
 }
 
 .side-panel-collapsed .assistant-layout-grid {
@@ -739,7 +740,82 @@
   flex-direction: column;
   gap: 16px;
   height: calc(100vh - 104px);
+  min-width: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
+  animation: assistant-planner-in .24s ease both;
+}
+
+.planner-toggle-button.is-closed {
+  width: auto;
+  gap: 6px;
+  padding: 0 9px;
+}
+
+.planner-toggle-button.is-closed::after {
+  content: 'Planner';
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.assistant-side-panel-heading {
+  align-items: flex-start;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 2px 0;
+}
+
+.assistant-side-panel-heading > div {
+  min-width: 0;
+}
+
+.assistant-side-panel-eyebrow {
+  color: #98a2b3;
+  display: block;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .12em;
+  margin-bottom: 5px;
+}
+
+.assistant-side-panel-heading h2 {
+  align-items: center;
+  color: #20273c;
+  display: flex;
+  font-size: 16px;
+  gap: 7px;
+  letter-spacing: -.02em;
+  margin: 0;
+}
+
+.assistant-side-panel-heading h2 svg {
+  color: #6f66e9;
+  flex: 0 0 auto;
+}
+
+.assistant-side-panel-heading p {
+  color: #8b95a6;
+  font-size: 10px;
+  line-height: 1.45;
+  margin: 5px 0 0;
+}
+
+.assistant-side-panel-close {
+  background: transparent;
+  border-color: transparent;
+  margin-top: 1px;
+}
+
+.assistant-side-panel-close:hover,
+.assistant-side-panel-close:focus-visible {
+  background: #f4f3ff;
+  border-color: #c9c4ff;
+}
+
+@keyframes assistant-planner-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 
 .side-info-card {
