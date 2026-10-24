@@ -93,6 +93,10 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         except Exception as exc:
             logger.warning("Intent routing failed: %s. Falling back to RAG_QUERY.", exc)
             intent = "RAG_QUERY"
+        if parse_draft_request(state["query"]) and "draft_email" in tools:
+            # Explicit outbound drafts must create an approval record even if
+            # the router/model misclassifies a typo such as "mailto".
+            intent = "ACTION_DRAFT"
         emit_activity("route_request", "Mailbox request selected" if intent != "GENERAL_CHAT" else "Conversational reply selected", intent=intent, lane="planner")
         return {"effective_query": query, "intent": intent}
 

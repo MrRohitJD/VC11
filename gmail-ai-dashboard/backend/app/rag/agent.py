@@ -366,11 +366,10 @@ def _extract_prompt_addresses(query: str, label: str) -> str:
 
 def parse_draft_request(query: str) -> Optional[Dict[str, Any]]:
     """Parse recipient, topic, tone, and requested length from a draft prompt."""
-    if not re.search(
-        r"\b(?:draft|write|compose|prepare|create)\b.*\b(?:mail|email|message|reply|response)\b",
-        query,
-        re.IGNORECASE,
-    ):
+    # A recipient address plus an explicit drafting verb is sufficient. This
+    # also handles natural typos such as "mailto" without allowing a generic
+    # mailbox question to create an approval record.
+    if not re.search(r"\b(?:draft|write|compose|prepare|create)\b", query, re.IGNORECASE):
         return None
     recipient_match = re.search(
         r"\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b",
@@ -1194,6 +1193,10 @@ class GmailAIAssistant:
         # 2. Fast route before query transformation.  GENERAL_CHAT skips both
         # mailbox tools and agent orchestration entirely.
         fast_intent = self.route_intent(query, has_history=bool(existing_history))
+        if parse_draft_request(query):
+            # Explicit draft requests take precedence over a conversational
+            # route so the approval popup always receives an approval ID.
+            fast_intent = "ACTION_DRAFT"
         if fast_intent == "GENERAL_CHAT":
             effective_query = query
             intent = fast_intent

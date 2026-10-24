@@ -40,6 +40,17 @@ def test_parser_extracts_cc_and_bcc_addresses():
     assert parsed["bcc"] == "archive@example.com"
 
 
+def test_parser_accepts_mailto_typo_in_explicit_draft_request():
+    parsed = parse_draft_request(
+        "Draft a professional mailto adijadhav651@gmail.com friend related to "
+        "study hard for end term semester exam."
+    )
+
+    assert parsed is not None
+    assert parsed["recipient"] == "adijadhav651@gmail.com"
+    assert parsed["topic"] == "study hard for end term semester exam"
+
+
 def test_fallback_subject_is_specific_to_assignment_portal_topic():
     draft = build_deterministic_draft_request(EXAMPLE_REQUEST)
 
