@@ -178,6 +178,15 @@ class EmailClassification(Base):
         CheckConstraint("confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)", name="ck_email_classifications_confidence"),
         CheckConstraint("classification_status IN ('PENDING', 'SUCCEEDED', 'FAILED')", name="ck_email_classifications_status"),
         Index("ix_email_classifications_email_current", "email_id", "is_current"),
+        # Dashboard metrics and charts only need the current successful result.
+        # Keeping this index partial avoids indexing historical, pending, and
+        # failed classifications while making the email_id join selective.
+        Index(
+            "ix_email_classifications_dashboard_current",
+            "email_id",
+            postgresql_where=text("is_current = true AND classification_status = 'SUCCEEDED'"),
+            sqlite_where=text("is_current = 1 AND classification_status = 'SUCCEEDED'"),
+        ),
         Index("ix_email_classifications_category_id", "category_id"),
     )
 
