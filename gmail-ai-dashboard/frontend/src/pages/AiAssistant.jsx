@@ -110,26 +110,40 @@ export default function AiAssistant({ user: propUser }) {
 	const [draftReviewBusy, setDraftReviewBusy] = useState(false);
 	const [draftReviewActionError, setDraftReviewActionError] = useState('');
 	const [showExecutionDetails, setShowExecutionDetails] = useState(false);
-	const [navigationOpen, setNavigationOpen] = useState(true);
-	const [sidePanelOpen, setSidePanelOpen] = useState(true);
+	const [navigationOpen, setNavigationOpen] = useState(() => {
+		if (window.matchMedia?.('(max-width: 800px)').matches) return false;
+		try { return window.localStorage.getItem('gmail-ai-navigation-open') !== 'false'; } catch { return true; }
+	});
+	const [sidePanelOpen, setSidePanelOpen] = useState(() => {
+		if (window.matchMedia?.('(max-width: 800px)').matches) return false;
+		try { return window.localStorage.getItem('gmail-ai-key-points-open') !== 'false'; } catch { return true; }
+	});
 	const messagesEndRef = useRef(null);
 
 	const [messages, setMessages] = useState([]);
 
 	useEffect(() => {
-		try {
-			setNavigationOpen(window.localStorage.getItem('gmail-ai-navigation-open') !== 'false');
-			setSidePanelOpen(window.localStorage.getItem('gmail-ai-key-points-open') !== 'false');
-		} catch {
-			// Preferences are optional and should never block the assistant.
-		}
+		const mobileLayout = window.matchMedia?.('(max-width: 800px)');
+		if (!mobileLayout) return undefined;
+		const closePanelsOnMobile = (event) => {
+			if (event.matches) {
+				setNavigationOpen(false);
+				setSidePanelOpen(false);
+			}
+		};
+		mobileLayout.addEventListener('change', closePanelsOnMobile);
+		return () => mobileLayout.removeEventListener('change', closePanelsOnMobile);
 	}, []);
 
 	useEffect(() => {
-		try { window.localStorage.setItem('gmail-ai-navigation-open', String(navigationOpen)); } catch { /* optional */ }
+		try {
+			if (!window.matchMedia?.('(max-width: 800px)').matches) window.localStorage.setItem('gmail-ai-navigation-open', String(navigationOpen));
+		} catch { /* optional */ }
 	}, [navigationOpen]);
 	useEffect(() => {
-		try { window.localStorage.setItem('gmail-ai-key-points-open', String(sidePanelOpen)); } catch { /* optional */ }
+		try {
+			if (!window.matchMedia?.('(max-width: 800px)').matches) window.localStorage.setItem('gmail-ai-key-points-open', String(sidePanelOpen));
+		} catch { /* optional */ }
 	}, [sidePanelOpen]);
 
 	// Fetch system status on mount
@@ -410,7 +424,7 @@ export default function AiAssistant({ user: propUser }) {
 	return (
 		<div className={`app-shell assistant-shell-view ${navigationOpen ? '' : 'navigation-collapsed'} ${sidePanelOpen ? '' : 'side-panel-collapsed'}`}>
 			{/* Shared Universal Sidebar */}
-			<aside className="sidebar" id="assistant-navigation">
+			<aside className="sidebar" id="assistant-navigation" inert={!navigationOpen ? true : undefined}>
 				<div className="brand">
 					<div className="brand-mark"><Mail size={18} /></div>
 					<span>Gmail AI <strong>Dashboard</strong></span>
@@ -459,6 +473,7 @@ export default function AiAssistant({ user: propUser }) {
 					<MoreHorizontal size={16} />
 				</div>
 			</aside>
+			{navigationOpen && <button className="assistant-navigation-backdrop" type="button" aria-label="Close navigation" onClick={() => setNavigationOpen(false)} />}
 
 			{/* Main Shell */}
 			<div className="main-shell">
@@ -475,6 +490,7 @@ export default function AiAssistant({ user: propUser }) {
 					>
 						{navigationOpen ? <PanelLeftClose size={18} /> : <Menu size={18} />}
 					</button>
+					<span className="assistant-mobile-title">Assistant</span>
 					<div className="search-box">
 						<Search size={16} />
 						<input
@@ -787,6 +803,7 @@ export default function AiAssistant({ user: propUser }) {
 						</section>
 
 						{/* Right: RAG Pipeline Info & Grounding Panel */}
+						{sidePanelOpen && <button className="assistant-planner-backdrop" type="button" aria-label="Dismiss assistant planner" onClick={() => setSidePanelOpen(false)} />}
 						{sidePanelOpen && <aside className="assistant-side-panel" id="assistant-planner-panel" aria-label="Assistant planner">
 							<div className="assistant-side-panel-heading">
 								<div>

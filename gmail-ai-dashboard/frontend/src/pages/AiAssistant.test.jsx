@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { expect, it, vi } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import AiAssistant from './AiAssistant';
 import { approveRagEmail, getRagSourceEmail, getRagStatus, rejectRagEmail, sendRagChat, updateRagEmailDraft } from '../services/api';
@@ -9,6 +9,8 @@ vi.mock('../services/api', () => ({
     getRagStatus: vi.fn(), sendRagChat: vi.fn(), getRagSourceEmail: vi.fn(),
     approveRagEmail: vi.fn(), rejectRagEmail: vi.fn(), updateRagEmailDraft: vi.fn(),
 }));
+
+afterEach(() => vi.unstubAllGlobals());
 
 it('opens the complete message when View email is clicked on a citation', async () => {
     Element.prototype.scrollIntoView = vi.fn();
@@ -46,6 +48,27 @@ it('lets the user collapse both side panels to expand the chat area', async () =
     expect(screen.queryByRole('heading', { name: 'Key Points' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open navigation and composer panel' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Open key points panel' })).toBeInTheDocument();
+});
+
+it('opens mobile navigation and planner only when requested', () => {
+    window.localStorage.setItem('gmail-ai-navigation-open', 'true');
+    window.localStorage.setItem('gmail-ai-key-points-open', 'true');
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    getRagStatus.mockResolvedValue({ data: {} });
+
+    render(<MemoryRouter><AiAssistant /></MemoryRouter>);
+    expect(screen.getByRole('button', { name: 'Open navigation and composer panel' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open key points panel' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Key Points' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open navigation and composer panel' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close navigation' }));
+    expect(screen.getByRole('button', { name: 'Open navigation and composer panel' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open key points panel' }));
+    expect(screen.getByRole('heading', { name: 'Key Points' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss assistant planner' }));
+    expect(screen.queryByRole('heading', { name: 'Key Points' })).not.toBeInTheDocument();
 });
 
 it('opens an editable human review window and sends the reviewed draft values', async () => {
