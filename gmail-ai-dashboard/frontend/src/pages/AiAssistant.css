@@ -509,6 +509,7 @@
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
+  color: #6f66e9;
 }
 
 .typing-dot {
@@ -531,6 +532,45 @@
   font-size: 11px;
   color: #6f66e9;
   font-style: italic;
+}
+
+.pipeline-trace-toggle {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid #e7e9f2;
+  border-radius: 8px;
+  background: #fff;
+  color: #5f59c9;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pipeline-trace-toggle:hover {
+  background: #f8f7ff;
+  border-color: #d9d5ff;
+}
+
+.pipeline-trace-toggle svg:last-child {
+  margin-left: auto;
+  transition: transform 0.15s ease;
+}
+
+.pipeline-trace-toggle .trace-toggle-open {
+  transform: rotate(180deg);
+}
+
+.execution-details-card {
+  margin-top: 8px;
+}
+
+.trace-empty {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
 }
 
 /* Prompt Pills */

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
 	AlertCircle, Bot, CalendarDays, Check, CircleDot, Cpu, Database, ExternalLink,
 	FileText, Inbox, LayoutDashboard, ListChecks, Mail, MoreHorizontal, PenLine,
-	RefreshCw, Search, Send, Settings, Star, Tag, X, Zap,
+	RefreshCw, Search, Send, Settings, Sparkles, Star, Tag, X, Zap,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import EmailDetailsModal, { formatEmailDate } from '../components/EmailDetailsModal';
@@ -93,6 +93,7 @@ export default function AiAssistant({ user: propUser }) {
 	const [sessionId, setSessionId] = useState(null);
 	const [ragStatus, setRagStatus] = useState(null);
 	const [approvalFeedback, setApprovalFeedback] = useState({});
+	const [showExecutionDetails, setShowExecutionDetails] = useState(false);
 	const messagesEndRef = useRef(null);
 
 	const [messages, setMessages] = useState([]);
@@ -298,10 +299,6 @@ export default function AiAssistant({ user: propUser }) {
 		}
 		return user?.email?.[0]?.toUpperCase() || '?';
 	}, [user]);
-	const activeTypingStep = [...activitySteps].reverse().find((step) =>
-		['running', 'pending', 'in_progress', 'started'].includes(String(step?.status || '').toLowerCase())
-	);
-
 	return (
 		<div className="app-shell assistant-shell-view">
 			{/* Shared Universal Sidebar */}
@@ -438,16 +435,29 @@ export default function AiAssistant({ user: propUser }) {
 											</div>
 											<div className="msg-content-wrapper">
 												<div className="msg-bubble assistant-bubble">
-									<SearchActivity
-										steps={message.response.steps}
-										plan={message.response.search_plan}
-										traceUrl={message.response.trace_url}
-										traceId={message.response.trace_id}
-										tracingEnabled={message.response.tracing_enabled}
-										elapsedMs={message.response.elapsed_ms}
-										sourceCount={message.response.source_count}
-										failed={message.response.status === 'error'}
-									/>
+									<button
+										className="pipeline-trace-toggle"
+										type="button"
+										onClick={() => setShowExecutionDetails((visible) => !visible)}
+										aria-expanded={showExecutionDetails}
+									>
+										<Sparkles size={14} />
+										<span>Details</span>
+									</button>
+									{showExecutionDetails && (
+										<div className="execution-details-card">
+											<SearchActivity
+												steps={message.response.steps}
+												plan={message.response.search_plan}
+												traceUrl={message.response.trace_url}
+												traceId={message.response.trace_id}
+												tracingEnabled={message.response.tracing_enabled}
+												elapsedMs={message.response.elapsed_ms}
+												sourceCount={message.response.source_count}
+												failed={message.response.status === 'error'}
+											/>
+										</div>
+									)}
 													<div className="assistant-lead-text">
 										{renderAnswer(message.response.text, (index) => {
 											const source = message.response.emails?.[index];
@@ -572,16 +582,27 @@ export default function AiAssistant({ user: propUser }) {
 										<div className="bot-avatar-small"><Bot size={16} /></div>
 										<div className="msg-content-wrapper">
 											<div className="msg-bubble assistant-bubble typing-bubble">
-												<span className="typing-dot" />
-												<span className="typing-dot" />
-												<span className="typing-dot" />
-												<span className="typing-label" role="status">{activeTypingStep?.observation || 'Checking your emails...'}</span>
+													<Sparkles size={14} aria-hidden="true" />
+													<span className="typing-label" role="status">Working…</span>
 											</div>
-											<SearchActivity
-												steps={activitySteps}
-												pending
-												plan={activitySteps.find((step) => step.plan)?.plan}
-											/>
+											<button
+												className="pipeline-trace-toggle"
+												type="button"
+												onClick={() => setShowExecutionDetails((visible) => !visible)}
+												aria-expanded={showExecutionDetails}
+											>
+												<Sparkles size={14} />
+												<span>Details</span>
+											</button>
+											{showExecutionDetails && (
+												<div className="execution-details-card">
+													<SearchActivity
+														steps={activitySteps}
+														pending
+														plan={activitySteps.find((step) => step.plan)?.plan}
+													/>
+												</div>
+											)}
 										</div>
 									</div>
 								)}

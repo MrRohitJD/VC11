@@ -361,16 +361,46 @@ class GmailAIAssistant:
     # ------------------------------------------------------------------------
     # Pattern 3: Router Pattern
     # ------------------------------------------------------------------------
-    def route_intent(self, query: str) -> str:
-        """Classify user query into an actionable routing category."""
+    def route_intent(
+        self,
+        query: str,
+        *,
+        has_history: bool = False,
+        allow_llm: bool = False,
+    ) -> str:
+        """Classify a query without paying for an LLM on the common path.
+
+        Mailbox requests are deliberately detected before the model router.  A
+        normal question should go straight to the conversational response path;
+        it must not construct mailbox tools or enter the ReAct agent.
+        """
         clean_q = query.strip().lower()
         from app.rag.search_plan import sender_only_request
         if sender_only_request(query):
             return 'RAG_QUERY'
 
+        mailbox_terms = (
+            "email", "emails", "inbox", "mailbox", "message", "messages",
+            "thread", "sender", "subject", "unread", "received", "sent",
+            "notification", "notifications", "alert", "alerts", "2fa",
+            "two-factor", "verification code", "otp", "password reset",
+            "security", "sign-in", "signin", "login", "invoice", "bill",
+            "interview", "recruiter", "chess.com",
+        )
+        search_actions = (
+            "find", "search", "check", "show", "list", "give me", "get",
+            "look for", "related to", "containing", "from ", "sent by",
+        )
+        has_mailbox_term = any(term in clean_q for term in mailbox_terms)
+        has_mailbox_search_action = any(action in clean_q for action in search_actions)
+        is_contextual_follow_up = has_history and any(
+            phrase in clean_q
+            for phrase in ("those", "these", "that", "same", "above", "related to")
+        )
+
         # Pure greeting check - don't let it swallow search queries
         greeting_phrases = ["hello", "hi", "hey", "good morning", "good afternoon", "good evening", "howdy", "greetings"]
-        has_greeting = any(g in clean_q for g in greeting_phrases)
+        has_greeting = any(re.search(rf"\b{re.escape(g)}\b", clean_q) for g in greeting_phrases)
         has_search_term = any(
             w in clean_q
             for w in [
@@ -390,8 +420,8 @@ class GmailAIAssistant:
 
         # Multi-step action workflow requiring PLAN_AND_EXECUTE (must combine search with active drafting/sending)
         has_draft_action = any(w in clean_q for w in ["draft", "compose", "write an email", "send email", "reply to"])
-        has_search_action = any(w in clean_q for w in ["find", "search", "lookup", "filter", "get"])
-        if (" and " in clean_q or "then" in clean_q) and has_draft_action and has_search_action:
+        has_search_action_for_plan = any(w in clean_q for w in ["find", "search", "lookup", "filter", "get"])
+        if (" and " in clean_q or "then" in clean_q) and has_draft_action and has_search_action_for_plan:
             return "PLAN_AND_EXECUTE"
 
         # Summarization requests
@@ -400,6 +430,20 @@ class GmailAIAssistant:
             "key points", "bullet points", "highlight", "brief summary",
         ]):
             return "SUMMARIZE"
+
+        # A query with explicit mailbox language is a grounded lookup.  A
+        # follow-up such as "those related to chess.com" is also a lookup when
+        # it is attached to an existing mailbox conversation.
+        if has_mailbox_term and (has_mailbox_search_action or "my" in clean_q or "your" in clean_q):
+            return "RAG_QUERY"
+        if is_contextual_follow_up:
+            return "RAG_QUERY"
+
+        # Do not invoke the router model just to decide that an unrelated
+        # question is not an email request.  The optional model route remains
+        # available for callers that explicitly need it.
+        if not allow_llm:
+            return "GENERAL_CHAT"
 
         # LLM router classification
         try:
@@ -416,7 +460,7 @@ class GmailAIAssistant:
         except Exception as exc:
             logger.debug("Router LLM invocation fallback: %s", exc)
 
-        return "RAG_QUERY"
+        return "GENERAL_CHAT"
 
     # ------------------------------------------------------------------------
     # Pattern 7: Query Transformation
@@ -424,8 +468,19 @@ class GmailAIAssistant:
     @traceable(name="query_rewriting", run_type="chain")
     def transform_query(self, query: str, history: List[BaseMessage]) -> str:
         """Rewrite contextual follow-up questions into standalone retrieval queries using LLM."""
-        if not history:
+        if not history or getattr(self.model, "_llm_type", "") == "unavailable":
             return query
+
+        # Rewriting every turn adds a full model round trip.  Only contextual
+        # follow-ups need it; focused searches are already self-contained.
+        clean_q = query.strip().lower()
+        has_reference = any(
+            marker in clean_q
+            for marker in ("those", "these", "that", "same", "above", "related to")
+        ) or bool(re.search(r"\b(it|they|them)\b", clean_q))
+        if not has_reference:
+            return query
+
         return rewrite_query_with_history(
             query=query,
             chat_history=history,
@@ -724,14 +779,25 @@ class GmailAIAssistant:
         db.commit()
         db.refresh(user_msg)
 
-        # 2. Pattern 7: Query Transformation (Contextual Resolution)
-        effective_query = self.transform_query(query, existing_history)
+        # 2. Fast route before query transformation.  GENERAL_CHAT skips both
+        # mailbox tools and agent orchestration entirely.
+        fast_intent = self.route_intent(query, has_history=bool(existing_history))
+        if fast_intent == "GENERAL_CHAT":
+            effective_query = query
+            intent = fast_intent
+        else:
+            # Pattern 7: Query Transformation (Contextual Resolution)
+            effective_query = self.transform_query(query, existing_history)
 
-        # 3. Pattern 3: Router Pattern
-        intent = self.route_intent(effective_query)
+            # Pattern 3: Router Pattern.  This is deterministic for the
+            # supported mailbox/action intents, so it does not add another
+            # provider call to a retrieval request.
+            intent = self.route_intent(
+                effective_query,
+                has_history=bool(existing_history),
+            )
         logger.info("Selected intent: %s for query: '%s'", intent, effective_query)
 
-        tools = create_gmail_tools(db, user_uuid)
         citations: List[RetrievedCitation] = []
         steps: List[Dict[str, Any]] = []
         plan: Optional[List[str]] = None
@@ -742,6 +808,7 @@ class GmailAIAssistant:
         # 4. Dispatch based on intent
         if intent == "PLAN_AND_EXECUTE":
             # Pattern 5
+            tools = create_gmail_tools(db, user_uuid)
             answer, plan, steps, citations = self.execute_plan_and_execute(
                 query=effective_query,
                 db=db,
@@ -766,17 +833,18 @@ class GmailAIAssistant:
                     raise ValueError("Empty LLM response")
             except Exception as exc:
                 logger.warning("LLM call failed for general chat (%s), using dynamic generation.", exc)
-                answer = "Hello! I am your Gmail AI Assistant. How can I help you with your mailbox today?"
+                answer = (
+                    "I can answer general questions and help with your mailbox, but the chat provider "
+                    "is not configured right now."
+                )
             citations = []
-            steps = [{
-                "step": 1,
-                "thought": "Conversational request received; invoked LLM for natural response.",
-                "action": "llm_chat",
-                "arguments": {"query": effective_query},
-                "observation": "Generated response from LLM.",
-            }]
+            # General chat is intentionally represented without retrieval/tool
+            # steps; the caller can distinguish it from a mailbox workflow by
+            # the intent alone.
+            steps = []
         elif intent == "ACTION_DRAFT":
             # Pattern 2 & 6: Tool-Calling + Human-in-the-Loop Drafting
+            tools = create_gmail_tools(db, user_uuid)
             answer, citations, steps = self.execute_react_agent(effective_query, db, user_uuid, tools)
             # Check if pending approval was generated
             pending_appr = db.query(EmailSendApproval).filter(
@@ -789,6 +857,7 @@ class GmailAIAssistant:
                 answer += f"\n\n[Action Required] Created draft for '{pending_appr.recipient_email}' (Approval ID: {approval_id}). Please approve before sending."
         elif intent == "ACTION_SEND":
             # Pattern 6: Human-in-the-Loop Send Authorization
+            tools = create_gmail_tools(db, user_uuid)
             answer, citations, steps = self.execute_react_agent(effective_query, db, user_uuid, tools)
         elif intent == "SUMMARIZE":
             # Direct to GroundedRAGChain answer_query for grounded summarization with single-sentence key bullet points

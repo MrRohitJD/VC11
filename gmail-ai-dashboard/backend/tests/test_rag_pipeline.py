@@ -239,6 +239,15 @@ class TestAgentPatterns(unittest.TestCase):
             "PLAN_AND_EXECUTE",
         )
         self.assertEqual(self.assistant.route_intent("When is my technical interview scheduled?"), "RAG_QUERY")
+        self.assertEqual(
+            self.assistant.route_intent("Check for security alerts, 2FA notifications, or password resets."),
+            "RAG_QUERY",
+        )
+        self.assertEqual(
+            self.assistant.route_intent("Give me those that are related to chess.com."),
+            "RAG_QUERY",
+        )
+        self.assertEqual(self.assistant.route_intent("What is the capital of France?"), "GENERAL_CHAT")
 
     def test_contextual_compression(self):
         cits = [

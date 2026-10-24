@@ -72,7 +72,7 @@ def get_user_for_rag(request: Request, db: Session = Depends(get_db)) -> User:
 class ChatRequest(BaseModel):
     query: str = Field(..., description="User question or instruction")
     session_id: Optional[str] = Field(None, description="Optional existing session UUID")
-    top_k: int = Field(5, description="Number of source citations to retrieve")
+    top_k: int = Field(5, ge=1, le=8, description="Number of source citations to retrieve")
     filter_dict: Optional[Dict[str, Any]] = Field(None, description="Optional metadata filters")
     sender: Optional[str] = Field(None, description="Filter by sender email or domain")
     label: Optional[str] = Field(None, description="Filter by label or category")

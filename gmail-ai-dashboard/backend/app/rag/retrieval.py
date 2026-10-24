@@ -361,7 +361,11 @@ def detect_exact_identifier_or_term(query: str, filters: Optional[dict[str, Any]
         return True, "Query contains exact quoted search term"
 
     # Domain specific exact keywords that require SQL keyword matching
-    exact_topics = ["interview", "interviews", "invoice", "bill", "bills", "2fa", "security alert", "password reset"]
+    exact_topics = [
+        "interview", "interviews", "invoice", "bill", "bills", "2fa",
+        "security alert", "security alerts", "password", "password reset",
+        "password resets", "login alert", "sign-in", "verification code", "otp",
+    ]
     if any(re.search(r"\b" + re.escape(topic) + r"\b", clean_q, re.I) for topic in exact_topics):
         return True, "Query contains exact domain topic keywords"
 

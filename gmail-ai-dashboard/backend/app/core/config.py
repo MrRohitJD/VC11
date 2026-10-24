@@ -50,6 +50,14 @@ class Settings(BaseSettings):
     )
     openai_api_key: str = Field("", validation_alias=AliasChoices("OPENAI_API_KEY"))
     explabs_api_key: str = Field("", validation_alias=AliasChoices("EXPLABS_API_KEY"))
+    llm_request_timeout_seconds: float = Field(
+        20.0,
+        validation_alias=AliasChoices("LLM_REQUEST_TIMEOUT_SECONDS", "LLM_TIMEOUT"),
+    )
+    llm_max_retries: int = Field(
+        0,
+        validation_alias=AliasChoices("LLM_MAX_RETRIES"),
+    )
 
     embedding_provider: str = Field("azure_openai", validation_alias=AliasChoices("RAG_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"))
     embedding_model_name: str = Field("text-embedding-3-large", validation_alias=AliasChoices("RAG_EMBEDDING_MODEL", "EMBEDDING_MODEL"))
