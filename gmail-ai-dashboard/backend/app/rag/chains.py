@@ -45,7 +45,7 @@ from app.rag.mailbox_scope import primary_email_ids
 from app.rag.relevance import validate_email_relevance, RelevanceResult
 from app.rag.adaptive import plan_retrieval, bm25_rank, fuse_rankings
 from app.rag.activity import emit_activity
-from app.rag.search_plan import sender_only_request
+from app.rag.search_plan import requested_sender, sender_only_request
 from app.rag.service_errors import error_code, error_hint
 
 logger = logging.getLogger(__name__)
@@ -380,13 +380,17 @@ class GroundedRAGChain:
         # local vector/BM25 path.
         current_user = db.get(User, UUID(str(user_id)))
         mcp_allowed = bool(settings.gmail_mcp_enabled and not (current_user and current_user.is_demo))
+        sender_only = sender_only_request(effective_query)
+        if sender_only and not filters.get("sender"):
+            parsed_sender = requested_sender(effective_query)
+            if parsed_sender:
+                filters["sender"] = parsed_sender
         search_plan = plan_retrieval(
             effective_query, filters, use_multi_query, retrieval_mode,
             mcp_enabled=mcp_allowed,
         )
         all_requested = search_plan.exhaustive
         date_only = search_plan.date_only
-        sender_only = sender_only_request(effective_query)
         envelope_only = date_only or sender_only
         use_multi_query = search_plan.multi_query
         emit_activity("plan_search", search_plan.label, plan=search_plan.public(),

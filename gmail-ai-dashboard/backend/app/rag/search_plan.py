@@ -1,17 +1,27 @@
 """Recognize exhaustive mailbox requests without treating prose as keywords."""
 import re
+from email.utils import parseaddr
 
 from app.rag.query_constraints import received_date_bounds, normalize_date_words
 
 
+_SENDER_CLAUSE_RE = re.compile(
+    r'\bfrom\s+(.+?)(?=\s+(?:and|with|please|from|in|during|received|about|regarding|related|on|since|after|before|last|past|this|today|yesterday)\b|[?!]|$)',
+    re.I,
+)
+
+
 def requested_sender(query):
     """Extract an explicit sender clause, never a receipt-date clause."""
-    match = re.search(r'\bfrom\s+(.+?)(?=\s+(?:and|with|please|from|in|during|received|about|regarding|related|on|since|after|before|last|past|this|today|yesterday)\b|[?!]|$)', query, re.I)
+    match = _SENDER_CLAUSE_RE.search(query or "")
     if not match:
         return None
     value = match[1].strip(' .\"')
     if not value or re.match(r'^(?:\d|(?:last|past|this|the|previous|today|yesterday|January|February|March|April|May|June|July|August|September|October|November|December)\b)', value, re.I):
         return None
+    _, parsed_address = parseaddr(value)
+    if parsed_address and re.fullmatch(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', parsed_address):
+        return parsed_address
     # Conservative syntax also prevents injection of Gmail search operators.
     return value if re.fullmatch(r'[\w@.+\-]+(?:\s+[\w.\-]+){0,3}', value) else None
 
@@ -32,10 +42,13 @@ def sender_only_request(query):
     sender = requested_sender(query)
     if not sender:
         return False
-    text = re.sub(r'\bfrom\s+' + re.escape(sender) + r'(?=\s|[.?!]|$)', '', query, count=1, flags=re.I)
+    sender_clause = _SENDER_CLAUSE_RE.search(query or "")
+    if not sender_clause:
+        return False
+    text = (query[:sender_clause.start()] + query[sender_clause.end():]).strip()
     text = normalize_date_words(text)
     text = re.sub(r'\b(?:last|past)\s+\d+\s+(?:days?|weeks?|months?|years?)\b', '', text, flags=re.I)
-    allowed = set('give me all every emails email mails mail messages message received incoming show list find get please from in on the my this current last previous month week today yesterday'.split())
+    allowed = set('give me we that all every emails email mails mail messages message received incoming show list find get please from in on the my this current last previous month week today yesterday'.split())
     return set(re.findall(r'[a-z]+', text.lower())) <= allowed
 
 
