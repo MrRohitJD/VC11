@@ -181,15 +181,15 @@ button { border: 0; cursor: pointer; }
    ERASE DATA MODAL
    ============================================================ */
 .modal-overlay { align-items: center; background: rgba(20, 26, 40, .55); bottom: 0; display: flex; justify-content: center; left: 0; position: fixed; right: 0; top: 0; z-index: 100; }
-.modal-card { background: #fff; border-radius: 12px; box-shadow: 0 20px 50px #1d244025; max-width: 440px; padding: 32px 28px 26px; text-align: center; width: 94%; }
+.modal-card { background: #fff; border-radius: 12px; box-shadow: 0 20px 50px #1d244025; max-width: 440px; padding: 32px 28px 26px; pointer-events: auto; position: relative; text-align: center; width: 94%; z-index: 1; }
 .erase-icon-wrap { align-items: center; background: #fff5e6; border-radius: 50%; color: #e8a22e; display: flex; height: 56px; justify-content: center; margin: 0 auto 18px; width: 56px; }
 .erase-modal h2 { color: #202840; font-size: 18px; margin: 0 0 10px; }
 .erase-modal p { color: #65748e; font-size: 12px; line-height: 1.65; margin: 0 0 8px; }
 .erase-warning { color: #d9645c !important; font-weight: 600; margin-bottom: 22px !important; }
 .erase-actions { display: flex; gap: 10px; justify-content: center; }
-.erase-cancel { background: #f5f6fa; border-radius: 7px; color: #536078; font-size: 12px; font-weight: 600; padding: 10px 22px; }
+.erase-cancel { background: #f5f6fa; border: 0; border-radius: 7px; color: #536078; cursor: pointer; font-size: 12px; font-weight: 600; padding: 10px 22px; }
 .erase-cancel:hover { background: #ebedf2; }
-.erase-confirm { align-items: center; background: #e54b47; border-radius: 7px; color: white; display: flex; font-size: 12px; font-weight: 600; gap: 6px; padding: 10px 20px; }
+.erase-confirm { align-items: center; background: #e54b47; border: 0; border-radius: 7px; color: white; cursor: pointer; display: flex; font-size: 12px; font-weight: 600; gap: 6px; padding: 10px 20px; }
 .erase-confirm:hover { background: #d03f3b; }
 .erase-confirm:disabled, .erase-cancel:disabled { cursor: wait; opacity: .72; }
 

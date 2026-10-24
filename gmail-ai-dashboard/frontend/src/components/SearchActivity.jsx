@@ -14,13 +14,19 @@ import {
 } from 'lucide-react';
 
 const ACTION_META = {
+	route_request: { label: 'Route request', lane: 'planner', laneLabel: 'Query planner' },
+	plan_workflow: { label: 'Plan workflow', lane: 'planner', laneLabel: 'Query planner' },
 	plan_search: { label: 'Plan query', lane: 'planner', laneLabel: 'Query planner' },
 	gmail_search: { label: 'Search live Gmail', lane: 'gmail', laneLabel: 'Gmail MCP' },
 	retrieve_candidates: { label: 'Retrieve candidates', lane: 'semantic', laneLabel: 'Semantic retrieval' },
 	keyword_search: { label: 'Run keyword search', lane: 'keyword', laneLabel: 'Keyword retrieval' },
 	corrective_search: { label: 'Recover additional matches', lane: 'keyword', laneLabel: 'Keyword retrieval' },
 	validate_evidence: { label: 'Validate evidence', lane: 'validator', laneLabel: 'Evidence validator' },
+	tool_agent: { label: 'Select mailbox tool', lane: 'agent', laneLabel: 'Tool agent' },
+	mailbox_tool: { label: 'Run mailbox tool', lane: 'tool', laneLabel: 'Mailbox tools' },
+	review_answer: { label: 'Review evidence coverage', lane: 'validator', laneLabel: 'Evidence validator' },
 	compose_answer: { label: 'Compose grounded answer', lane: 'answer', laneLabel: 'Answer composer' },
+	answer_ready: { label: 'Answer ready', lane: 'answer', laneLabel: 'Answer composer' },
 };
 
 const RUNNING_STATUSES = new Set(['running', 'pending', 'in_progress', 'started']);
@@ -155,7 +161,7 @@ export default function SearchActivity({
 	const hasPendingPlaceholder = pending && !activeEvent;
 	const totalStages = Math.max(events.length + (hasPendingPlaceholder ? 1 : 0), 1);
 	const progressValue = failed
-		? 100
+		? Math.min(92, Math.round((completedCount / totalStages) * 100))
 		: pending
 			? Math.min(94, Math.round((completedCount / totalStages) * 100))
 			: 100;
@@ -256,7 +262,9 @@ export default function SearchActivity({
 										<div className="search-activity-step-title"><strong>{meta.label}</strong><span>{statusLabel(status)}</span></div>
 										<p>{event.observation || 'Stage completed.'}</p>
 									</div>
-									{Number.isFinite(Number(event.elapsed_ms)) && (pending || !Number.isFinite(finalElapsedMs)) && <time>{formatElapsed(Number(event.elapsed_ms))}</time>}
+									{Number.isFinite(Number(event.duration_ms))
+										? <time title="Stage duration">{formatElapsed(Number(event.duration_ms))}</time>
+										: Number.isFinite(Number(event.elapsed_ms)) && (pending || !Number.isFinite(finalElapsedMs)) && <time>{formatElapsed(Number(event.elapsed_ms))}</time>}
 								</li>
 							);
 						})}

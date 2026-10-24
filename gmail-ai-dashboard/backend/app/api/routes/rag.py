@@ -21,6 +21,7 @@ from queue import Queue, Empty
 from threading import Thread, Event
 from datetime import datetime, timezone
 from email.utils import parseaddr
+from time import perf_counter
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
@@ -105,6 +106,7 @@ class ChatResponse(BaseModel):
     trace_id: Optional[str] = None
     trace_url: Optional[str] = None
     tracing_enabled: bool = False
+    duration_ms: Optional[int] = None
 
 
 class IndexRequest(BaseModel):
@@ -138,6 +140,7 @@ def chat_with_assistant(
 
 
 def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[str]) -> ChatResponse:
+    started = perf_counter()
     try:
         f_dict = dict(body.filter_dict or {})
         if body.sender:
@@ -209,6 +212,7 @@ def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[s
             trace_id=getattr(agent_res, "trace_id", None),
             trace_url=getattr(agent_res, "trace_url", None),
             tracing_enabled=getattr(agent_res, "tracing_enabled", False),
+            duration_ms=round((perf_counter() - started) * 1000),
         )
     except Exception as exc:
         logger.exception("RAG assistant execution error: %s", exc)

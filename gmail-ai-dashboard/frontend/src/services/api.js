@@ -83,6 +83,16 @@ export const sendRagChat = async (data, onProgress) => {
 	const decoder = new TextDecoder();
 	let buffer = '';
 	let result;
+	const processFrame = (frame) => {
+		const lines = frame.split('\n');
+		const kind = lines.find((line) => line.startsWith('event:'))?.slice(6).trim();
+		const raw = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
+		if (!raw) return;
+		const payload = JSON.parse(raw);
+		if (kind === 'activity') onProgress(payload);
+		if (kind === 'error') throw new Error(payload.message || 'Mailbox search failed.');
+		if (kind === 'result') result = payload;
+	};
 	try {
 		while (true) {
 			const { value, done } = await reader.read();
@@ -92,16 +102,14 @@ export const sendRagChat = async (data, onProgress) => {
 			while ((boundary = buffer.indexOf('\n\n')) !== -1) {
 				const frame = buffer.slice(0, boundary);
 				buffer = buffer.slice(boundary + 2);
-				const lines = frame.split('\n');
-				const kind = lines.find((line) => line.startsWith('event:'))?.slice(6).trim();
-				const raw = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
-				if (!raw) continue;
-				const payload = JSON.parse(raw);
-				if (kind === 'activity') onProgress(payload);
-				if (kind === 'error') throw new Error(payload.message || 'Mailbox search failed.');
-				if (kind === 'result') result = payload;
+				processFrame(frame);
 			}
-			if (done) break;
+			if (done) {
+				// Some proxies close an SSE stream without appending the final blank
+				// line. Process that last frame instead of dropping the answer.
+				if (buffer.trim()) processFrame(buffer);
+				break;
+			}
 		}
 	} finally {
 		reader.releaseLock();

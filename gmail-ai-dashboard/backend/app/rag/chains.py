@@ -14,6 +14,7 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from time import perf_counter
 from typing import Any, List, Optional
 from uuid import UUID
 
@@ -36,8 +37,9 @@ except ImportError:
 
 
 from app.core.config import settings
+from app.database.connection import SessionLocal
 from app.models.email import User
-from app.rag.retrieval import RetrievedCitation, default_retriever
+from app.rag.retrieval import RetrievedCitation, default_retriever, scoped_mailbox_documents
 from app.rag.query_constraints import mailbox_now, is_financial_query
 from app.rag.mailbox_scope import primary_email_ids
 from app.rag.relevance import validate_email_relevance, RelevanceResult
@@ -47,6 +49,12 @@ from app.rag.search_plan import sender_only_request
 from app.rag.service_errors import error_code, error_hint
 
 logger = logging.getLogger(__name__)
+
+
+def _scoped_documents_in_worker(user_id, query, filters):
+    """Load lexical candidates with a request-local session in a worker."""
+    with SessionLocal() as worker_db:
+        return scoped_mailbox_documents(worker_db, user_id, query, filters)
 
 USER_RESPONSE_STYLE = """
 Write for the mailbox owner, using plain language and addressing them as "you".
@@ -382,7 +390,8 @@ class GroundedRAGChain:
         envelope_only = date_only or sender_only
         use_multi_query = search_plan.multi_query
         emit_activity("plan_search", search_plan.label, plan=search_plan.public(),
-                      providers=search_plan.providers, routing_reason=search_plan.routing_reason)
+                      providers=search_plan.providers, routing_reason=search_plan.routing_reason,
+                      lane="planner")
         live_status = None
         live_failed = False
         live_error = ''
@@ -393,7 +402,7 @@ class GroundedRAGChain:
             # bounded worker overlaps network discovery with local vector
             # retrieval without sharing the request SQLAlchemy Session.
             emit_activity("gmail_search", "Searching live Primary mail in parallel", status="running",
-                          provider="gmail_mcp", parallel=True)
+                          provider="gmail_mcp", parallel=True, lane="gmail", parallel_group="retrieval")
             try:
                 from app.rag.gmail_mcp import search_live_primary
                 live_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gmail-mcp")
@@ -413,7 +422,31 @@ class GroundedRAGChain:
         has_exact, exact_reason = detect_exact_identifier_or_term(effective_query, filters)
         search_type = "mmr" if search_plan.diverse else "similarity"
         emit_activity("retrieve_candidates", search_plan.label, status="running", strategy=search_plan.strategy,
-                      providers=search_plan.providers)
+                      providers=search_plan.providers, lane="semantic", parallel_group="retrieval")
+
+        # Dense and lexical providers use separate SQLAlchemy sessions.  This
+        # lets multi-topic searches overlap BM25 mailbox scoping with vector
+        # retrieval without sharing a session across threads.  Exhaustive and
+        # custom-filter requests remain bounded by their existing SQL path.
+        lexical_executor = None
+        lexical_future = None
+        can_parallelize_lexical = (
+            "bm25" in search_plan.providers
+            and "vector" in search_plan.providers
+            and not all_requested
+            and not envelope_only
+            and not is_hybrid_mode
+            and use_multi_query is not True
+            and not filters.get("custom_filter")
+            and not settings.database_url.endswith(":memory:")
+        )
+        if can_parallelize_lexical:
+            emit_activity("keyword_search", "Preparing keyword candidates in parallel", status="running",
+                          provider="bm25", parallel=True, lane="keyword", parallel_group="retrieval")
+            lexical_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mailbox-bm25")
+            lexical_future = lexical_executor.submit(
+                lambda: _scoped_documents_in_worker(user_id, effective_query, filters)
+            )
 
         # Primary fast retriever: LangChain + configured vector backend similarity search
         semantic_retriever = PostgresSemanticRetriever(
@@ -436,6 +469,7 @@ class GroundedRAGChain:
         docs: List[Document] = []
 
         run_vector = "vector" in search_plan.providers
+        retrieval_started = perf_counter()
         if run_vector and not all_requested and not envelope_only and not is_hybrid_mode and not has_exact and use_multi_query is not True:
             # Fast default path: single query embedding through the configured vector backend
             docs = semantic_retriever.invoke(effective_query)
@@ -492,20 +526,36 @@ class GroundedRAGChain:
                 retrieval_strategy_used = "standard"
 
         if live_future is not None:
+            live_started = perf_counter()
             try:
                 live_status = live_future.result()
-                db.expire_all()
                 emit_activity("gmail_search", f"Read {len(live_status['email_ids'])} live Primary emails",
                               count=len(live_status["email_ids"]), provider="gmail_mcp",
-                              status="completed" if live_status["complete"] else "warning")
+                              status="completed" if live_status["complete"] else "warning",
+                              duration_ms=round((perf_counter() - live_started) * 1000),
+                              lane="gmail", parallel_group="retrieval")
             except Exception as exc:
                 live_error = error_code(exc)
                 logger.warning("Gmail MCP discovery unavailable: %s", live_error)
                 live_failed = True
                 emit_activity("gmail_search", "Live search unavailable; using synced Primary mail",
-                              provider="gmail_mcp", status="warning")
+                              provider="gmail_mcp", status="warning",
+                              duration_ms=round((perf_counter() - live_started) * 1000), lane="gmail")
             finally:
                 live_executor.shutdown(wait=True)
+
+        # MCP persists freshly fetched messages before returning their IDs.
+        # Hydrate those rows directly so a message without an embedding is
+        # still eligible for grounded answering on the same request.
+        if live_status and live_status.get("email_ids"):
+            live_docs = scoped_mailbox_documents(
+                db, user_id, effective_query, filters,
+                email_ids=live_status["email_ids"],
+            )
+            live_ranked = bm25_rank(live_docs, effective_query, limit=candidate_k) or live_docs[:candidate_k]
+            docs = fuse_rankings(docs, live_ranked, limit=candidate_k)
+            emit_activity("gmail_search", f"Hydrated {len(live_ranked)} fresh live matches",
+                          count=len(live_ranked), provider="gmail_mcp", lane="gmail")
 
         eligible_ids = None
         if all_requested or envelope_only:
@@ -514,10 +564,20 @@ class GroundedRAGChain:
             eligible_ids = {str(doc.metadata.get("email_id")) for doc in docs}
             retrieval_strategy_used = "exhaustive_primary"
         else:
-            lexical_pool = (
-                [] if filters.get("custom_filter") or "bm25" not in search_plan.providers
-                else scoped_mailbox_documents(db, user_id, effective_query, filters)
-            )
+            if lexical_future is not None:
+                lexical_started = perf_counter()
+                try:
+                    lexical_pool = lexical_future.result()
+                finally:
+                    lexical_executor.shutdown(wait=True)
+                    lexical_executor = None
+                lexical_duration_ms = round((perf_counter() - lexical_started) * 1000)
+            else:
+                lexical_pool = (
+                    [] if filters.get("custom_filter") or "bm25" not in search_plan.providers
+                    else scoped_mailbox_documents(db, user_id, effective_query, filters)
+                )
+                lexical_duration_ms = None
             if live_status and live_status["complete"]:
                 live_ids = set(live_status["email_ids"])
                 lexical_pool = [doc for doc in lexical_pool if str(doc.metadata["email_id"]) in live_ids]
@@ -530,7 +590,8 @@ class GroundedRAGChain:
             docs = fuse_rankings(docs, lexical_docs, limit=candidate_k)
             retrieval_strategy_used = search_plan.strategy
             emit_activity("keyword_search", f"BM25 found {len(lexical_docs)} keyword candidates",
-                          count=len(lexical_docs), provider="bm25")
+                          count=len(lexical_docs), provider="bm25", duration_ms=lexical_duration_ms,
+                          lane="keyword", parallel_group="retrieval" if lexical_future is not None else None)
 
         # Use current database metadata and full bodies even for legacy indexes.
         docs = hydrate_email_documents(docs, db, user_id, full_body=True)
@@ -545,7 +606,8 @@ class GroundedRAGChain:
             # Live label/date membership supersedes stale local sync evidence.
             live_ids = set(live_status["email_ids"])
             docs = [doc for doc in docs if str(doc.metadata["email_id"]) in live_ids]
-        emit_activity("retrieve_candidates", f"Found {len(docs)} unique candidates in Primary", count=len(docs), strategy=retrieval_strategy_used)
+        emit_activity("retrieve_candidates", f"Found {len(docs)} unique candidates in Primary", count=len(docs), strategy=retrieval_strategy_used,
+                      duration_ms=round((perf_counter() - retrieval_started) * 1000), lane="semantic")
 
         # The LLM receives real envelope metadata and content, then explicitly
         # accepts/rejects each candidate before it can become a cited source.

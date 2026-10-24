@@ -89,7 +89,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         except Exception as exc:
             logger.warning("Intent routing failed: %s. Falling back to RAG_QUERY.", exc)
             intent = "RAG_QUERY"
-        emit_activity("route_request", "Mailbox request selected" if intent != "GENERAL_CHAT" else "Conversational reply selected", intent=intent)
+        emit_activity("route_request", "Mailbox request selected" if intent != "GENERAL_CHAT" else "Conversational reply selected", intent=intent, lane="planner")
         return {"effective_query": query, "intent": intent}
 
     def plan(state):
@@ -98,7 +98,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         if state["intent"] in {"ACTION_DRAFT", "PLAN_AND_EXECUTE"}:
             tasks.append("Prepare a draft for your review when requested")
         emit_activity("plan_workflow", "Prepared a bounded mailbox workflow", strategy=retrieval.strategy,
-                      providers=retrieval.providers, routing_reason=retrieval.routing_reason)
+                      providers=retrieval.providers, routing_reason=retrieval.routing_reason, lane="planner")
         return {"plan": tasks, "search_plan": retrieval.public()}
 
     def retrieve(state):
@@ -140,7 +140,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                 "Sending is unavailable until a real delivery integration is configured."),
             *history[-20:], HumanMessage(content=state["effective_query"]),
         ]
-        emit_activity("tool_agent", "Selecting the next mailbox action", status="running")
+        emit_activity("tool_agent", "Selecting the next mailbox action", status="running", lane="agent")
         try:
             response = model.invoke(messages)
             return {"messages": [*messages, response],
@@ -168,14 +168,14 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         # Execute sequentially: SQLAlchemy sessions cannot be shared by parallel tools.
         for call in messages[-1].tool_calls:
             tool = tools.get(call["name"])
-            emit_activity("mailbox_tool", f"Running {call['name'].replace('_', ' ')}", status="running")
+            emit_activity("mailbox_tool", f"Running {call['name'].replace('_', ' ')}", status="running", lane="tool")
             try:
                 output = str(tool.invoke(call["args"])) if tool else "Tool is unavailable."
-                emit_activity("mailbox_tool", f"Completed {call['name'].replace('_', ' ')}", status="completed" if tool else "warning")
+                emit_activity("mailbox_tool", f"Completed {call['name'].replace('_', ' ')}", status="completed" if tool else "warning", lane="tool")
             except Exception as exc:
                 logger.warning("Mailbox tool failed: %s", type(exc).__name__)
                 output = "This mailbox tool failed. Do not infer that no emails exist or that an action succeeded."
-                emit_activity("mailbox_tool", "Mailbox action failed", status="warning")
+                emit_activity("mailbox_tool", "Mailbox action failed", status="warning", lane="tool")
             if call["name"] == "draft_email":
                 match = re.search(r"Approval ID: ([0-9a-f-]{36})", output)
                 if match:
@@ -208,7 +208,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
 
     def review(state):
         valid = state.get("evidence_validated", True)
-        emit_activity("review_answer", "Checked source coverage and answer status" if valid else "Answer reports the unavailable evidence check", status="completed" if valid else "warning", source_count=len(citations))
+        emit_activity("review_answer", "Checked source coverage and answer status" if valid else "Answer reports the unavailable evidence check", status="completed" if valid else "warning", source_count=len(citations), lane="validator")
         ans = (state.get("answer") or "").strip()
         if not ans and citations:
             ans = assistant._generate_dynamic_fallback(state.get("effective_query", state.get("query", "")), citations)

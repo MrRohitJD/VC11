@@ -16,13 +16,18 @@ import {
 } from '../services/api';
 import './AiAssistant.css';
 
-const renderFormattedLeadText = (text) => {
+const renderFormattedLeadText = (text, onCitation) => {
 	if (!text) return null;
-	if (text.includes('**')) {
-		const parts = text.split(/(\*\*.*?\*\*)/g);
+	if (text.includes('**') || text.match(/\[\d+\]/)) {
+		const parts = text.split(/(\*\*.*?\*\*|\[\d+\])/g);
 		return parts.map((part, i) => {
 			if (part.startsWith('**') && part.endsWith('**')) {
 				return <strong key={i}>{part.slice(2, -2)}</strong>;
+			}
+			const citation = part.match(/^\[(\d+)\]$/);
+			if (citation && onCitation) {
+				const index = Number(citation[1]) - 1;
+				return <button key={i} type="button" className="answer-citation-link" onClick={() => onCitation(index)} aria-label={`Open source ${citation[1]}`}>{part}</button>;
 			}
 			return part;
 		});
@@ -30,14 +35,14 @@ const renderFormattedLeadText = (text) => {
 	return text;
 };
 
-const renderAnswer = (text = '') => {
+const renderAnswer = (text = '', onCitation) => {
 	const blocks = [];
 	let list = [];
 	let listType = null;
 	const flushList = () => {
 		if (!list.length) return;
 		const Tag = listType === 'ordered' ? 'ol' : 'ul';
-		blocks.push(<Tag key={blocks.length}>{list.map((item, i) => <li key={i}>{renderFormattedLeadText(item)}</li>)}</Tag>);
+		blocks.push(<Tag key={blocks.length}>{list.map((item, i) => <li key={i}>{renderFormattedLeadText(item, onCitation)}</li>)}</Tag>);
 		list = [];
 	};
 	for (const raw of text.split('\n')) {
@@ -54,8 +59,8 @@ const renderAnswer = (text = '') => {
 		if (!line) continue;
 		const heading = line.match(/^#{1,6}\s+(.+)$/) || line.match(/^\*\*(.+?)\*\*:?$/);
 		blocks.push(heading
-			? <h4 key={blocks.length}>{renderFormattedLeadText(heading[1])}</h4>
-			: <p key={blocks.length}>{renderFormattedLeadText(line)}</p>);
+			? <h4 key={blocks.length}>{renderFormattedLeadText(heading[1], onCitation)}</h4>
+			: <p key={blocks.length}>{renderFormattedLeadText(line, onCitation)}</p>);
 	}
 	flushList();
 	return blocks;
@@ -178,7 +183,9 @@ export default function AiAssistant({ user: propUser }) {
 					trace_url: data.trace_url,
 					trace_id: data.trace_id,
 					tracing_enabled: data.tracing_enabled,
-					elapsed_ms: Math.round((typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) - requestStartedAt),
+					elapsed_ms: Number.isFinite(Number(data.duration_ms))
+						? Number(data.duration_ms)
+						: Math.round((typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) - requestStartedAt),
 					source_count: mappedEmails.length,
 					approval_required: data.approval_required,
 					approval_id: data.approval_id,
@@ -291,6 +298,9 @@ export default function AiAssistant({ user: propUser }) {
 		}
 		return user?.email?.[0]?.toUpperCase() || '?';
 	}, [user]);
+	const activeTypingStep = [...activitySteps].reverse().find((step) =>
+		['running', 'pending', 'in_progress', 'started'].includes(String(step?.status || '').toLowerCase())
+	);
 
 	return (
 		<div className="app-shell assistant-shell-view">
@@ -401,7 +411,7 @@ export default function AiAssistant({ user: propUser }) {
 
 									<button
 										className="assistant-btn-clear"
-										onClick={() => setMessages([])}
+										onClick={() => { setMessages([]); setSessionId(null); setActivitySteps([]); }}
 										title="Clear conversation history"
 									>
 										<RefreshCw size={14} /> Clear
@@ -439,7 +449,10 @@ export default function AiAssistant({ user: propUser }) {
 										failed={message.response.status === 'error'}
 									/>
 													<div className="assistant-lead-text">
-														{renderAnswer(message.response.text)}
+										{renderAnswer(message.response.text, (index) => {
+											const source = message.response.emails?.[index];
+											if (source) handleOpenEmailModal(source);
+										})}
 													</div>
 
 													{/* Key Interviews Found List */}
@@ -562,7 +575,7 @@ export default function AiAssistant({ user: propUser }) {
 												<span className="typing-dot" />
 												<span className="typing-dot" />
 												<span className="typing-dot" />
-												<span className="typing-label" role="status">{activitySteps.at(-1)?.observation || 'Checking your emails...'}</span>
+												<span className="typing-label" role="status">{activeTypingStep?.observation || 'Checking your emails...'}</span>
 											</div>
 											<SearchActivity
 												steps={activitySteps}

@@ -1,13 +1,28 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.models.chat_quota import ChatQuota
 from app.models.llm import LlmClassificationJob
-from app.models.email import GmailAccount, User
-from app.models.rag import ChatSession, EmailSendApproval
+from app.models.email import (
+	Email,
+	EmailClassification,
+	EmailLabel,
+	GmailAccount,
+	SyncHistory,
+	User,
+)
+from app.models.rag import (
+	Attachment,
+	ChatMessage,
+	ChatRetrieval,
+	ChatSession,
+	EmailChunk,
+	EmailEmbedding,
+	EmailSendApproval,
+)
 
 
 def upsert_google_user(
@@ -80,42 +95,43 @@ def delete_user_gmail_data(db: Session, user: User) -> None:
 	email are deleted.  User-owned assistant history and pending send approvals
 	are also removed; the ``users`` row itself is intentionally untouched.
 	"""
-	accounts = db.scalars(
-		select(GmailAccount).where(GmailAccount.user_id == user.id)
-	).all()
-	for account in accounts:
-		# These jobs can outlive an email while it is being classified, so they
-		# must be deleted explicitly before the account is reused.
-		for job in list(account.classification_jobs):
-			db.delete(job)
-		for history in list(account.sync_history):
-			db.delete(history)
-		for email in list(account.emails):
-			db.delete(email)
+	account_ids = list(db.scalars(
+		select(GmailAccount.id).where(GmailAccount.user_id == user.id)
+	).all())
+	if account_ids:
+		# Delete in dependency order with set-based statements.  The previous
+		# relationship walk loaded every message, chunk, and attachment into the
+		# identity map, making erase slower as the mailbox grew.  These predicates
+		# preserve labels while removing every record that contains mail data.
+		email_ids = select(Email.id).where(Email.gmail_account_id.in_(account_ids))
+		chunk_ids = select(EmailChunk.id).where(EmailChunk.email_id.in_(email_ids))
+		db.execute(delete(ChatRetrieval).where(ChatRetrieval.chunk_id.in_(chunk_ids)))
+		db.execute(delete(EmailEmbedding).where(
+			(EmailEmbedding.email_id.in_(email_ids)) | EmailEmbedding.chunk_id.in_(chunk_ids)
+		))
+		db.execute(delete(Attachment).where(Attachment.email_id.in_(email_ids)))
+		db.execute(delete(EmailClassification).where(EmailClassification.email_id.in_(email_ids)))
+		db.execute(delete(EmailLabel).where(EmailLabel.gmail_account_id.in_(account_ids)))
+		db.execute(delete(EmailChunk).where(EmailChunk.email_id.in_(email_ids)))
+		db.execute(delete(LlmClassificationJob).where(LlmClassificationJob.gmail_account_id.in_(account_ids)))
+		db.execute(delete(SyncHistory).where(SyncHistory.gmail_account_id.in_(account_ids)))
+		db.execute(delete(Email).where(Email.gmail_account_id.in_(account_ids)))
 
-		# Keep the account as the parent of the labels, but remove credentials
-		# and mailbox cursor data so the erase does not retain usable OAuth data.
-		account.access_token = ""
-		account.refresh_token = None
-		account.token_expiry = None
-		account.scope = None
-		account.gmail_user_id = None
-		account.sync_status = "IDLE"
-		account.last_synced_at = None
-		account.history_id = None
+		# Keep accounts as the structural parents of labels, but remove
+		# credentials and mailbox cursor data so no OAuth secret survives.
+		db.execute(update(GmailAccount).where(GmailAccount.id.in_(account_ids)).values(
+			access_token="", refresh_token=None, token_expiry=None, scope=None,
+			gmail_user_id=None, sync_status="IDLE", last_synced_at=None, history_id=None,
+		))
 
-	for session in db.scalars(
-		select(ChatSession).where(ChatSession.user_id == user.id)
-	).all():
-		db.delete(session)
-	for approval in db.scalars(
-		select(EmailSendApproval).where(EmailSendApproval.user_id == user.id)
-	).all():
-		db.delete(approval)
-	for quota in db.scalars(
-		select(ChatQuota).where(ChatQuota.identity == f"user:{user.id}")
-	).all():
-		db.delete(quota)
+	# Clear assistant state as well, without loading message bodies.  This keeps
+	# the user row and Gmail labels intact while removing local conversation data.
+	session_ids = select(ChatSession.id).where(ChatSession.user_id == user.id)
+	db.execute(delete(ChatRetrieval).where(ChatRetrieval.chat_session_id.in_(session_ids)))
+	db.execute(delete(ChatMessage).where(ChatMessage.chat_session_id.in_(session_ids)))
+	db.execute(delete(ChatSession).where(ChatSession.user_id == user.id))
+	db.execute(delete(EmailSendApproval).where(EmailSendApproval.user_id == user.id))
+	db.execute(delete(ChatQuota).where(ChatQuota.identity == f"user:{user.id}"))
 	db.commit()
 
 

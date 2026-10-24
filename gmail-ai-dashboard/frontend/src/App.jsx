@@ -497,22 +497,30 @@ function AuthPage({ signup }) {
 }
 
 function EraseDialog({ open, onClose, onConfirm, confirming }) {
+	useEffect(() => {
+		if (!open) return undefined;
+		const handleKeyDown = (event) => {
+			if (event.key === 'Escape' && !confirming) onClose();
+		};
+		document.addEventListener('keydown', handleKeyDown);
+		return () => document.removeEventListener('keydown', handleKeyDown);
+	}, [open, onClose, confirming]);
 	if (!open) return null;
-	return <div className="modal-overlay" onClick={onClose}>
-		<div className="modal-card erase-modal" onClick={(e) => e.stopPropagation()}>
+	return <div className="modal-overlay" onClick={onClose} role="presentation">
+		<div className="modal-card erase-modal" role="dialog" aria-modal="true" aria-labelledby="erase-dialog-title" aria-describedby="erase-dialog-description" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
 			<div className="erase-icon-wrap">
 				<AlertTriangle size={28} />
 			</div>
-			<h2>Erase all data?</h2>
-			<p>
+			<h2 id="erase-dialog-title">Erase all data?</h2>
+			<p id="erase-dialog-description">
 				This will permanently delete your synchronized emails and all data stored with them,
 				including subjects, bodies, dates, attachments, classifications, and AI embeddings.
-				Your profile and labels will be kept.
+				Your profile and Gmail labels will be kept, but local chat history, OAuth tokens, and pending drafts will also be removed.
 			</p>
 			<p className="erase-warning">This action cannot be undone.</p>
 			<div className="erase-actions">
 				<button type="button" className="erase-cancel" onClick={onClose} disabled={confirming}>Cancel</button>
-				<button type="button" className="erase-confirm" onClick={onConfirm} disabled={confirming} aria-busy={confirming}>
+				<button type="button" className="erase-confirm" onClick={onConfirm} disabled={confirming} aria-busy={confirming} autoFocus={!confirming}>
 					<UserX size={15} /> {confirming ? 'Erasing...' : 'Erase All Data'}
 				</button>
 			</div>
@@ -582,7 +590,10 @@ function SettingsPage() {
 			await eraseAllData();
 			setEraseOpen(false);
 			setEraseToast('All your data has been erased.');
-			setTimeout(() => navigate('/login', { replace: true }), 1500);
+			setTimeout(async () => {
+				await logout();
+				navigate('/login', { replace: true });
+			}, 1500);
 		} catch {
 			setEraseToast('Failed to erase data. Please try again.');
 		} finally {

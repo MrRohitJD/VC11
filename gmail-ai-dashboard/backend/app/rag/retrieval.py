@@ -50,9 +50,14 @@ from app.rag.activity import emit_activity
 logger = logging.getLogger(__name__)
 
 
-def scoped_mailbox_documents(db, user_id, query, filters):
-    """Enumerate authorized Primary records, preserving explicit API filters."""
-    ids = [UUID(eid) for eid in primary_email_ids(db, user_id, query)]
+def scoped_mailbox_documents(db, user_id, query, filters, email_ids=None):
+    """Enumerate authorized Primary records, preserving explicit API filters.
+
+    ``email_ids`` is used by the live Gmail branch to hydrate messages that
+    were just synchronized by MCP but have not been embedded yet.  Keeping
+    this as an optional fast path avoids a second full mailbox scope scan.
+    """
+    ids = [UUID(str(eid)) for eid in (email_ids if email_ids is not None else primary_email_ids(db, user_id, query))]
     if not ids:
         return []
     stmt = select(Email).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(
@@ -139,6 +144,7 @@ class RetrievedCitation:
     thread_id: str = ""
     label: str = "OTHER"
     key_points: List[str] = field(default_factory=list)
+    chunk_index: int = 0
 
 
 def documents_to_citations(documents: List[Document]) -> List[RetrievedCitation]:
@@ -176,6 +182,7 @@ def documents_to_citations(documents: List[Document]) -> List[RetrievedCitation]
                 thread_id=str(meta.get("thread_id") or ""),
                 label=str(meta.get("labels") or meta.get("label") or "EMAIL"),
                 key_points=key_points,
+                chunk_index=int(meta.get("chunk_index") or 0),
             )
         )
     return citations

@@ -227,6 +227,27 @@
   color: #0f172a;
 }
 
+.answer-citation-link {
+  background: #eef2ff;
+  border: 1px solid #d9ddff;
+  border-radius: 5px;
+  color: #4f46c8;
+  cursor: pointer;
+  font-size: .82em;
+  font-weight: 700;
+  margin: 0 2px;
+  padding: 1px 5px;
+  vertical-align: baseline;
+}
+
+.answer-citation-link:hover,
+.answer-citation-link:focus-visible {
+  background: #e0e7ff;
+  border-color: #a5b4fc;
+  outline: 2px solid rgba(79, 70, 200, .2);
+  outline-offset: 1px;
+}
+
 .msg-timestamp {
   font-size: 11px;
   color: #94a3b8;

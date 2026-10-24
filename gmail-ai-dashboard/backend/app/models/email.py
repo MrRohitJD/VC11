@@ -128,6 +128,7 @@ class Label(Base):
         UniqueConstraint("gmail_account_id", "gmail_label_id", name="uq_labels_account_gmail_label"),
         UniqueConstraint("id", "gmail_account_id", name="uq_labels_id_account"),
         Index("ix_labels_account_name", "gmail_account_id", "name"),
+        Index("ix_labels_gmail_label_account", "gmail_label_id", "gmail_account_id"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -148,6 +149,7 @@ class EmailLabel(Base):
         ForeignKeyConstraint(["email_id", "gmail_account_id"], ["emails.id", "emails.gmail_account_id"], ondelete="CASCADE", name="fk_email_labels_email_account"),
         ForeignKeyConstraint(["label_id", "gmail_account_id"], ["labels.id", "labels.gmail_account_id"], ondelete="CASCADE", name="fk_email_labels_label_account"),
         Index("ix_email_labels_label_id", "label_id"),
+        Index("ix_email_labels_account_label_email", "gmail_account_id", "label_id", "email_id"),
     )
 
     email_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)

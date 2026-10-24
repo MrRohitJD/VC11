@@ -22,8 +22,12 @@ class SearchActivity:
         public_keys = {
             "count", "evaluated", "source_count", "intent", "strategy", "providers",
             "provider", "parallel", "branch", "branch_count", "plan", "routing_reason",
+            "duration_ms", "lane", "parallel_group",
         }
-        safe_details = {key: value for key, value in details.items() if key in public_keys}
+        safe_details = {
+            key: value for key, value in details.items()
+            if key in public_keys and value is not None
+        }
         with self._lock:
             self._sequence += 1
             event = {
