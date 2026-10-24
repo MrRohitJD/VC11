@@ -33,7 +33,6 @@ export function AuthProvider({ children }) {
 
 	const eraseAllData = useCallback(async () => {
 		await apiErase();
-		setUser(null);
 	}, []);
 
 	const value = {

@@ -1,40 +1,52 @@
-"""Incremental, idempotent RAG indexing pipeline.
+"""Idempotent PostgreSQL/pgvector email indexing.
 
-Coordinates:
-- Gmail / PostgreSQL email retrieval
-- LangChain document conversion and cleaning
-- RecursiveCharacterTextSplitter chunking
-- Azure OpenAI embedding generation
-- ChromaDB vector persistence
-- PostgreSQL chunk and embedding audit records (email_chunks, email_embeddings)
-- Idempotency via SHA-256 content hashes (skips unchanged emails)
-- Obsolete chunk cleanup on updates and deletions
+Email chunks, vectors, and searchable envelope metadata are written in one
+transaction to ``email_chunks`` and ``email_embeddings``.  There is no local
+vector-store side effect.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from email.utils import getaddresses
+from typing import Optional
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.email import Email, GmailAccount
 from app.models.rag import EmailChunk, EmailEmbedding
 from app.rag.chunking import default_chunker
-from app.rag.loaders import GmailDocumentAdapter
-from app.rag.vectorstore import default_chroma_manager
+from app.rag.embeddings import get_embedding_model
+from app.services.email_chunker import create_email_chunks
 
 logger = logging.getLogger(__name__)
 
 
-class RAGIndexingPipeline:
-    """Manages incremental indexing of emails into ChromaDB and PostgreSQL."""
+def _recipient_list(email: Email) -> list[str]:
+    values = [email.to_email or "", email.cc or "", email.bcc or ""]
+    return [address for _, address in getaddresses([value for value in values if value]) if address]
 
-    def __init__(self, chroma_manager=default_chroma_manager, chunker=default_chunker):
-        self.chroma = chroma_manager
+
+class RAGIndexingPipeline:
+    """Generate and persist 3072-dimensional vectors in PostgreSQL."""
+
+    def __init__(self, vector_store_manager=None, chunker=default_chunker, chroma_manager=None):
+        # ``chroma_manager`` is a compatibility keyword only. The supplied
+        # manager must expose an embedding_function; no Chroma API is called.
+        self.vector_store = vector_store_manager or chroma_manager
+        if self.vector_store is None:
+            from app.rag.pgvector_store import PostgresVectorStoreManager
+            self.vector_store = PostgresVectorStoreManager()
         self.chunker = chunker
+        self.embedding_function = getattr(self.vector_store, "embedding_function", None) or get_embedding_model()
+
+    @property
+    def chroma(self):
+        """Deprecated alias retained for integrations that only read the manager."""
+        return self.vector_store
 
     def index_email(
         self,
@@ -43,143 +55,128 @@ class RAGIndexingPipeline:
         user_id: Optional[UUID | str] = None,
         force: bool = False,
     ) -> int:
-        """Idempotently chunk, embed, and index a single email.
-
-        Returns the number of indexed chunks.
-        """
-        # 1. Fetch Email
         email_uuid = UUID(str(email_id))
         email = db.scalar(select(Email).where(Email.id == email_uuid))
-        if not email:
+        if email is None:
             logger.warning("Email %s not found for RAG indexing", email_id)
             return 0
 
-        # Resolve user_id
-        resolved_user_id = user_id
-        if resolved_user_id is None:
-            account = db.scalar(select(GmailAccount).where(GmailAccount.id == email.gmail_account_id))
-            if account:
-                resolved_user_id = account.user_id
-
-        # 2. Convert to LangChain Document
-        raw_doc = GmailDocumentAdapter.email_to_document(email, user_id=resolved_user_id)
-
-        # 3. Split using LangChain RecursiveCharacterTextSplitter
-        chunk_docs = self.chunker.split_document(raw_doc)
-        if not chunk_docs:
+        records = create_email_chunks(
+            subject=email.subject,
+            body=email.body,
+            body_html=email.body_html,
+            sender_name=email.sender_name,
+            sender_email=email.from_email,
+            gmail_message_id=email.gmail_message_id,
+            received_at=email.received_at,
+            recipient_emails=email.to_email,
+        )
+        if not records:
             self.delete_email(db, email_uuid)
             return 0
 
-        # 4. Idempotency Check: Compare hashes with existing chunks in PostgreSQL
-        existing_chunks = db.scalars(
+        existing = list(db.scalars(
             select(EmailChunk).where(EmailChunk.email_id == email_uuid).order_by(EmailChunk.chunk_index)
-        ).all()
+        ))
+        hashes = [record.content_hash for record in records]
+        existing_hashes = [chunk.content_hash for chunk in existing]
+        dimensions = int(getattr(self.embedding_function, "dimensions", settings.embedding_dimensions))
+        indexed_count = db.scalar(select(func.count(EmailEmbedding.id)).where(
+            EmailEmbedding.chunk_id.in_([chunk.id for chunk in existing]) if existing else False,
+            EmailEmbedding.status == "INDEXED",
+            EmailEmbedding.embedding.is_not(None),
+            EmailEmbedding.embedding_dimensions == settings.embedding_dimensions,
+        )) or 0
+        if not force and existing_hashes == hashes and len(existing) == len(records) and indexed_count == len(records):
+            return len(existing)
 
-        current_hashes = [doc.metadata.get("content_hash", "") for doc in chunk_docs]
-        existing_hashes = [c.content_hash for c in existing_chunks]
-
-        indexed_embedding_count = db.scalar(
-            select(func.count(EmailEmbedding.id))
-            .where(
-                EmailEmbedding.chunk_id.in_([chunk.id for chunk in existing_chunks]),
-                EmailEmbedding.chroma_collection == self.chroma.collection_name,
-                EmailEmbedding.status == "INDEXED",
+        if dimensions != settings.embedding_dimensions:
+            raise ValueError(
+                f"Configured PostgreSQL halfvec is {settings.embedding_dimensions} dimensions; provider returned {dimensions}"
             )
-        ) or 0
+        vectors = self.embedding_function.embed_documents([record.embedding_text for record in records])
+        if len(vectors) != len(records) or any(len(vector) != settings.embedding_dimensions for vector in vectors):
+            raise ValueError(f"Embedding provider must return {settings.embedding_dimensions}-dimensional vectors")
 
-        if (
-            not force
-            and current_hashes == existing_hashes
-            and len(existing_chunks) == len(chunk_docs)
-            and indexed_embedding_count == len(chunk_docs)
-        ):
-            # No changes detected, skip re-embedding
-            logger.debug("Email %s chunks unchanged. Skipping indexing.", email_id)
-            return len(existing_chunks)
-
-        # 5. Remove any obsolete chunks from ChromaDB & PostgreSQL
-        self.delete_email(db, email_uuid)
-
-        # 6. Index into ChromaDB through LangChain
-        chroma_ids = self.chroma.add_chunks(chunk_docs)
-
-        # 7. Persist chunk and embedding records in PostgreSQL
-        for idx, doc in enumerate(chunk_docs):
-            chunk_rec = EmailChunk(
-                email_id=email_uuid,
-                chunk_index=idx,
-                chunk_text=doc.page_content,
-                start_index=0,
-                end_index=len(doc.page_content),
-                chunk_strategy=doc.metadata.get("chunk_strategy", "recursive_character"),
-                content_hash=doc.metadata.get("content_hash", ""),
-            )
-            db.add(chunk_rec)
-            db.flush()
-
-            embedding_rec = EmailEmbedding(
-                chunk_id=chunk_rec.id,
-                chroma_collection=self.chroma.collection_name,
-                chroma_record_id=chroma_ids[idx],
-                embedding_provider="azure_openai",
-                embedding_model="text-embedding-3-large",
-                embedding_dimensions=3072,
-                content_hash=doc.metadata.get("content_hash", ""),
-                status="INDEXED",
-            )
-            db.add(embedding_rec)
-
-        db.commit()
-        logger.info("Indexed %d chunks for email %s", len(chunk_docs), email_id)
-        return len(chunk_docs)
-
-    def index_user_emails(
-        self,
-        db: Session,
-        user_id: UUID | str,
-        limit: Optional[int] = None,
-        batch_size: Optional[int] = None,
-        force: bool = False,
-    ) -> dict[str, int]:
-        """Index all emails belonging to a user incrementally."""
-        user_uuid = UUID(str(user_id))
-        query = (
-            select(Email.id)
-            .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
-            .where(GmailAccount.user_id == user_uuid)
-            .order_by(Email.received_at.desc().nullslast())
+        # Cascading deletes remove the old metadata/vector rows before the new
+        # rows are inserted, keeping one current vector per chunk.
+        db.execute(delete(EmailChunk).where(EmailChunk.email_id == email_uuid))
+        db.flush()
+        recipients = _recipient_list(email)
+        provider = getattr(self.embedding_function, "provider", settings.embedding_provider)
+        model = getattr(
+            self.embedding_function,
+            "deployment_name",
+            getattr(self.embedding_function, "model", settings.embedding_model_name),
         )
+        for index, (record, vector) in enumerate(zip(records, vectors)):
+            chunk = EmailChunk(
+                email_id=email_uuid,
+                chunk_index=index,
+                chunk_text=record.chunk_text,
+                start_index=record.start_index,
+                end_index=record.end_index,
+                chunk_strategy=record.chunk_strategy,
+                content_hash=record.content_hash,
+            )
+            db.add(chunk)
+            db.flush()
+            db.add(EmailEmbedding(
+                chunk_id=chunk.id,
+                email_id=email_uuid,
+                email_subject=email.subject or "",
+                sender_email=email.from_email or "",
+                recipient_emails=recipients,
+                email_sent_at=email.received_at,
+                embedding_text=record.embedding_text,
+                embedding_type="email",
+                # These two legacy-named columns are retained for schema
+                # compatibility; their values identify PostgreSQL records.
+                chroma_collection=self.vector_store.collection_name,
+                chroma_record_id=f"pgvector_{chunk.id}",
+                embedding_provider=str(provider),
+                embedding_model=str(model),
+                embedding_dimensions=settings.embedding_dimensions,
+                embedding=list(vector),
+                content_hash=record.content_hash,
+                status="INDEXED",
+            ))
+        db.commit()
+        logger.info("Indexed %d PostgreSQL vector chunk(s) for email %s", len(records), email_id)
+        return len(records)
+
+    def index_user_emails(self, db: Session, user_id: UUID | str, limit: Optional[int] = None,
+                          batch_size: Optional[int] = None, force: bool = False) -> dict[str, int]:
+        user_uuid = UUID(str(user_id))
+        query = (select(Email.id).join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
+                 .where(GmailAccount.user_id == user_uuid)
+                 .order_by(Email.received_at.desc().nullslast()))
         effective_limit = limit or batch_size
         if effective_limit:
             query = query.limit(effective_limit)
-
         email_ids = db.scalars(query).all()
         indexed_count = 0
-        total_chunks = 0
-
-        for eid in email_ids:
+        chunks = 0
+        for email_id in email_ids:
             try:
-                chunks = self.index_email(db, eid, user_id=user_uuid, force=force)
-                if chunks > 0:
+                count = self.index_email(db, email_id, user_id=user_uuid, force=force)
+                if count:
                     indexed_count += 1
-                    total_chunks += chunks
-            except Exception as exc:
-                logger.error("Error indexing email %s: %s", eid, exc)
-
+                    chunks += count
+            except Exception:
+                db.rollback()
+                logger.exception("Error indexing email %s", email_id)
         return {
             "total_emails": len(email_ids),
             "indexed_emails": indexed_count,
             "emails_indexed": indexed_count,
             "emails_skipped": max(0, len(email_ids) - indexed_count),
-            "chunks_created": total_chunks,
-            "total_chunks": total_chunks,
+            "chunks_created": chunks,
+            "total_chunks": chunks,
         }
 
     def delete_email(self, db: Session, email_id: UUID | str) -> None:
-        """Remove all chunks of an email from ChromaDB and PostgreSQL."""
-        email_uuid = UUID(str(email_id))
-        self.chroma.delete_by_email_id(email_uuid)
-        db.execute(delete(EmailChunk).where(EmailChunk.email_id == email_uuid))
+        db.execute(delete(EmailChunk).where(EmailChunk.email_id == UUID(str(email_id))))
         db.commit()
 
 

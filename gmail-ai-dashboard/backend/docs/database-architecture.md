@@ -58,12 +58,13 @@ alembic upgrade head
 uvicorn app.api.app:app --reload --port 8000
 ```
 
-The only migration is `alembic/versions/20261012_0001_rebuild_gmail_dashboard_schema.py`.
-It creates this schema in the configured existing database, seeds the approved AI
-category definitions only, and does not create users, email messages, labels, or
-classification records. Startup validates all nine tables and fails with a clear
-migration command instead of making unversioned DDL changes. Do not use
-`alembic downgrade` on a live database: its rollback drops the schema.
+The schema is created and evolved by the versioned revisions in
+`alembic/versions/`. The dashboard query indexes include the account/date index
+on `emails` and the partial current-successful classification index added by
+`20261024_0007_dashboard_query_indexes.py`. Startup validates all required tables
+and fails with a clear migration command instead of making unversioned DDL
+changes. Do not use `alembic downgrade` on a live database: the initial
+revision's rollback drops the schema.
 
 ## Inspection SQL
 

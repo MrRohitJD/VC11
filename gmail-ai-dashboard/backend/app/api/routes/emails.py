@@ -7,8 +7,8 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import case, exists, func, or_, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.security import get_current_user
 from app.database.connection import get_db
@@ -40,7 +40,7 @@ SYSTEM_CATEGORY_LABELS = {
 }
 
 GMAIL_CATEGORY_NAMES = {
-	"CATEGORY_PERSONAL": "Personal",
+	"CATEGORY_PERSONAL": "Primary",
 	"CATEGORY_SOCIAL": "Social",
 	"CATEGORY_PROMOTIONS": "Promotions",
 	"CATEGORY_UPDATES": "Updates",
@@ -155,30 +155,51 @@ def _count_metrics(db: Session, account_id, start_at: Optional[datetime], end_at
 		conditions.append(Email.received_at >= start_at)
 	if end_at is not None:
 		conditions.append(Email.received_at < end_at)
-	base_filter = tuple(conditions)
-	total = db.scalar(select(func.count(Email.id)).where(*base_filter)) or 0
-	unread = db.scalar(select(func.count(Email.id)).where(*base_filter, Email.is_read.is_(False))) or 0
-	auto_labeled = db.scalar(
-		select(func.count(func.distinct(Email.id)))
-		.join(EmailClassification, EmailClassification.email_id == Email.id)
-		.where(
-			*base_filter,
+
+	# Keep this as one row per email and use correlated EXISTS checks. The old
+	# implementation ran four separate COUNT queries and joined classifications
+	# and labels for the important metric, which multiplied rows and required
+	# DISTINCT. One aggregate reduces the database round trips from four to one
+	# per period and lets the dashboard classification index answer the EXISTS
+	# lookups directly.
+	current_classification = exists(
+		select(1).where(
+			EmailClassification.email_id == Email.id,
 			EmailClassification.is_current.is_(True),
 			EmailClassification.classification_status == "SUCCEEDED",
 		)
-	) or 0
-	important = db.scalar(
-		select(func.count(func.distinct(Email.id)))
-		.join(EmailLabel, EmailLabel.email_id == Email.id, isouter=True)
-		.join(Label, Label.id == EmailLabel.label_id, isouter=True)
-		.join(EmailClassification, EmailClassification.email_id == Email.id, isouter=True)
-		.join(AiCategory, AiCategory.id == EmailClassification.category_id, isouter=True)
+	)
+	important_label = exists(
+		select(1)
+		.select_from(EmailLabel)
+		.join(Label, Label.id == EmailLabel.label_id)
 		.where(
-			*base_filter,
-			(Label.label_id == "IMPORTANT")
-			| func.lower(AiCategory.name).in_(["important", "high_priority"]),
+			EmailLabel.email_id == Email.id,
+			EmailLabel.gmail_account_id == account_id,
+			Label.gmail_account_id == account_id,
+			Label.label_id == "IMPORTANT",
 		)
-	) or 0
+	)
+	important_ai_category = exists(
+		select(1)
+		.select_from(EmailClassification)
+		.join(AiCategory, AiCategory.id == EmailClassification.category_id)
+		.where(
+			EmailClassification.email_id == Email.id,
+			EmailClassification.is_current.is_(True),
+			EmailClassification.classification_status == "SUCCEEDED",
+			func.lower(AiCategory.name).in_(("important", "high_priority")),
+		)
+	)
+	metrics = db.execute(
+		select(
+			func.count(Email.id),
+			func.count(case((Email.is_read.is_(False), 1))),
+			func.count(case((current_classification, 1))),
+			func.count(case((or_(important_label, important_ai_category), 1))),
+		).where(*conditions)
+	).one()
+	total, unread, auto_labeled, important = (value or 0 for value in metrics)
 	return {
 		"total": total,
 		"auto_labeled": auto_labeled,
@@ -290,10 +311,12 @@ def analytics_charts(
 	account = _get_account(db, user)
 	client_tz = _resolve_client_timezone(tz, x_timezone)
 	now_local = datetime.now(client_tz)
-	minimum_date = db.scalar(
-		select(func.min(Email.received_at)).where(Email.gmail_account_id == account.id)
-	)
-	min_date = minimum_date.astimezone(client_tz).date() if minimum_date else None
+	min_date = None
+	if range_key == "all_time":
+		minimum_date = db.scalar(
+			select(func.min(Email.received_at)).where(Email.gmail_account_id == account.id)
+		)
+		min_date = minimum_date.astimezone(client_tz).date() if minimum_date else None
 	start_at, end_at, _, _, start_date, end_date = _period_bounds(
 		range_key, now_local, client_tz, min_date
 	)
@@ -305,23 +328,21 @@ def analytics_charts(
 	if end_at is not None:
 		time_conditions.append(Email.received_at < end_at)
 
+	# This single label query feeds both charts. Previously the same filtered
+	# email set was scanned twice: once for activity and once for categories.
 	rows = db.execute(
-		select(Email.id, Email.received_at, Label.label_id)
+		select(Email.id, Email.received_at, Label.label_id, Label.name)
 		.join(EmailLabel, EmailLabel.email_id == Email.id, isouter=True)
 		.join(Label, Label.id == EmailLabel.label_id, isouter=True)
 		.where(*time_conditions)
 	).all()
 
 	category_counts: dict[str, int] = {}
-	category_rows = db.execute(
-		select(Email.id, Label.label_id, Label.name)
-		.join(EmailLabel, EmailLabel.email_id == Email.id, isouter=True)
-		.join(Label, Label.id == EmailLabel.label_id, isouter=True)
-		.where(*time_conditions)
-	).all()
 	email_categories: dict[object, set[str]] = {}
-	for email_id, label_id, name in category_rows:
+	for email_id, _, label_id, name in rows:
 		if label_id in SYSTEM_CATEGORY_LABELS:
+			continue
+		if user.is_demo and label_id not in GMAIL_CATEGORY_NAMES:
 			continue
 		category_name = GMAIL_CATEGORY_NAMES.get(label_id, name)
 		if category_name:
@@ -342,9 +363,12 @@ def analytics_charts(
 		eid: cat_name for eid, cat_name in ai_class_rows if cat_name
 	}
 
-	all_email_ids = {eid for eid, _, _ in category_rows} | set(ai_categories_by_email.keys())
+	all_email_ids = {eid for eid, _, _, _ in rows} | set(ai_categories_by_email.keys())
 	for eid in all_email_ids:
-		if eid in ai_categories_by_email:
+		if user.is_demo and eid in email_categories and email_categories[eid]:
+			for cat_name in email_categories[eid]:
+				category_counts[cat_name] = category_counts.get(cat_name, 0) + 1
+		elif eid in ai_categories_by_email:
 			cat_name = ai_categories_by_email[eid]
 			category_counts[cat_name] = category_counts.get(cat_name, 0) + 1
 		elif eid in email_categories and email_categories[eid]:
@@ -375,9 +399,9 @@ def analytics_charts(
 			"breakdown": other_categories,
 		})
 
-	total_emails = db.scalar(
-		select(func.count(Email.id)).where(*time_conditions)
-	) or 0
+	# The outer join returns at least one row for every email, so the unique IDs
+	# already represent the total and avoid a fourth scan of the time range.
+	total_emails = len({eid for eid, _, _, _ in rows})
 
 	return {
 		"range": range_key,
@@ -385,7 +409,8 @@ def analytics_charts(
 		"total_emails": total_emails,
 		"categories": categories,
 		"activity": _activity_points(
-			rows, start_date, end_date, granularity, client_tz
+			[(email_id, received_at, label_id) for email_id, received_at, label_id, _ in rows],
+			start_date, end_date, granularity, client_tz
 		),
 	}
 
@@ -407,12 +432,14 @@ def analytics_summary(
 		pass
 	client_tz = _resolve_client_timezone(tz, x_timezone)
 	now_local = datetime.now(client_tz)
-	minimum_date = db.scalar(
-		select(func.min(Email.received_at)).where(Email.gmail_account_id == account.id)
-	)
-	min_date = minimum_date.astimezone(client_tz).date() if minimum_date else None
 	if range_key not in RANGE_OPTIONS:
 		raise HTTPException(status_code=400, detail=f"Unsupported range: {range_key}")
+	min_date = None
+	if range_key == "all_time":
+		minimum_date = db.scalar(
+			select(func.min(Email.received_at)).where(Email.gmail_account_id == account.id)
+		)
+		min_date = minimum_date.astimezone(client_tz).date() if minimum_date else None
 	start_at, end_at, comp_start_at, comp_end_at, start_date, end_date = _period_bounds(
 		range_key, now_local, client_tz, min_date
 	)
@@ -457,16 +484,17 @@ def list_emails(
 ):
 	"""List emails for the authenticated user with pagination, search and label filtering."""
 	account = _get_account(db, user)
-	try:
-		from app.services.llm_classification_service import ensure_user_emails_classified
-		ensure_user_emails_classified(account.id)
-	except Exception:
-		pass
-	try:
-		from app.services.rag_auto_indexer import ensure_user_emails_embedded
-		ensure_user_emails_embedded(user.id)
-	except Exception:
-		pass
+	if not user.is_demo:
+		try:
+			from app.services.llm_classification_service import ensure_user_emails_classified
+			ensure_user_emails_classified(account.id)
+		except Exception:
+			pass
+		try:
+			from app.services.rag_auto_indexer import ensure_user_emails_embedded
+			ensure_user_emails_embedded(user.id)
+		except Exception:
+			pass
 	start_at = None
 	end_at = None
 	if range_key is not None:
@@ -474,10 +502,12 @@ def list_emails(
 			raise HTTPException(status_code=400, detail=f"Unsupported range: {range_key}")
 		client_tz = _resolve_client_timezone(tz, x_timezone)
 		now_local = datetime.now(client_tz)
-		minimum_date = db.scalar(
-			select(func.min(Email.received_at)).where(Email.gmail_account_id == account.id)
-		)
-		min_date = minimum_date.astimezone(client_tz).date() if minimum_date else None
+		min_date = None
+		if range_key == "all_time":
+			minimum_date = db.scalar(
+				select(func.min(Email.received_at)).where(Email.gmail_account_id == account.id)
+			)
+			min_date = minimum_date.astimezone(client_tz).date() if minimum_date else None
 		start_at, end_at, _, _, _, _ = _period_bounds(
 			range_key, now_local, client_tz, min_date
 		)
@@ -510,7 +540,10 @@ def list_emails(
 
 	# Paginated results
 	emails = db.scalars(
-		query.order_by(Email.received_at.desc().nullslast())
+		query.options(
+			selectinload(Email.labels).selectinload(EmailLabel.label),
+			selectinload(Email.classifications).selectinload(EmailClassification.category),
+		).order_by(Email.received_at.desc().nullslast())
 		.offset((page - 1) * per_page)
 		.limit(per_page)
 	).all()
@@ -539,7 +572,7 @@ def get_email(
 	)
 	if email is None:
 		raise HTTPException(status_code=404, detail="Email not found")
-	if not email.body_html:
+	if not user.is_demo and not email.body_html:
 		try:
 			service = build_gmail_service_for_user(db, user)
 			raw_message = service.users().messages().get(
@@ -579,6 +612,9 @@ def list_labels(
 
 def _serialize_email(email: Email, include_body: bool = False) -> dict:
 	ai_category_name = None
+	gmail_category = next((GMAIL_CATEGORY_NAMES[link.label.label_id]
+	                       for link in (email.labels or [])
+	                       if link.label and link.label.label_id in GMAIL_CATEGORY_NAMES), None)
 	# First check classifications relationship
 	if email.classifications:
 		for c in email.classifications:
@@ -624,6 +660,7 @@ def _serialize_email(email: Email, include_body: bool = False) -> dict:
 		"has_attachment": email.has_attachment,
 		"size_estimate": email.size_estimate,
 		"ai_label": ai_category_name,
+		"gmail_category": gmail_category,
 		"labels": labels_list,
 	}
 	if include_body:

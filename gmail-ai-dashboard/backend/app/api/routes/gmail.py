@@ -13,6 +13,7 @@ from app.core.security import get_current_user
 from app.database.connection import get_db, SessionLocal
 from app.models.email import GmailAccount, User
 from app.services.gmail_service import build_gmail_service_for_user, sync_all_emails
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ _sync_state: dict[str, dict] = {}
 
 
 def _get_sync_state(user_id: str) -> dict:
-	return _sync_state.get(user_id, {
+	state = _sync_state.get(user_id, {
 		"status": "idle",
 		"emails_found": 0,
 		"emails_synced": 0,
@@ -31,6 +32,7 @@ def _get_sync_state(user_id: str) -> dict:
 		"stage": "",
 		"error": None,
 	})
+	return {**state, "coverage_limit": settings.gmail_sync_limit if settings.vector_backend == "postgres" else None}
 
 
 def _run_sync_in_thread(user_id_str: str, user_id: UUID):
@@ -124,6 +126,8 @@ def start_sync(
 	db: Session = Depends(get_db),
 ):
 	"""Start Gmail synchronization in the background."""
+	if user.is_demo:
+		raise HTTPException(status_code=403, detail="Gmail sync is unavailable in demo mode")
 	user_id_str = str(user.id)
 
 	current = _sync_state.get(user_id_str, {})

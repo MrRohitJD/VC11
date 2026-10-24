@@ -2,7 +2,7 @@ import { Mail, Shield, MessageSquare, Tag, Paperclip, Clock, Users, FileText } f
 import { getGoogleAuthUrl } from '../services/api';
 
 const accessItems = [
-	{ icon: Mail, text: 'Emails and email content' },
+	{ icon: Mail, text: 'Emails, email content, and sending' },
 	{ icon: Users, text: 'Sender and recipient information' },
 	{ icon: FileText, text: 'Subject and timestamps' },
 	{ icon: MessageSquare, text: 'Gmail threads' },
@@ -48,7 +48,8 @@ export default function GmailConsent() {
 
 				<p className="consent-note">
 					This data will be synchronized to your account database so the application
-					can provide its email features. We will never modify or delete anything in
+					can provide its email features. Sending only happens after you explicitly
+					approve a draft; we will never modify or delete anything in
 					your Gmail account.
 				</p>
 

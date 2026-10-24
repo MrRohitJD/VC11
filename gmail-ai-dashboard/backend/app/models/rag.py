@@ -1,7 +1,7 @@
 """SQLAlchemy ORM models for RAG retrieval, vector embeddings, attachments, and chatbot sessions.
 
-Maintains clean relational mapping between PostgreSQL and ChromaDB vector collections,
-preserving user ownership and relational integrity.
+Maintains relational RAG chunks and PostgreSQL pgvector embeddings,
+preserving user ownership and relational integrity. PostgreSQL pgvector is the sole vector store.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    ARRAY,
     BigInteger,
     CheckConstraint,
     DateTime,
@@ -24,6 +25,13 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import JSON
+try:
+    from pgvector.sqlalchemy import HALFVEC
+    EMBEDDING_COLUMN_TYPE = HALFVEC(3072).with_variant(JSON(), "sqlite")
+except ImportError:
+    HALFVEC = None
+    EMBEDDING_COLUMN_TYPE = JSON()
 
 from app.models.email import Base, Email, User, utcnow
 
@@ -56,11 +64,7 @@ class EmailChunk(Base):
 
 
 class EmailEmbedding(Base):
-    """Metadata mapping between PostgreSQL email chunk and ChromaDB vector store.
-
-    Actual dense vector embeddings reside in ChromaDB collection 'gmail_email_chunks';
-    this table tracks synchronization status, model metadata, and content hashes.
-    """
+    """Dense pgvector embedding and searchable email metadata for one chunk."""
 
     __tablename__ = "email_embeddings"
     __table_args__ = (
@@ -74,17 +78,25 @@ class EmailEmbedding(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     chunk_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("email_chunks.id", ondelete="CASCADE"), nullable=False)
+    embedding: Mapped[list[float] | None] = mapped_column(EMBEDDING_COLUMN_TYPE)
+    email_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("emails.id", ondelete="CASCADE"), nullable=True)
+    email_subject: Mapped[str | None] = mapped_column(Text)
+    sender_email: Mapped[str | None] = mapped_column(Text)
+    recipient_emails: Mapped[list[str] | None] = mapped_column(ARRAY(Text).with_variant(JSON(), "sqlite"))
+    email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    embedding_text: Mapped[str | None] = mapped_column(Text)
+    embedding_type: Mapped[str | None] = mapped_column(String(30), default="email", server_default="email")
     chroma_collection: Mapped[str] = mapped_column(
-        String(100), default="gmail_email_chunks", server_default="gmail_email_chunks", nullable=False
+        String(100), default="postgres_halfvec_3072", server_default="postgres_halfvec_3072", nullable=False
     )
     chroma_record_id: Mapped[str] = mapped_column(String(255), nullable=False)
     embedding_provider: Mapped[str] = mapped_column(
-        String(50), default="sentence-transformers", server_default="sentence-transformers", nullable=False
+        String(50), default="azure_openai", server_default="azure_openai", nullable=False
     )
     embedding_model: Mapped[str] = mapped_column(
-        String(100), default="all-MiniLM-L6-v2", server_default="all-MiniLM-L6-v2", nullable=False
+        String(100), default="text-embedding-3-large", server_default="text-embedding-3-large", nullable=False
     )
-    embedding_dimensions: Mapped[int] = mapped_column(Integer, default=384, server_default="384", nullable=False)
+    embedding_dimensions: Mapped[int] = mapped_column(Integer, default=3072, server_default="3072", nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="INDEXED", server_default="INDEXED", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -206,7 +218,7 @@ class EmailSendApproval(Base):
     __tablename__ = "email_send_approvals"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('PENDING', 'APPROVED', 'REJECTED', 'SENT', 'CANCELLED')",
+            "status IN ('PENDING', 'APPROVED', 'SCHEDULED', 'SENDING', 'REJECTED', 'SENT', 'CANCELLED')",
             name="ck_email_send_approvals_status",
         ),
         Index("ix_email_send_approvals_user_status", "user_id", "status"),
@@ -219,7 +231,9 @@ class EmailSendApproval(Base):
     draft_body: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="PENDING", server_default="PENDING", nullable=False)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_message_id: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )

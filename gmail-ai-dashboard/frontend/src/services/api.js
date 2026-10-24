@@ -1,6 +1,6 @@
 	import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8000' : window.location.origin);
 
 const api = axios.create({ baseURL: API_BASE, withCredentials: true, headers: { 'Content-Type': 'application/json' } });
 
@@ -25,6 +25,7 @@ api.interceptors.request.use((config) => {
 });
 
 export const getCurrentUser = () => api.get('/api/auth/me');
+export const enterDemo = () => api.post('/api/auth/demo');
 export const logout = () => api.post('/api/auth/logout');
 export const eraseAllData = () => api.delete('/api/auth/erase');
 
@@ -63,7 +64,59 @@ export const getGoogleAuthUrl = () => `${API_BASE}/api/auth/google`;
 export const getSyncStreamUrl = () => `${API_BASE}/api/gmail/sync/stream`;
 
 // RAG AI Assistant endpoints
-export const sendRagChat = (data) => api.post('/api/rag/chat', data);
+export const sendRagChat = async (data, onProgress) => {
+	if (!onProgress) return api.post('/api/rag/chat', data);
+	const timezone = getClientTimezone();
+	const response = await fetch(`${API_BASE}/api/rag/chat/stream`, {
+		method: 'POST', credentials: 'include',
+		headers: { 'Content-Type': 'application/json', ...(timezone ? { 'X-Timezone': timezone } : {}) },
+		body: JSON.stringify(data),
+	});
+	if (!response.ok) {
+		const payload = await response.json().catch(() => ({}));
+		const error = new Error(payload.detail || payload.message || 'Mailbox search could not start.');
+		error.status = response.status;
+		throw error;
+	}
+	if (!response.body) throw new Error('Mailbox search could not start.');
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let buffer = '';
+	let result;
+	const processFrame = (frame) => {
+		const lines = frame.split('\n');
+		const kind = lines.find((line) => line.startsWith('event:'))?.slice(6).trim();
+		const raw = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
+		if (!raw) return;
+		const payload = JSON.parse(raw);
+		if (kind === 'activity') onProgress(payload);
+		if (kind === 'error') throw new Error(payload.message || 'Mailbox search failed.');
+		if (kind === 'result') result = payload;
+	};
+	try {
+		while (true) {
+			const { value, done } = await reader.read();
+			buffer += decoder.decode(value, { stream: !done });
+			buffer = buffer.replace(/\r\n/g, '\n');
+			let boundary;
+			while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+				const frame = buffer.slice(0, boundary);
+				buffer = buffer.slice(boundary + 2);
+				processFrame(frame);
+			}
+			if (done) {
+				// Some proxies close an SSE stream without appending the final blank
+				// line. Process that last frame instead of dropping the answer.
+				if (buffer.trim()) processFrame(buffer);
+				break;
+			}
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	if (!result) throw new Error('The mailbox search ended before returning an answer.');
+	return { data: result };
+};
 export const getRagStatus = () => api.get('/api/rag/status');
 export const triggerRagIndex = (data = {}) => api.post('/api/rag/index', data);
 export const getRagSessions = (limit = 20) => api.get('/api/rag/sessions', { params: { limit } });

@@ -18,6 +18,7 @@ import os
 import unittest
 from datetime import datetime
 from uuid import uuid4
+from unittest.mock import patch
 
 from langchain_core.documents import Document
 from sqlalchemy import create_engine
@@ -198,9 +199,25 @@ class TestToolsAndHumanInTheLoop(unittest.TestCase):
         self.db.commit()
 
         # 4. Now send -> MUST SUCCEED
-        success_res = send_tool.invoke({"approval_id": str(approval.id)})
+        with patch("app.rag.tools.send_gmail_message", return_value={"id": "gmail-message-1"}) as delivery:
+            success_res = send_tool.invoke({"approval_id": str(approval.id)})
+        delivery.assert_called_once()
         self.assertIn("Email successfully sent", success_res)
         self.assertEqual(approval.status, "SENT")
+        self.assertEqual(approval.delivery_message_id, "gmail-message-1")
+
+    def test_schedule_email_requires_approval_and_persists_time(self):
+        tools = {t.name: t for t in create_gmail_tools(self.db, self.user_id)}
+        scheduled = tools["schedule_email"].invoke({
+            "recipient": "recruiter@example.com",
+            "subject": "Follow-up",
+            "body": "Let us reconnect next week.",
+            "scheduled_for": "2099-01-01T10:00:00+00:00",
+        })
+        self.assertIn("Approval ID:", scheduled)
+        approval = self.db.query(EmailSendApproval).filter_by(user_id=self.user_id).first()
+        self.assertEqual(approval.status, "PENDING")
+        self.assertEqual(approval.scheduled_for.year, 2099)
 
 
 class TestGroundedRAGChain(unittest.TestCase):
@@ -239,6 +256,15 @@ class TestAgentPatterns(unittest.TestCase):
             "PLAN_AND_EXECUTE",
         )
         self.assertEqual(self.assistant.route_intent("When is my technical interview scheduled?"), "RAG_QUERY")
+        self.assertEqual(
+            self.assistant.route_intent("Check for security alerts, 2FA notifications, or password resets."),
+            "RAG_QUERY",
+        )
+        self.assertEqual(
+            self.assistant.route_intent("Give me those that are related to chess.com."),
+            "RAG_QUERY",
+        )
+        self.assertEqual(self.assistant.route_intent("What is the capital of France?"), "GENERAL_CHAT")
 
     def test_contextual_compression(self):
         cits = [
@@ -263,15 +289,29 @@ class TestRAGApiEndpoints(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient
         from app.api.app import app
+        from app.api.routes.rag import get_user_for_rag
+        from app.database.connection import engine
+        from app.models.email import Base
+        from app.models.rag import Base as RagBase
+        Base.metadata.create_all(bind=engine)
+        RagBase.metadata.create_all(bind=engine)
+        self.mock_user = User(id=uuid4(), google_id="mock_g", email="mock@example.com", name="Mock User", is_demo=False)
+        app.dependency_overrides[get_user_for_rag] = lambda: self.mock_user
         self.client = TestClient(app)
+
+    def tearDown(self):
+        from app.api.app import app
+        from app.api.routes.rag import get_user_for_rag
+        app.dependency_overrides.pop(get_user_for_rag, None)
 
     def test_rag_status_endpoint(self):
         res = self.client.get("/api/rag/status")
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["status"], "operational")
-        self.assertIn("chromadb", data)
-        self.assertIn("total_vectors", data["chromadb"])
+        self.assertTrue("vector_store" in data or "chromadb" in data)
+        store = data.get("vector_store") or data.get("chromadb")
+        self.assertIn("total_vectors", store)
 
     def test_rag_approvals_endpoint(self):
         res = self.client.get("/api/rag/approvals")

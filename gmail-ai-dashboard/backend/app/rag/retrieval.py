@@ -1,7 +1,7 @@
 """LangChain retrievers implementation for Gmail RAG system.
 
 Provides 4 specialized retrievers adhering to LangChain's BaseRetriever abstraction:
-1. ChromaSemanticRetriever: Dense semantic vector search via ChromaDB (Azure OpenAI text-embedding-3-large)
+1. PostgresSemanticRetriever: Dense semantic vector search in PostgreSQL pgvector
 2. GmailCustomHybridRetriever: Fuses semantic search with PostgreSQL filters (sender, date range, labels, read status, email ID, thread ID)
 3. HistoryAwareRetriever: Rewrites conversational follow-up questions into standalone queries using chat history
 4. MultiQueryRetriever: Generates alternative search queries, executes parallel retrieval, merges and deduplicates via RRF
@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parseaddr
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from uuid import UUID
 
@@ -25,7 +28,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.retrievers import BaseRetriever
 from pydantic import ConfigDict, Field
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 try:
     from langsmith import traceable
@@ -37,9 +40,141 @@ except ImportError:
 
 
 from app.models.email import AiCategory, Email, EmailClassification, EmailLabel, GmailAccount, Label
-from app.rag.vectorstore import ChromaVectorStoreManager, default_chroma_manager
+from app.rag.mailbox_scope import mailbox_email_condition, mailbox_email_ids, primary_email_condition, restrict_to_email_ids
+from app.rag.query_constraints import is_financial_query
+from app.rag.preprocessing import clean_email_text
+from app.rag.vectorstore import default_vectorstore
+from app.rag.pgvector_store import PostgresVectorStoreManager
+from app.rag.activity import emit_activity
 
 logger = logging.getLogger(__name__)
+
+# This is a fallback trigger, not a hard relevance cutoff. Exact metadata
+# filters and live Gmail membership must not be rejected because an embedding
+# score is unavailable.
+MIN_SEMANTIC_CONFIDENCE = 0.65
+MAX_KEY_POINT_CHARS = 100
+
+
+def normalize_key_point(value: Any) -> str:
+    """Return one grounded, display-safe key point of at most 100 characters."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^\s*(?:[•*\-]|\d+[.)])\s*", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"[`*_]", "", text)
+    text = re.sub(r"[\t\r\n\xa0\u200b\u200c\u200d\u200e\u200f\ufeff]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -")
+    if not text:
+        return ""
+    match = re.search(r"^(.*?[.!?])(?:\s|$)", text)
+    if match:
+        text = match.group(1).strip()
+    if len(text) > MAX_KEY_POINT_CHARS:
+        shortened = text[: MAX_KEY_POINT_CHARS - 3].rsplit(" ", 1)[0].rstrip(" ,;:")
+        text = f"{shortened}..." if shortened else f"{text[:MAX_KEY_POINT_CHARS - 3]}..."
+    elif not text.endswith((".", "!", "?")):
+        text = f"{text}."
+    return text[:MAX_KEY_POINT_CHARS]
+
+
+def normalize_key_points(values: Any, max_points: int = 5) -> List[str]:
+    """Normalize and deduplicate a list of LLM-produced key points."""
+    result: List[str] = []
+    seen: Set[str] = set()
+    for value in values or []:
+        point = normalize_key_point(value)
+        if not point or point.casefold() in seen:
+            continue
+        seen.add(point.casefold())
+        result.append(point)
+        if len(result) >= max_points:
+            break
+    return result
+
+
+def scoped_mailbox_documents(db, user_id, query, filters, email_ids=None):
+    """Enumerate authorized non-junk mailbox records, preserving filters.
+
+    ``email_ids`` is used by the live Gmail branch to hydrate messages that
+    were just synchronized by MCP but have not been embedded yet.  Keeping
+    this as an optional fast path avoids a second full mailbox scope scan.
+    """
+    ids = [UUID(str(eid)) for eid in (email_ids if email_ids is not None else mailbox_email_ids(db, user_id, query))]
+    if not ids:
+        return []
+    stmt = select(Email).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(
+        GmailAccount.user_id == UUID(str(user_id)), Email.id.in_(ids))
+    for name, column in [("gmail_message_id", Email.gmail_message_id), ("thread_id", Email.thread_id),
+                         ("is_read", Email.is_read), ("email_id", Email.id)]:
+        if filters.get(name) is not None:
+            stmt = stmt.where(column == filters[name])
+    if filters.get("sender"):
+        value = str(filters["sender"]).replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(or_(Email.from_email.ilike(f"%{value}%", escape="\\"),
+                              Email.sender_name.ilike(f"%{value}%", escape="\\")))
+    if filters.get("label"):
+        value = filters["label"]
+        stmt = stmt.where(Email.labels.any(EmailLabel.label.has(or_(Label.label_id == value, Label.name == value))))
+    for key, after in [("start_date", True), ("end_date", False), ("start_timestamp", True), ("end_timestamp", False)]:
+        if filters.get(key) is not None:
+            value = filters[key]
+            if "timestamp" in key:
+                value = datetime.fromtimestamp(float(value), timezone.utc)
+            elif isinstance(value, str):
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            stmt = stmt.where(Email.received_at >= value if after else Email.received_at < value)
+    if filters.get("custom_filter"):
+        raise ValueError("Raw vector filters are not supported for exhaustive mailbox requests")
+    return [Document(page_content=clean_email_text(e.body, e.body_html, remove_quotes=False, remove_signatures=False) or e.snippet or "", metadata={"email_id": str(e.id), "subject": e.subject or "", "sender": e.from_email or "", "thread_id": e.thread_id or ""})
+            for e in db.scalars(stmt.order_by(Email.received_at.desc(), Email.id))]
+
+
+def hydrate_email_documents(documents: List[Document], db: Session, user_id: UUID | str,
+                            full_body: bool = False) -> List[Document]:
+    """Restore current envelope fields from authorized email records.
+
+    Older indexes use sender_email/received_date and may omit other metadata.
+    Fetching the record also keeps generated summaries grounded in the full
+    message rather than a truncated or stale vector chunk.
+    """
+    ids = []
+    for doc in documents:
+        try:
+            ids.append(UUID(str(doc.metadata.get("email_id", ""))))
+        except ValueError:
+            continue
+    if not ids:
+        return []
+    emails = {str(e.id): e for e in db.scalars(
+        select(Email).join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
+        .where(GmailAccount.user_id == UUID(str(user_id)), Email.id.in_(ids))
+    )}
+    result = []
+    for doc in documents:
+        email = emails.get(str(doc.metadata.get("email_id", "")))
+        if email is None:
+            continue
+        meta = dict(doc.metadata)
+        received_at = email.received_at
+        if received_at and received_at.tzinfo is None:
+            received_at = received_at.replace(tzinfo=timezone.utc)
+        sender_name, sender_address = parseaddr(email.from_email or "")
+        meta.update({
+            "subject": email.subject or meta.get("subject", ""),
+            "sender": email.from_email or meta.get("sender") or meta.get("from_email") or meta.get("sender_email", ""),
+            "sender_email": sender_address or email.from_email or meta.get("sender_email", ""),
+            "sender_name": email.sender_name or sender_name or meta.get("sender_name", ""),
+            "recipient_email": email.to_email or "",
+            "received_at": received_at.isoformat() if received_at else (meta.get("received_at") or meta.get("date") or meta.get("received_date", "")),
+            "thread_id": email.thread_id or "",
+            "gmail_message_id": email.gmail_message_id,
+        })
+        body = clean_email_text(email.body, email.body_html, remove_quotes=False, remove_signatures=False)
+        result.append(Document(page_content=body if full_body and body else doc.page_content, metadata=meta))
+    return result
 
 
 @dataclass
@@ -54,6 +189,7 @@ class RetrievedCitation:
     thread_id: str = ""
     label: str = "OTHER"
     key_points: List[str] = field(default_factory=list)
+    chunk_index: int = 0
 
 
 def documents_to_citations(documents: List[Document]) -> List[RetrievedCitation]:
@@ -70,7 +206,7 @@ def documents_to_citations(documents: List[Document]) -> List[RetrievedCitation]
             seen_ids.add(eid)
 
         snippet = doc.page_content or ""
-        key_points = list(meta.get("key_points") or [])
+        key_points = normalize_key_points(meta.get("key_points") or [])
 
         # If document wasn't compressed, strip header if needed
         if not key_points and "\n\n" in snippet and not snippet.startswith("•"):
@@ -78,47 +214,54 @@ def documents_to_citations(documents: List[Document]) -> List[RetrievedCitation]
 
         score = meta.get("score")
         if score is None:
-            score = 0.85
+            score = meta.get("similarity_score")
+        if score is None:
+            # Missing scores are unknown, not high-confidence matches.
+            score = 0.0
 
         citations.append(
             RetrievedCitation(
                 email_id=eid,
                 subject=str(meta.get("subject") or "No Subject"),
-                sender=str(meta.get("sender") or meta.get("from_email") or "Unknown"),
-                date=str(meta.get("received_at") or meta.get("date") or ""),
+                sender=str(meta.get("sender") or meta.get("from_email") or meta.get("sender_email") or "Unknown"),
+                date=str(meta.get("received_at") or meta.get("date") or meta.get("received_date") or ""),
                 snippet=snippet[:500].strip(),
                 score=round(float(score), 4),
                 thread_id=str(meta.get("thread_id") or ""),
                 label=str(meta.get("labels") or meta.get("label") or "EMAIL"),
                 key_points=key_points,
+                chunk_index=int(meta.get("chunk_index") or 0),
             )
         )
     return citations
 
 
 # ============================================================================
-# 1. ChromaDB Semantic Retriever
+# 1. Configured Vector Semantic Retriever
 # ============================================================================
 
-class ChromaSemanticRetriever(BaseRetriever):
-    """LangChain retriever executing dense semantic vector similarity search via ChromaDB HNSW.
+class PostgresSemanticRetriever(BaseRetriever):
+    """LangChain retriever executing dense semantic vector similarity search.
 
     Features:
-    - Default retrieval method using ChromaDB HNSW cosine similarity.
+    - Uses the configured vector manager (Postgres HNSW cosine search in production).
     - Single query embedding per request for low latency.
     - Mandatory tenant isolation (user_id) enforced on every query path.
     - Structured metadata filtering (sender, gmail_message_id, received_date, received_timestamp).
     - Optional MMR mode (search_type="mmr", fetch_k=20, lambda_mult=0.7) to reduce redundant chunks.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
     user_id: str = Field(..., description="Authenticated user UUID string for tenant isolation")
+    db_session: Optional[Any] = Field(None, description="Database for current Gmail category labels")
+    primary_only: bool = Field(False, description="Deprecated compatibility flag; mailbox retrieval includes all categories")
+    scope_query: Optional[str] = Field(None, description="Original query whose date scope must survive expansions")
     top_k: int = Field(5, description="Number of top similar chunks to return (default 5, configurable 5-10)")
     search_type: str = Field("similarity", description="Retrieval method: 'similarity' (default HNSW) or 'mmr'")
     fetch_k: int = Field(20, description="Candidate chunks to evaluate for MMR diversity")
     lambda_mult: float = Field(0.7, description="Diversity tradeoff for MMR (0.0=max diversity, 1.0=max relevance)")
-    filter_dict: Optional[Dict[str, Any]] = Field(None, description="Optional raw metadata filters for ChromaDB")
+    filter_dict: Optional[Dict[str, Any]] = Field(None, description="Optional raw metadata filters for the configured vector backend")
     score_threshold: Optional[float] = Field(None, description="Minimum similarity threshold")
 
     # Structured metadata filters
@@ -129,16 +272,16 @@ class ChromaSemanticRetriever(BaseRetriever):
     start_timestamp: Optional[Union[float, int]] = Field(None, description="Filter emails on or after POSIX timestamp")
     end_timestamp: Optional[Union[float, int]] = Field(None, description="Filter emails before POSIX timestamp")
 
-    chroma_manager: Any = Field(default_factory=lambda: default_chroma_manager)
+    vector_manager: Any = Field(default_factory=lambda: default_vectorstore, alias="chroma_manager")
 
-    @traceable(name="chroma_retrieval", run_type="retriever")
+    @traceable(name="vector_retrieval", run_type="retriever")
     def _get_relevant_documents(
         self,
         query: str,
         *,
         run_manager: Optional[CallbackManagerForRetrieverRun] = None,
     ) -> List[Document]:
-        """Retrieve relevant email chunks using ChromaDB dense semantic embeddings."""
+        """Retrieve relevant email chunks using dense semantic embeddings."""
         if not query or not query.strip():
             return []
 
@@ -146,7 +289,25 @@ class ChromaSemanticRetriever(BaseRetriever):
         if not self.user_id or not str(self.user_id).strip():
             raise ValueError("user_id is mandatory for tenant isolation on every retrieval path")
 
-        combined_filter = self.chroma_manager.build_filter(
+        custom_filter = self.filter_dict
+        allowed_ids = None
+        if self.db_session is not None:
+            allowed_ids = mailbox_email_ids(self.db_session, self.user_id, self.scope_query or query)
+            if not allowed_ids:
+                return []
+            custom_filter = restrict_to_email_ids(custom_filter, allowed_ids)
+            allowed_ids = set(allowed_ids)
+
+        vector_manager = self.vector_manager
+        if self.db_session is not None and isinstance(vector_manager, PostgresVectorStoreManager):
+            collection_name = vector_manager.collection_name
+            vector_manager = PostgresVectorStoreManager(
+                embedding_function=vector_manager.embedding_function,
+                db_session=self.db_session,
+            )
+            vector_manager.collection_name = collection_name
+
+        combined_filter = vector_manager.build_filter(
             user_id=self.user_id,
             sender=self.sender,
             gmail_message_id=self.gmail_message_id,
@@ -154,11 +315,11 @@ class ChromaSemanticRetriever(BaseRetriever):
             end_date=self.end_date,
             start_timestamp=self.start_timestamp,
             end_timestamp=self.end_timestamp,
-            custom_filter=self.filter_dict,
+            custom_filter=custom_filter,
         )
 
         if self.search_type == "mmr":
-            results = self.chroma_manager.search_mmr_with_scores(
+            results = vector_manager.search_mmr_with_scores(
                 query=query.strip(),
                 user_id=self.user_id,
                 top_k=self.top_k,
@@ -168,7 +329,7 @@ class ChromaSemanticRetriever(BaseRetriever):
             )
         else:
             # Default HNSW cosine similarity search with single query embedding
-            results = self.chroma_manager.search_with_scores(
+            results = vector_manager.search_with_scores(
                 query=query.strip(),
                 user_id=self.user_id,
                 top_k=self.top_k,
@@ -177,17 +338,22 @@ class ChromaSemanticRetriever(BaseRetriever):
 
         docs: List[Document] = []
         for doc, score in results:
+            if allowed_ids is not None and str(doc.metadata.get("email_id", "")) not in allowed_ids:
+                continue
             if self.score_threshold is not None and score is not None:
                 if score < self.score_threshold:
                     continue
 
             meta = dict(doc.metadata or {})
-            meta["score"] = round(float(score) if score is not None else 0.85, 4)
-            meta.setdefault("source", "chromadb")
+            meta["score"] = round(float(score), 4) if score is not None else 0.0
+            meta.setdefault("score_source", "vector_similarity" if score is not None else "unscored")
+            meta.setdefault("source", "postgresql")
             meta["retrieval_mode"] = self.search_type
             meta["search_type"] = self.search_type
             docs.append(Document(page_content=doc.page_content, metadata=meta))
 
+        if self.db_session is not None:
+            docs = hydrate_email_documents(docs, self.db_session, self.user_id)
         return docs[:self.top_k]
 
     def retrieve_citations(self, query: str) -> List[RetrievedCitation]:
@@ -195,9 +361,24 @@ class ChromaSemanticRetriever(BaseRetriever):
         return documents_to_citations(self.invoke(query))
 
 
+# Compatibility import name for integrations that still use the old class.
+ChromaSemanticRetriever = PostgresSemanticRetriever
+
+
 # ============================================================================
-# 2. Custom Hybrid Retriever (ChromaDB + PostgreSQL Filters with RRF)
+# 2. Custom Hybrid Retriever (Vector Search + PostgreSQL Filters with RRF)
 # ============================================================================
+
+def email_label_condition(label: str):
+    """Resolve the user-facing Primary name to Gmail's system category scope."""
+    label = label.strip()
+    if label.lower() in {"primary", "category:primary", "category_personal"}:
+        return primary_email_condition()
+    return or_(
+        Email.labels.any(EmailLabel.label.has(Label.name.ilike(label))),
+        Email.classifications.any(EmailClassification.category.has(AiCategory.name.ilike(label))),
+    )
+
 
 def detect_exact_identifier_or_term(query: str, filters: Optional[dict[str, Any]] = None) -> Tuple[bool, str]:
     """Detect if a query or its filter contains exact terms, email addresses, IDs, or codes requiring keyword/hybrid fallback."""
@@ -229,7 +410,11 @@ def detect_exact_identifier_or_term(query: str, filters: Optional[dict[str, Any]
         return True, "Query contains exact quoted search term"
 
     # Domain specific exact keywords that require SQL keyword matching
-    exact_topics = ["interview", "interviews", "invoice", "bill", "bills", "2fa", "security alert", "password reset"]
+    exact_topics = [
+        "interview", "interviews", "invoice", "bill", "bills", "2fa",
+        "security alert", "security alerts", "password", "password reset",
+        "password resets", "login alert", "sign-in", "verification code", "otp",
+    ]
     if any(re.search(r"\b" + re.escape(topic) + r"\b", clean_q, re.I) for topic in exact_topics):
         return True, "Query contains exact domain topic keywords"
 
@@ -272,7 +457,7 @@ def should_fallback_to_hybrid(
 
 
 class GmailCustomHybridRetriever(BaseRetriever):
-    """Hybrid retriever combining ChromaDB semantic search with PostgreSQL metadata filters.
+    """Hybrid retriever combining configured vector search with PostgreSQL metadata filters.
 
     Supports structured filtering by:
     - sender (from_email or sender_name)
@@ -284,10 +469,12 @@ class GmailCustomHybridRetriever(BaseRetriever):
     - thread_id (thread correspondence)
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
     user_id: str = Field(..., description="Authenticated user UUID string for tenant isolation")
     db_session: Optional[Any] = Field(None, description="SQLAlchemy Session for relational queries")
+    primary_only: bool = Field(False, description="Deprecated compatibility flag; mailbox retrieval includes all categories")
+    scope_query: Optional[str] = Field(None, description="Original query whose date scope must survive expansions")
     top_k: int = Field(5, description="Total ranked documents to return (default 5, configurable 5-10)")
 
     # Structured metadata filters
@@ -307,7 +494,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
     lambda_mult: float = Field(0.7, description="MMR diversity parameter")
     semantic_weight: float = Field(0.6, description="Weight for semantic vector scores in RRF")
     keyword_weight: float = Field(0.4, description="Weight for structured SQL matches in RRF")
-    chroma_manager: Any = Field(default_factory=lambda: default_chroma_manager)
+    vector_manager: Any = Field(default_factory=lambda: default_vectorstore, alias="chroma_manager")
 
     @traceable(name="hybrid_retrieval", run_type="retriever")
     def _get_relevant_documents(
@@ -316,23 +503,40 @@ class GmailCustomHybridRetriever(BaseRetriever):
         *,
         run_manager: Optional[CallbackManagerForRetrieverRun] = None,
     ) -> List[Document]:
-        """Execute hybrid search blending ChromaDB semantic vectors and PostgreSQL metadata via RRF."""
+        """Execute hybrid search blending pgvector similarity and PostgreSQL metadata via RRF."""
         if not self.user_id or not str(self.user_id).strip():
             raise ValueError("user_id is mandatory for tenant isolation on every retrieval path")
 
         user_uuid = UUID(str(self.user_id))
         semantic_docs: List[Document] = []
         sql_docs: List[Document] = []
+        vector_manager = self.vector_manager
+        if self.db_session is not None and isinstance(vector_manager, PostgresVectorStoreManager):
+            collection_name = vector_manager.collection_name
+            vector_manager = PostgresVectorStoreManager(
+                embedding_function=vector_manager.embedding_function,
+                db_session=self.db_session,
+            )
+            vector_manager.collection_name = collection_name
 
-        # 1. Semantic search via ChromaDB
+        allowed_ids = None
+        if self.db_session is not None:
+            allowed_ids = mailbox_email_ids(self.db_session, self.user_id, self.scope_query or query)
+            if not allowed_ids:
+                return []
+
+        # 1. Semantic search via PostgreSQL pgvector
         try:
             custom_f: Dict[str, Any] = {}
             if self.email_id:
                 custom_f["email_id"] = str(self.email_id)
             if self.thread_id:
                 custom_f["thread_id"] = str(self.thread_id)
+            if allowed_ids is not None:
+                custom_f = restrict_to_email_ids(custom_f, allowed_ids)
+                allowed_ids = set(allowed_ids)
 
-            combined_chroma_filter = self.chroma_manager.build_filter(
+            combined_chroma_filter = vector_manager.build_filter(
                 user_id=self.user_id,
                 sender=self.sender,
                 gmail_message_id=self.gmail_message_id,
@@ -344,7 +548,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
             )
 
             if self.search_type == "mmr":
-                raw_semantic = self.chroma_manager.search_mmr_with_scores(
+                raw_semantic = vector_manager.search_mmr_with_scores(
                     query=query,
                     user_id=self.user_id,
                     top_k=self.top_k * 2,
@@ -353,7 +557,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
                     filter_dict=combined_chroma_filter,
                 )
             else:
-                raw_semantic = self.chroma_manager.search_with_scores(
+                raw_semantic = vector_manager.search_with_scores(
                     query=query,
                     user_id=self.user_id,
                     top_k=self.top_k * 2,
@@ -361,12 +565,15 @@ class GmailCustomHybridRetriever(BaseRetriever):
                 )
 
             for doc, score in raw_semantic:
+                if allowed_ids is not None and str(doc.metadata.get("email_id", "")) not in allowed_ids:
+                    continue
                 meta = dict(doc.metadata or {})
-                meta["score"] = round(float(score) if score is not None else 0.85, 4)
-                meta.setdefault("source", "chromadb")
+                meta["score"] = round(float(score), 4) if score is not None else 0.0
+                meta.setdefault("score_source", "vector_similarity" if score is not None else "unscored")
+                meta.setdefault("source", "postgresql")
                 semantic_docs.append(Document(page_content=doc.page_content, metadata=meta))
         except Exception as exc:
-            logger.debug("ChromaDB semantic search error: %s", exc)
+            logger.debug("PostgreSQL vector search error: %s", exc)
 
         # 2. Structured & keyword search via PostgreSQL
         if self.db_session:
@@ -376,6 +583,9 @@ class GmailCustomHybridRetriever(BaseRetriever):
                     .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
                     .where(GmailAccount.user_id == user_uuid)
                 )
+                db_query = db_query.where(mailbox_email_condition())
+                if allowed_ids is not None:
+                    db_query = db_query.where(Email.id.in_([UUID(eid) for eid in allowed_ids]))
 
                 if self.email_id:
                     try:
@@ -412,13 +622,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
                 if self.is_read is not None:
                     db_query = db_query.where(Email.is_read == self.is_read)
                 if self.label:
-                    lbl = self.label.strip()
-                    db_query = db_query.where(
-                        or_(
-                            Email.labels.any(EmailLabel.label.has(Label.name.ilike(lbl))),
-                            Email.classifications.any(EmailClassification.category.has(AiCategory.name.ilike(lbl))),
-                        )
-                    )
+                    db_query = db_query.where(email_label_condition(self.label))
 
                 # Textual keyword filtering from query
                 clean_query = (query or "").strip()
@@ -428,7 +632,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
                     clean_query,
                     flags=re.IGNORECASE,
                 ).strip()
-                if cleaned_kw and len(cleaned_kw) > 1 and not (self.email_id or self.thread_id or self.gmail_message_id):
+                if cleaned_kw and len(cleaned_kw) > 1 and not (self.email_id or self.thread_id or self.gmail_message_id) and not is_financial_query(query):
                     search_pat = f"%{cleaned_kw}%"
                     phrase_cond = or_(
                         Email.subject.ilike(search_pat),
@@ -484,6 +688,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
                                 "is_read": e.is_read,
                                 "labels": self.label or "EMAIL",
                                 "score": 1.0,
+                                "score_source": "keyword_exact",
                                 "source": "postgresql",
                             },
                         )
@@ -519,11 +724,15 @@ class GmailCustomHybridRetriever(BaseRetriever):
         final_docs: List[Document] = []
         for eid in sorted_eids[:self.top_k]:
             doc = doc_store[eid]
-            doc.metadata["score"] = round(fused_scores[eid], 4)
-            doc.metadata.setdefault("fused_score", round(fused_scores[eid], 4))
+            doc.metadata["fused_score"] = round(fused_scores[eid], 4)
+            if doc.metadata.get("score") is None:
+                doc.metadata["score"] = round(fused_scores[eid], 4)
+                doc.metadata["score_source"] = "rank_fusion"
             doc.metadata.setdefault("retrieval_strategy", "hybrid_rrf")
             final_docs.append(doc)
 
+        if self.db_session is not None:
+            final_docs = hydrate_email_documents(final_docs, self.db_session, self.user_id)
         return final_docs
 
     # Backward-compatible helper methods
@@ -534,11 +743,11 @@ class GmailCustomHybridRetriever(BaseRetriever):
         top_k: int = 5,
         filter_dict: Optional[dict[str, Any]] = None,
     ) -> List[RetrievedCitation]:
-        retriever = ChromaSemanticRetriever(
+        retriever = PostgresSemanticRetriever(
             user_id=str(user_id),
             top_k=top_k,
             filter_dict=filter_dict,
-            chroma_manager=self.chroma_manager,
+            vector_manager=self.vector_manager,
         )
         return retriever.retrieve_citations(query)
 
@@ -555,6 +764,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
         email_id: Optional[str] = None,
         thread_id: Optional[str] = None,
         limit: int = 10,
+        primary_only: bool = False,
     ) -> List[RetrievedCitation]:
         """Perform direct, deterministic search against PostgreSQL email records."""
         user_uuid = UUID(str(user_id))
@@ -563,6 +773,10 @@ class GmailCustomHybridRetriever(BaseRetriever):
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
             .where(GmailAccount.user_id == user_uuid)
         )
+        stmt = stmt.where(mailbox_email_condition())
+        if primary_only:
+            ids = mailbox_email_ids(db, user_id, keyword or "")
+            stmt = stmt.where(Email.id.in_([UUID(eid) for eid in ids]))
 
         if email_id:
             try:
@@ -589,13 +803,8 @@ class GmailCustomHybridRetriever(BaseRetriever):
         if label:
             lbl = label.strip()
             if lbl:
-                stmt = stmt.where(
-                    or_(
-                        Email.labels.any(EmailLabel.label.has(Label.name.ilike(lbl))),
-                        Email.classifications.any(EmailClassification.category.has(AiCategory.name.ilike(lbl))),
-                    )
-                )
-        if keyword:
+                stmt = stmt.where(email_label_condition(lbl))
+        if keyword and not is_financial_query(keyword):
             kw_clean = keyword.strip()
             if kw_clean:
                 stmt = stmt.where(
@@ -656,7 +865,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
             is_read=filters.get("is_read"),
             email_id=filters.get("email_id"),
             thread_id=filters.get("thread_id"),
-            chroma_manager=self.chroma_manager,
+            vector_manager=self.vector_manager,
         )
         docs = retriever.invoke(query)
         return documents_to_citations(docs)
@@ -693,6 +902,17 @@ def rewrite_query_with_history(
     if not chat_history:
         return query
 
+    # Time expressions ("this month", "last week") are self-contained. Only
+    # resolve actual references; never append the previous topic to a new one.
+    references = re.search(
+        r"\b(?:it|its|he|him|she|her|they|them|his|their)\b|"
+        r"\b(?:this|that|these|those)\s+(?:email|message|thread|one|invoice|bill|interview)s?\b|"
+        r"\b(?:what|how)\s+about\s+(?:that|those|them)\b",
+        query, re.I,
+    )
+    if not references:
+        return query
+
     # Format chat history text
     history_lines = []
     for msg in chat_history[-6:]:
@@ -707,7 +927,10 @@ def rewrite_query_with_history(
     if llm:
         try:
             chain = p | llm | StrOutputParser()
-            rephrased = chain.invoke({"chat_history": history_text, "input": query}).strip()
+            rephrased = chain.invoke({
+                "chat_history": history_text, "input": query,
+                "history": history_text, "query": query,
+            }).strip()
             if rephrased and len(rephrased) > 3:
                 standalone_query = rephrased
         except Exception as exc:
@@ -715,7 +938,7 @@ def rewrite_query_with_history(
 
     # Heuristic fallback if LLM was unavailable, failed, or left query unchanged
     if standalone_query == query:
-        ambiguous_tokens = {"it", "its", "this", "that", "these", "those", "he", "him", "she", "her", "they", "them", "his", "their", "there", "then"}
+        ambiguous_tokens = {"it", "its", "this", "that", "these", "those", "he", "him", "she", "her", "they", "them", "his", "their"}
         query_words = set(query.lower().replace("?", " ").replace(".", " ").split())
         if any(token in query_words for token in ambiguous_tokens):
             stop_words = {
@@ -726,7 +949,7 @@ def rewrite_query_with_history(
             }
             salient: List[str] = []
             human_msgs = [m for m in chat_history if "Human" in type(m).__name__]
-            sources = human_msgs[-2:] if human_msgs else chat_history[-2:]
+            sources = human_msgs[-1:] if human_msgs else chat_history[-1:]
             for msg in reversed(sources):
                 content = str(msg.content)
                 for w in content.split():
@@ -890,9 +1113,9 @@ class MultiQueryRetriever(BaseRetriever):
                 chain = self.prompt | self.llm | StrOutputParser()
                 raw_alts = chain.invoke({"question": query, "query_count": self.query_count})
                 lines = [
-                    line.strip()
+                    re.sub(r"^(?:[-*]|\d+[.)])\s*", "", line).strip()
                     for line in raw_alts.split("\n")
-                    if line.strip() and not line.strip().startswith(("#", "-", "*", "1.", "2.", "3."))
+                    if line.strip() and not line.strip().startswith("#")
                 ]
                 for l in lines:
                     if l and l not in queries:
@@ -904,25 +1127,71 @@ class MultiQueryRetriever(BaseRetriever):
         if len(queries) == 1:
             queries.extend([f"{query} email", f"{query} details"])
 
-        # Execute retrieval for each perspective
+        # Execute retrieval for each perspective concurrently.  A SQLAlchemy
+        # Session is not thread-safe, so DB-backed retrievers receive a fresh
+        # worker session; retrievers without a session already own/use their
+        # backend's thread-safe connection path.
         fused_scores: Dict[str, float] = {}
         doc_store: Dict[str, Document] = {}
 
-        for q in queries[:self.query_count + 1]:
+        branches = queries[:self.query_count + 1]
+        emit_activity("multi_query", f"Searching {len(branches)} query perspectives", status="running",
+                      branch_count=len(branches), parallel=True)
+
+        parent_context = copy_context()
+
+        def invoke_branch(branch_query: str, branch_context) -> List[Document]:
+            retriever = self.base_retriever
+            branch_session = None
+            if getattr(retriever, "db_session", None) is not None:
+                source_session = retriever.db_session
+                # Bind the worker session to the same engine as the caller;
+                # this also keeps test/in-memory databases isolated from the
+                # application's default SessionLocal factory.
+                branch_factory = sessionmaker(bind=source_session.get_bind(), autoflush=False, autocommit=False)
+                branch_session = branch_factory()
+                try:
+                    retriever = retriever.model_copy(update={"db_session": branch_session})
+                except AttributeError:
+                    branch_session.close()
+                    raise RuntimeError("DB-backed retriever cannot be safely cloned for parallel search")
             try:
-                sub_docs = self.base_retriever.invoke(q)
-                for rank, doc in enumerate(sub_docs):
-                    doc_id = str(doc.metadata.get("email_id") or "") or doc.page_content[:50]
-                    # Reciprocal Rank Fusion
-                    fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + (1.0 / (60 + rank))
-                    if doc_id not in doc_store:
-                        doc_store[doc_id] = doc
-                    else:
-                        for k, v in doc.metadata.items():
-                            if k not in doc_store[doc_id].metadata or doc_store[doc_id].metadata[k] is None:
-                                doc_store[doc_id].metadata[k] = v
-            except Exception as exc:
-                logger.debug("Error executing sub-query '%s': %s", q, exc)
+                # ContextVars do not cross ThreadPoolExecutor workers by
+                # default. Copy the request activity context into each
+                # branch so public progress events still reach the SSE queue.
+                return branch_context.run(retriever.invoke, branch_query)
+            finally:
+                if branch_session is not None:
+                    branch_session.close()
+
+        max_workers = min(4, max(1, len(branches)))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="rag-branch") as executor:
+            future_to_index = {
+                executor.submit(invoke_branch, branch_query, parent_context.copy()): index
+                for index, branch_query in enumerate(branches)
+            }
+            for future in as_completed(future_to_index):
+                branch_index = future_to_index[future]
+                try:
+                    sub_docs = future.result()
+                    for rank, doc in enumerate(sub_docs):
+                        doc_id = str(doc.metadata.get("email_id") or "") or doc.page_content[:50]
+                        # Reciprocal Rank Fusion
+                        fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + (1.0 / (60 + rank))
+                        if doc_id not in doc_store:
+                            doc_store[doc_id] = doc
+                        else:
+                            for k, v in doc.metadata.items():
+                                if k not in doc_store[doc_id].metadata or doc_store[doc_id].metadata[k] is None:
+                                    doc_store[doc_id].metadata[k] = v
+                    emit_activity("retrieval_branch", "Query perspective completed", branch=branch_index + 1,
+                                  branch_count=len(branches), count=len(sub_docs))
+                except Exception as exc:
+                    logger.debug("Error executing sub-query branch %d: %s", branch_index, exc)
+                    emit_activity("retrieval_branch", "Query perspective failed; continuing with other sources",
+                                  branch=branch_index + 1, branch_count=len(branches), status="warning")
+
+        emit_activity("multi_query", f"Merged {len(doc_store)} unique candidates", count=len(doc_store))
 
         # Sort by fused score
         sorted_ids = sorted(fused_scores.keys(), key=lambda k: fused_scores[k], reverse=True)
@@ -930,7 +1199,7 @@ class MultiQueryRetriever(BaseRetriever):
         for did in sorted_ids:
             doc = doc_store[did]
             doc.metadata["fused_score"] = round(fused_scores[did], 4)
-            doc.metadata.setdefault("source", "chromadb")
+            doc.metadata.setdefault("source", "postgresql")
             top_docs.append(doc)
 
         return top_docs
@@ -947,7 +1216,7 @@ class ConditionalMultiQueryRetriever(BaseRetriever):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    base_retriever: BaseRetriever = Field(..., description="Underlying retriever (e.g. GmailCustomHybridRetriever or ChromaSemanticRetriever)")
+    base_retriever: BaseRetriever = Field(..., description="Underlying retriever (e.g. GmailCustomHybridRetriever or PostgresSemanticRetriever)")
     llm: Optional[Any] = Field(None, description="LangChain BaseChatModel for query routing and expansion")
     query_count: int = Field(3, description="Number of alternative query perspectives for MultiQueryRetriever")
     min_confidence_score: float = Field(0.65, description="Threshold below which normal retrieval escalates to MultiQueryRetriever")
@@ -1084,7 +1353,7 @@ Given a user search query and an email, extract key points that are directly rel
 
 STRICT FORMATTING REQUIREMENTS:
 1. Format each key point as a bullet point starting with '• '.
-2. Each bullet point MUST be exactly ONE sentence maximum. Never combine multiple sentences into a single bullet point.
+2. Each bullet point MUST be exactly ONE sentence and no more than 100 characters.
 3. Be concise and factual. Ground all facts solely in the email content (include dates, times, senders, action items, monetary amounts, or interview details).
 4. If the email contains no relevant information for the query, reply with: NO_RELEVANT_INFO.
 5. Do not include any introduction, conversational filler, or conclusion. Return only the bullet points.""",
@@ -1117,8 +1386,8 @@ class EmailKeyPointsCompressor:
         """Compress a single document into query-relevant single-sentence bullet points."""
         meta = dict(doc.metadata or {})
         subject = str(meta.get("subject") or "")
-        sender = str(meta.get("sender") or meta.get("from_email") or "")
-        date = str(meta.get("received_at") or meta.get("date") or "")
+        sender = str(meta.get("sender") or meta.get("from_email") or meta.get("sender_email") or "")
+        date = str(meta.get("received_at") or meta.get("date") or meta.get("received_date") or "")
         body = doc.page_content or ""
 
         bullets: List[str] = []
@@ -1131,15 +1400,23 @@ class EmailKeyPointsCompressor:
                     "subject": subject,
                     "sender": sender,
                     "date": date,
-                    "body": body[:2000],
+                    "body": body[:12000],
                 }).strip()
-                bullets = split_into_single_sentence_bullets(raw_out, max_points=self.max_key_points)
+                if raw_out.upper().strip(" .\n") == "NO_RELEVANT_INFO":
+                    meta["irrelevant"] = True
+                    meta["key_points"] = []
+                    return Document(page_content="", metadata=meta)
+                bullets = [f"• {point}" for point in normalize_key_points(raw_out.splitlines(), max_points=self.max_key_points)]
             except Exception as exc:
                 logger.debug("LLM compression error: %s. Using heuristic fallback.", exc)
 
         # Heuristic fallback if LLM offline, unconfigured, or returned no bullets
         if not bullets:
             bullets = self._heuristic_extract_key_points(body=body, query=query, subject=subject)
+
+        if not bullets:
+            meta["irrelevant"] = True
+            return Document(page_content="", metadata=meta)
 
         compressed_content = "\n".join(bullets) if bullets else body[:300]
         meta["key_points"] = bullets
@@ -1170,20 +1447,23 @@ class EmailKeyPointsCompressor:
 
         query_words = set(re.findall(r"\w+", query.lower())) - {
             "find", "search", "all", "emails", "from", "the", "with", "about",
-            "what", "when", "is", "are", "me", "show", "get", "please"
+            "what", "when", "is", "are", "me", "show", "get", "please",
+            "my", "your", "this", "that", "these", "those", "and", "or", "for", "in", "on", "to",
+            "month", "months", "week", "weeks", "today", "last", "past", "pending", "due",
+            "email", "message", "messages", "summarize", "summary", "tell", "give",
         }
+        query_words = {word.rstrip("s") for word in query_words if len(word) > 2}
+        subject_words = {word.rstrip("s") for word in re.findall(r"\w+", subject.lower())}
+        subject_overlap = len(query_words & subject_words)
 
         scored = []
         for s in clean_sentences:
-            s_words = set(re.findall(r"\w+", s.lower()))
-            overlap = len(query_words & s_words)
+            s_words = {word.rstrip("s") for word in re.findall(r"\w+", s.lower())}
+            overlap = len(query_words & s_words) + subject_overlap
             scored.append((overlap, s))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        chosen = [s for _, s in scored[:self.max_key_points]]
-
-        if not chosen:
-            chosen = clean_sentences[:self.max_key_points]
+        chosen = [s for score, s in scored if score > 0 or not query_words][:self.max_key_points]
 
         bullets: List[str] = []
         for c in chosen:
@@ -1200,7 +1480,8 @@ class EmailKeyPointsCompressor:
         for doc in documents:
             try:
                 comp_doc = self.compress_document(doc, query)
-                compressed_docs.append(comp_doc)
+                if not comp_doc.metadata.get("irrelevant"):
+                    compressed_docs.append(comp_doc)
             except Exception as exc:
                 logger.debug("Failed to compress document %s: %s", doc.metadata.get("email_id"), exc)
                 compressed_docs.append(doc)
@@ -1308,7 +1589,7 @@ class RetrievalStrategyEvaluator:
         recall = len(ground_truth_indices & clustered_indices) / float(k)
 
         assessment = (
-            f"For typical user mailbox scale (N={vector_count} chunks), flat ChromaDB HNSW search "
+            f"For typical user mailbox scale (N={vector_count} chunks), PostgreSQL pgvector HNSW search "
             f"executes in {t_flat_ms:.2f}ms with 100% recall. Cluster-based routing incurs centroid "
             f"overhead ({t_cluster_ms:.2f}ms) and suffers boundary loss (Recall@{k}={recall * 100:.1f}%). "
             "Clustering is only justified when N > 100,000 vectors."
@@ -1335,7 +1616,7 @@ class RetrievalStrategyEvaluator:
 
         t0 = time.perf_counter()
         doc_count = len(documents)
-        scores = [float(d.metadata.get("score") or 0.85) for d in documents[:k]]
+        scores = [float(d.metadata.get("score") or 0.0) for d in documents[:k]]
         score_margin = (max(scores) - min(scores)) if len(scores) > 1 else 1.0
 
         is_ambiguous = score_margin < 0.05 and doc_count > 1

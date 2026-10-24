@@ -12,7 +12,7 @@ import { useAuth } from './context/AuthContext';
 import GmailConsent from './pages/GmailConsent';
 import SyncPage from './pages/SyncPage';
 import AiAssistant from './pages/AiAssistant';
-import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex } from './services/api';
+import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex, enterDemo } from './services/api';
 
 const navItems = [
 	{ label: 'Inbox', icon: Inbox }, { label: 'Starred', icon: Star },
@@ -315,6 +315,9 @@ function RecentEmails({ emailsToShow, selectedId, onSelectEmail, selected, onTog
 }
 
 function InboxView({ emails, selectedId, onSelectEmail, selectedIds, onToggleSelect, unreadCount, loading, loadingMore, hasMore, onLoadMore }) {
+	const [categoryFilter, setCategoryFilter] = useState('All');
+	const categories = ['All', 'Primary', 'Social', 'Promotions', 'Updates', 'Forums'];
+	const visibleEmails = categoryFilter === 'All' ? emails : emails.filter((email) => email.gmail_category === categoryFilter);
 	return (
 		<section className="panel inbox-view">
 			<div className="panel-heading">
@@ -323,6 +326,9 @@ function InboxView({ emails, selectedId, onSelectEmail, selectedIds, onToggleSel
 					<p>{emails.length.toLocaleString()} messages loaded, {unreadCount.toLocaleString()} unread</p>
 				</div>
 				<button className="view-all">{emails.length.toLocaleString()} mails</button>
+			</div>
+			<div className="mail-category-tabs" role="group" aria-label="Gmail categories">
+				{categories.map((category) => <button key={category} type="button" className={categoryFilter === category ? 'active' : ''} onClick={() => setCategoryFilter(category)}>{category}</button>)}
 			</div>
 			<div
 				className="email-table inbox-scroll"
@@ -339,8 +345,8 @@ function InboxView({ emails, selectedId, onSelectEmail, selectedIds, onToggleSel
 							<span className="check-cell">
 								<input
 									type="checkbox"
-									checked={selectedIds.length === emails.length && emails.length > 0}
-									onChange={() => emails.forEach((email) => onToggleSelect(email.id))}
+									checked={selectedIds.length === visibleEmails.length && visibleEmails.length > 0}
+									onChange={() => visibleEmails.forEach((email) => onToggleSelect(email.id))}
 								/>
 							</span>
 							<span>Sender</span>
@@ -349,7 +355,7 @@ function InboxView({ emails, selectedId, onSelectEmail, selectedIds, onToggleSel
 							<span>Date</span>
 							<span />
 						</div>
-						{emails.map((email) => (
+						{visibleEmails.map((email) => (
 							<button
 								className={`email-row ${email.is_read ? '' : 'unread-row'} ${selectedId === email.id ? 'selected' : ''}`}
 								key={email.id}
@@ -374,11 +380,13 @@ function InboxView({ emails, selectedId, onSelectEmail, selectedIds, onToggleSel
 								</span>
 								<span>
 									<em className={`label-badge ${(email.label || '').toLowerCase()}`}>{email.label}</em>
+									{email.gmail_category && <small className="gmail-category-badge">{email.gmail_category}</small>}
 								</span>
 								<span className="date-cell">{email.date}</span>
 								<span className="star"><Star size={17} /></span>
 							</button>
 						))}
+						{visibleEmails.length === 0 && <div className="mailbox-empty">No messages in {categoryFilter} for this period.</div>}
 						{loadingMore && <div className="mailbox-loading">Loading more messages...</div>}
 						{!hasMore && emails.length > 0 && <div className="mailbox-end">All inbox messages loaded</div>}
 					</>
@@ -405,6 +413,7 @@ function EmailPreview({ email, onClose, onExpand, isModal = false }) {
 					<div className="preview-header-meta">
 						<span className="preview-label">{isModal ? 'EMAIL DETAILS' : 'EMAIL PREVIEW'}</span>
 						{email.label && <em className={`label-badge ${(email.label || '').toLowerCase()}`}>{email.label}</em>}
+						{email.gmail_category && <small className="gmail-category-badge">{email.gmail_category}</small>}
 					</div>
 					<h2>{email.subject || '(No subject)'}</h2>
 				</div>
@@ -432,7 +441,8 @@ function EmailPreview({ email, onClose, onExpand, isModal = false }) {
 				</div>
 				<span className="preview-date">{email.date || ''}</span>
 			</div>
-			<div className="preview-body">
+				<div className="preview-body">
+				{email.labels?.length > 0 && <p className="preview-labels">Labels: {email.labels.filter((label) => label.name !== email.gmail_category).map((label) => label.name).join(', ')}</p>}
 				{sanitizedHtml ? (
 					<div className="email-html-body" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />
 				) : email.body ? (
@@ -466,27 +476,52 @@ function AuthIllustration({ signup }) {
 
 function AuthPage({ signup }) {
 	const navigate = useNavigate();
+	const { checkAuth } = useAuth();
+	const [demoError, setDemoError] = useState('');
+	const [openingDemo, setOpeningDemo] = useState(false);
 	const submit = (event) => { event.preventDefault(); navigate('/consent'); };
-	return <div className={`auth-shell ${signup ? 'auth-signup' : 'auth-login'}`}><main className="auth-card"><div className="auth-brand"><GmailMark /><strong>Gmail AI Dashboard</strong></div><div className="auth-copy"><h1>{signup ? 'Create Your Account' : 'Welcome Back'}</h1><p>{signup ? 'Get started with your Gmail AI Dashboard' : 'Sign in to access your Gmail AI Dashboard'}</p></div><form className="auth-form" onSubmit={submit}><button className="google-button" type="submit"><span className="google-g">G</span>{signup ? 'Sign up with Google' : 'Continue with Google'}</button><div className="auth-divider"><span /> <em>OR</em> <span /></div><p className="auth-switch">{signup ? 'Already have an account?' : "Don't have an account?"} <button type="button" onClick={() => navigate(signup ? '/login' : '/signup')}>{signup ? 'Sign in' : 'Sign up'}</button></p></form><AuthIllustration signup={signup} /><p className="auth-tagline">{signup ? 'Join and make your inbox work smarter.' : 'Your Gmail. Smarter with AI.'}</p></main></div>;
+	const tryDemo = async () => {
+		try {
+			setDemoError('');
+			setOpeningDemo(true);
+			await enterDemo();
+			await checkAuth();
+			navigate('/', { replace: true });
+		} catch (error) {
+			setDemoError(error.response?.data?.detail || 'The demo is unavailable right now.');
+		} finally {
+			setOpeningDemo(false);
+		}
+	};
+	return <div className={`auth-shell ${signup ? 'auth-signup' : 'auth-login'}`}><main className="auth-card"><div className="auth-brand"><GmailMark /><strong>Gmail AI Dashboard</strong></div><div className="auth-copy"><h1>{signup ? 'Create Your Account' : 'Welcome Back'}</h1><p>{signup ? 'Get started with your Gmail AI Dashboard' : 'Sign in to access your Gmail AI Dashboard'}</p></div><form className="auth-form" onSubmit={submit}><button className="google-button" type="submit"><span className="google-g">G</span>{signup ? 'Sign up with Google' : 'Continue with Google'}</button><p>Gmail sign-in is available to invited test users.</p><div className="auth-divider"><span /> <em>OR</em> <span /></div><button className="google-button" type="button" onClick={tryDemo} disabled={openingDemo}>{openingDemo ? 'Opening demo...' : 'Open demo@gmail.com'}</button><p>Explore a read-only mailbox with fictional emails. No Google sign-in needed.</p>{demoError && <p role="alert">{demoError}</p>}<p className="auth-switch">{signup ? 'Already have an account?' : "Don't have an account?"} <button type="button" onClick={() => navigate(signup ? '/login' : '/signup')}>{signup ? 'Sign in' : 'Sign up'}</button></p></form><AuthIllustration signup={signup} /><p className="auth-tagline">{signup ? 'Join and make your inbox work smarter.' : 'Your Gmail. Smarter with AI.'}</p></main></div>;
 }
 
-function EraseDialog({ open, onClose, onConfirm }) {
+function EraseDialog({ open, onClose, onConfirm, confirming }) {
+	useEffect(() => {
+		if (!open) return undefined;
+		const handleKeyDown = (event) => {
+			if (event.key === 'Escape' && !confirming) onClose();
+		};
+		document.addEventListener('keydown', handleKeyDown);
+		return () => document.removeEventListener('keydown', handleKeyDown);
+	}, [open, onClose, confirming]);
 	if (!open) return null;
-	return <div className="modal-overlay" onClick={onClose}>
-		<div className="modal-card erase-modal" onClick={(e) => e.stopPropagation()}>
+	return <div className="modal-overlay" onClick={onClose} role="presentation">
+		<div className="modal-card erase-modal" role="dialog" aria-modal="true" aria-labelledby="erase-dialog-title" aria-describedby="erase-dialog-description" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
 			<div className="erase-icon-wrap">
 				<AlertTriangle size={28} />
 			</div>
-			<h2>Erase all data?</h2>
-			<p>
-				This will permanently delete all data associated with your account from our database,
-				including synchronized emails, labels, profile data, and stored OAuth tokens.
+			<h2 id="erase-dialog-title">Erase all data?</h2>
+			<p id="erase-dialog-description">
+				This will permanently delete your synchronized emails and all data stored with them,
+				including subjects, bodies, dates, attachments, classifications, and AI embeddings.
+				Your profile and Gmail labels will be kept, but local chat history, OAuth tokens, and pending drafts will also be removed.
 			</p>
 			<p className="erase-warning">This action cannot be undone.</p>
 			<div className="erase-actions">
-				<button className="erase-cancel" onClick={onClose}>Cancel</button>
-				<button className="erase-confirm" onClick={onConfirm}>
-					<UserX size={15} /> Erase All Data
+				<button type="button" className="erase-cancel" onClick={onClose} disabled={confirming}>Cancel</button>
+				<button type="button" className="erase-confirm" onClick={onConfirm} disabled={confirming} aria-busy={confirming} autoFocus={!confirming}>
+					<UserX size={15} /> {confirming ? 'Erasing...' : 'Erase All Data'}
 				</button>
 			</div>
 		</div>
@@ -497,6 +532,7 @@ function SettingsPage() {
 	const { user, logout, eraseAllData } = useAuth();
 	const navigate = useNavigate();
 	const [eraseOpen, setEraseOpen] = useState(false);
+	const [erasing, setErasing] = useState(false);
 	const [eraseToast, setEraseToast] = useState('');
 	const [exportStats, setExportStats] = useState(null);
 	const [includeBody, setIncludeBody] = useState(false);
@@ -514,11 +550,12 @@ function SettingsPage() {
 	};
 
 	useEffect(() => {
+		if (user?.is_demo) return;
 		loadStats();
 		getRagStatus()
 			.then(({ data }) => setRagStatus(data))
 			.catch(() => setEmbeddingStatus('Embedding status is unavailable right now.'));
-	}, []);
+	}, [user]);
 
 	const refreshRagStatus = async () => {
 		const { data } = await getRagStatus();
@@ -547,13 +584,20 @@ function SettingsPage() {
 	};
 
 	const handleErase = async () => {
+		if (erasing) return;
+		setErasing(true);
 		try {
 			await eraseAllData();
 			setEraseOpen(false);
 			setEraseToast('All your data has been erased.');
-			setTimeout(() => navigate('/login', { replace: true }), 1500);
+			setTimeout(async () => {
+				await logout();
+				navigate('/login', { replace: true });
+			}, 1500);
 		} catch {
 			setEraseToast('Failed to erase data. Please try again.');
+		} finally {
+			setErasing(false);
 		}
 	};
 
@@ -588,6 +632,8 @@ function SettingsPage() {
 			event.target.value = '';
 		}
 	};
+
+	if (user?.is_demo) return <div className="settings-shell"><div className="settings-card"><button className="settings-back" onClick={() => navigate('/')}>← Back to Dashboard</button><h1>Sample mailbox</h1><p>These are fictional emails for the public demo. Gmail sync and account changes are disabled.</p><button className="settings-btn logout-btn" onClick={handleLogout}><LogOut size={16} /> Leave demo</button></div></div>;
 
 	return <div className="settings-shell">
 		<div className="settings-card">
@@ -731,16 +777,16 @@ function SettingsPage() {
 			<section className="settings-section settings-danger">
 				<h2>Danger Zone</h2>
 				<p className="settings-desc">
-					Permanently delete all your data from this application, including synced emails,
-					labels, tokens, and your user profile. This does not affect your actual Gmail account.
+					Permanently delete your synced emails and all related stored mail data.
+					Your profile and labels are preserved. This does not affect your actual Gmail account.
 				</p>
-				<button className="settings-btn erase-btn" onClick={() => setEraseOpen(true)}>
+				<button type="button" className="settings-btn erase-btn" onClick={() => setEraseOpen(true)}>
 					<UserX size={16} /> Erase All Data
 				</button>
 			</section>
 		</div>
 
-		<EraseDialog open={eraseOpen} onClose={() => setEraseOpen(false)} onConfirm={handleErase} />
+		<EraseDialog open={eraseOpen} onClose={() => setEraseOpen(false)} onConfirm={handleErase} confirming={erasing} />
 		{eraseToast && <div className="toast"><Zap size={16} /> {eraseToast}</div>}
 	</div>;
 }
@@ -827,12 +873,10 @@ function Dashboard() {
 	const handleRangeChange = (newRange) => {
 		setRange(newRange);
 		setActivityRange(newRange);
-		loadDashboardData(newRange, newRange);
 	};
 
 	const handleActivityRangeChange = (newRange) => {
 		setActivityRange(newRange);
-		loadDashboardData(range, newRange);
 	};
 
 	const handleRefresh = async () => {
@@ -897,7 +941,7 @@ function Dashboard() {
 	};
 
 	useEffect(() => {
-		if (!user) return undefined;
+		if (!user || user.is_demo) return undefined;
 
 		// Keep the mailbox current while the dashboard is open. The API ignores
 		// duplicate requests when a sync is already underway.
@@ -1068,6 +1112,7 @@ function Dashboard() {
 							<span className="eyebrow">{currentDate}</span>
 							<h1>Good morning, {user?.name?.split(' ')[0] || 'there'} <span>✦</span></h1>
 							<p>{analyticsError || "Here's what's happening with your inbox today."}</p>
+							<p>{user?.is_demo ? 'Demo mode: all emails are fictional sample data.' : (import.meta.env.PROD ? 'Showcase coverage: up to your 500 most recent Gmail messages.' : '')}</p>
 						</div>
 						<div className="welcome-actions">
 							<label className="date-button">
@@ -1086,7 +1131,7 @@ function Dashboard() {
 								<RefreshCw size={15} className={isRefreshing ? 'spin' : ''} />
 								{isRefreshing ? 'Refreshing...' : 'Refresh'}
 							</button>
-							<button
+			{!user?.is_demo && <button
 								className="sync-button"
 								onClick={handleSync}
 								disabled={isSyncing || isRefreshing}
@@ -1094,14 +1139,14 @@ function Dashboard() {
 							>
 								<Mail size={15} className={isSyncing ? 'spin' : ''} />
 								{isSyncing ? 'Syncing...' : 'Sync'}
-							</button>
+			</button>}
 						</div>
 					</section>
 					<div className="stats-grid">
 						{dashboardStats.length ? dashboardStats.map((stat) => <StatCard key={stat.label} stat={stat} />) : <div className="stats-loading">Loading mailbox metrics...</div>}
 					</div>
 					<Charts charts={charts} range={activityRange} onRangeChange={handleActivityRangeChange} />
-					<QuickActions onAction={action} />
+					{!user?.is_demo && <QuickActions onAction={action} />}
 					<div className="bottom-grid">
 						<RecentEmails
 							emailsToShow={filteredEmails}
@@ -1142,6 +1187,13 @@ function Loader(props) {
 	return <svg xmlns="http://www.w3.org/2000/svg" width={props.size || 24} height={props.size || 24} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="spin"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>;
 }
 
+function AssistantRoute() {
+	const { user } = useAuth();
+	const navigate = useNavigate();
+	if (user?.is_demo) return <div className="settings-shell"><div className="settings-card"><h1>AI Assistant preview</h1><p>The demo mailbox includes sample AI labels. Assistant search will be available after demo embeddings are added.</p><button className="settings-btn" onClick={() => navigate('/')}>Back to mailbox</button></div></div>;
+	return <AiAssistant />;
+}
+
 export default function App() {
 	const location = useLocation();
 
@@ -1150,6 +1202,6 @@ export default function App() {
 	if (location.pathname === '/consent') return <GmailConsent />;
 	if (location.pathname === '/sync') return <ProtectedRoute><SyncPage /></ProtectedRoute>;
 	if (location.pathname === '/settings') return <ProtectedRoute><SettingsPage /></ProtectedRoute>;
-	if (location.pathname === '/assistant') return <ProtectedRoute><AiAssistant /></ProtectedRoute>;
+	if (location.pathname === '/assistant') return <ProtectedRoute><AssistantRoute /></ProtectedRoute>;
 	return <ProtectedRoute><Dashboard /></ProtectedRoute>;
 }

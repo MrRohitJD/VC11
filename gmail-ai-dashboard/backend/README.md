@@ -1,6 +1,63 @@
 # Gmail AI Dashboard Backend
 
-## PostgreSQL setup
+## Mailbox assistant category scope
+
+The mailbox assistant answers using only Primary emails. Semantic search,
+database fallback, multi-query search, threads, summaries, and attachments all
+use the current synced Gmail labels. Other categories are never included as a
+fallback when Primary has no matches.
+
+Primary includes `CATEGORY_PERSONAL` and `INBOX` messages without another Gmail
+category. Social, Promotions, Updates, Forums, Spam, Trash, and Drafts are
+excluded. Records without category or inbox label evidence are excluded until
+labels are synced. AI classifications and custom labels named "Primary" do not
+determine Gmail category membership. See Google's [system label reference](https://developers.google.com/workspace/gmail/api/guides/labels).
+
+Existing vector indexes work without reindexing: eligible email IDs are read
+from the database and applied before vector ranking. Gmail label changes take
+effect after sync. This restriction applies to assistant retrieval; mailbox
+sync and dashboard email lists continue to include all categories.
+
+Standalone questions do not inherit topics from earlier conversation turns.
+For pending bills due this month, retrieval requires explicit billing,
+payment-status, and due-date evidence; receipt dates are not treated as payment
+deadlines. Calendar boundaries use the browser's `X-Timezone` header. Emails
+with unclear status or dates are not reported as confirmed matches.
+
+Citation metadata is refreshed from the authorized email record, including for
+older indexes. The assistant's View email action fetches the full message from
+`/api/rag/sources/{email_id}`, with sender, recipients, timestamp, plain text,
+HTML, and attachments, rather than displaying the compressed citation body.
+
+Relative email date requests such as "interview related emails of this month"
+are restricted to the client's calendar month before vector and SQL ranking.
+The original date restriction is retained through multi-query expansion.
+
+After retrieval, an LLM receives each authorized candidate's ID, subject,
+sender address/name, receipt timestamp, and full message text. It returns an
+explicit relevance decision with supporting key points. Only accepted
+candidates become answer context and related-email cards. Invalid decisions,
+unknown IDs, or provider failures produce no unvalidated sources and a clear
+validation-unavailable response. The assistant uses the configured NVIDIA
+provider first, with configured Azure/OpenAI and ExperientialLabs fallbacks.
+
+"Find all" requests validate the full retrieved candidate set in batches and
+retain all accepted sources instead of silently truncating the result to five.
+
+## PostgreSQL and pgvector setup
+
+Retrieval and indexing use the configured PostgreSQL database with pgvector.
+Set `RAG_VECTOR_BACKEND=postgres` (the application default) and ensure the
+database has the `vector` extension. Local ChromaDB storage is no longer
+supported; all vectors and searchable email metadata live in
+`email_embeddings`.
+
+Apply the migrations, including the pgvector embedding metadata and HNSW index,
+before indexing mail:
+
+```bash
+alembic upgrade head
+```
 
 The configured database name is `gmail_ai_dashboard`.
 
@@ -95,3 +152,29 @@ uvicorn app.api.app:app --reload --port 8000
 ```
 
 Open `http://localhost:5173/login` or `http://localhost:5173/signup`. Both Google buttons use the same OAuth flow. Google `sub` is stored as `users.google_id`; repeated sign-ins update the existing `users` and `gmail_accounts` records instead of creating duplicates. The API sets an HttpOnly session cookie after the callback.
+## Public demo mailbox
+
+The login and signup pages offer a read-only `demo@gmail.com` mailbox. Its
+messages, Gmail categories, and AI labels are fictional database records; it
+has no Google OAuth token and does not call Gmail. The demo assistant stays
+unavailable until embeddings are added in a later step.
+
+Apply the versioned migrations, then seed the mailbox from `backend/`:
+
+```sh
+alembic upgrade head
+python scripts/seed_demo_mailbox.py
+python scripts/seed_demo_mailbox.py --verify
+python scripts/verify_demo_api.py
+```
+
+The seed is idempotent and does not create chunks or embeddings. When migrating
+a database whose schema was cloned from the `20261013_0002` revision but whose
+`alembic_version` table is empty, verify the schema first, then stamp that
+revision before upgrading:
+
+```sh
+python scripts/seed_demo_mailbox.py --check
+alembic stamp 20261013_0002
+alembic upgrade head
+```

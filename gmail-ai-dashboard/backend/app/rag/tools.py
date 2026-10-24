@@ -17,10 +17,12 @@ from langchain_core.tools import tool
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models.email import AiCategory, Email, EmailClassification, EmailLabel, GmailAccount, Label
+from app.models.email import AiCategory, Email, EmailClassification, EmailLabel, GmailAccount, Label, User
 from app.models.rag import Attachment, EmailSendApproval
+from app.rag.mailbox_scope import mailbox_email_condition
+from app.services.gmail_service import send_gmail_message
 from app.rag.retrieval import (
-    ChromaSemanticRetriever,
+    PostgresSemanticRetriever,
     ConditionalMultiQueryRetriever,
     GmailCustomHybridRetriever,
     MultiQueryRetriever,
@@ -135,17 +137,19 @@ def parse_relative_or_explicit_date_range(
 
 
 def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
-    """Factory creating user-scoped LangChain tools for agent execution."""
+    """Factory creating user-scoped tools across all non-junk Gmail categories."""
     user_uuid = UUID(str(user_id))
 
     @tool
     def search_emails(query: str, top_k: int = 5) -> str:
-        """Search emails semantically using ChromaDB vector retrieval."""
+        """Search emails semantically using PostgreSQL pgvector retrieval."""
         sanitized = sanitize_tool_args({"query": query, "top_k": top_k})
         logger.info("Tool chosen: search_emails with args: %s", sanitized)
 
-        retriever = ChromaSemanticRetriever(
+        retriever = PostgresSemanticRetriever(
             user_id=str(user_uuid),
+            db_session=db,
+            primary_only=False,
             top_k=top_k,
         )
         docs = retriever.invoke(query)
@@ -183,6 +187,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             select(Email)
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
             .where(Email.id == eid, GmailAccount.user_id == user_uuid)
+            .where(mailbox_email_condition())
         )
         if not email:
             logger.info("Tool get_email_by_id returned 0 row(s) for ID: %s", email_id)
@@ -210,6 +215,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             select(Email)
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
             .where(Email.thread_id == thread_id, GmailAccount.user_id == user_uuid)
+            .where(mailbox_email_condition())
             .order_by(Email.received_at.asc().nullslast())
         ).all()
 
@@ -231,13 +237,14 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
 
     @tool
     def retrieve_email_context(query: str, top_k: int = 5) -> str:
-        """Perform hybrid retrieval (dense ChromaDB vector + PostgreSQL text) for RAG context."""
+        """Perform hybrid retrieval (dense pgvector + PostgreSQL text) for RAG context."""
         sanitized = sanitize_tool_args({"query": query, "top_k": top_k})
         logger.info("Tool chosen: retrieve_email_context with args: %s", sanitized)
 
         base_retriever = GmailCustomHybridRetriever(
             user_id=str(user_uuid),
             db_session=db,
+            primary_only=False,
             top_k=top_k,
         )
         retriever = ConditionalMultiQueryRetriever(
@@ -273,6 +280,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         base_retr = GmailCustomHybridRetriever(
             user_id=str(user_uuid),
             db_session=db,
+            primary_only=False,
             top_k=top_k,
         )
         mq_retriever = MultiQueryRetriever(
@@ -309,7 +317,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         thread_id: Optional[str] = None,
         top_k: int = 10,
     ) -> str:
-        """Execute custom hybrid retrieval combining ChromaDB semantic search with PostgreSQL relational filters."""
+        """Execute custom hybrid retrieval combining pgvector semantic search with PostgreSQL relational filters."""
         s_dt, e_dt = parse_relative_or_explicit_date_range(start_date=start_date, end_date=end_date)
         sanitized = sanitize_tool_args({
             "query": query,
@@ -326,6 +334,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         retriever = GmailCustomHybridRetriever(
             user_id=str(user_uuid),
             db_session=db,
+            primary_only=False,
             top_k=top_k,
             sender=sender,
             start_date=s_dt,
@@ -369,6 +378,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             start_date=s_dt,
             end_date=e_dt,
             limit=limit,
+            primary_only=False,
         )
         returned_ids = [c.email_id for c in citations]
         logger.info("Tool filter_emails_by_date returned %d row(s), email_ids: %s", len(citations), returned_ids)
@@ -386,6 +396,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             user_id=user_uuid,
             sender=clean_sender,
             limit=limit,
+            primary_only=False,
         )
         returned_ids = [c.email_id for c in citations]
         logger.info("Tool filter_emails_by_sender returned %d row(s), email_ids: %s", len(citations), returned_ids)
@@ -403,6 +414,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             user_id=user_uuid,
             label=clean_lbl,
             limit=limit,
+            primary_only=False,
         )
         returned_ids = [c.email_id for c in citations]
         logger.info("Tool filter_emails_by_label returned %d row(s), email_ids: %s", len(citations), returned_ids)
@@ -420,6 +432,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             select(Email)
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
             .where(Email.id == eid, GmailAccount.user_id == user_uuid)
+            .where(mailbox_email_condition())
         )
         if not email:
             return f"Email {email_id} not found."
@@ -438,7 +451,10 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         classification = db.scalar(
             select(AiCategory.name)
             .join(EmailClassification, EmailClassification.category_id == AiCategory.id)
+            .join(Email, Email.id == EmailClassification.email_id)
+            .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
             .where(EmailClassification.email_id == eid, EmailClassification.is_current.is_(True))
+            .where(GmailAccount.user_id == user_uuid, mailbox_email_condition())
         )
         return classification or "Uncategorized"
 
@@ -451,7 +467,10 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             return f"Invalid email UUID: {email_id}"
 
         attachments = db.scalars(
-            select(Attachment).where(Attachment.email_id == eid)
+            select(Attachment)
+            .join(Email, Email.id == Attachment.email_id)
+            .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
+            .where(Attachment.email_id == eid, GmailAccount.user_id == user_uuid, mailbox_email_condition())
         ).all()
         if not attachments:
             return "No attachments registered for this email."
@@ -488,6 +507,38 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         )
 
     @tool
+    def schedule_email(recipient: str, subject: str, body: str, scheduled_for: str) -> str:
+        """Create a future email delivery requiring explicit user approval."""
+        sanitized = sanitize_tool_args({
+            "recipient": recipient, "subject": subject, "body": body, "scheduled_for": scheduled_for,
+        })
+        logger.info("Tool chosen: schedule_email with args: %s", sanitized)
+        try:
+            value = str(scheduled_for or "").strip().replace("Z", "+00:00")
+            when = datetime.fromisoformat(value)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            when = when.astimezone(timezone.utc)
+        except Exception:
+            return "Invalid scheduled_for value. Use an ISO-8601 datetime with timezone."
+        if when <= datetime.now(timezone.utc):
+            return "The scheduled time must be in the future."
+        approval = EmailSendApproval(
+            user_id=user_uuid,
+            recipient_email=recipient,
+            subject=subject,
+            draft_body=body,
+            status="PENDING",
+            scheduled_for=when,
+        )
+        db.add(approval)
+        db.commit()
+        return (
+            f"Scheduled draft created (Approval ID: {approval.id}) for {when.isoformat()}. "
+            "Explicit approval is required before the message is queued for delivery."
+        )
+
+    @tool
     def send_email(approval_id: str) -> str:
         """Send a drafted email ONLY if explicit user approval was registered.
 
@@ -515,9 +566,21 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
                 f"Human approval must be granted explicitly by the user."
             )
 
-        # Mark sent
+        if approval.scheduled_for:
+            return "This approval is scheduled; approve it through the mailbox UI to queue delivery."
+
+        user = db.get(User, user_uuid)
+        if user is None:
+            return "Email could not be sent because the authenticated user was not found."
+        try:
+            delivery = send_gmail_message(db, user, approval.recipient_email, approval.subject, approval.draft_body)
+        except Exception as exc:
+            logger.warning("Approved Gmail delivery failed: %s", type(exc).__name__)
+            return f"Email could not be sent: {exc}"
+
         approval.status = "SENT"
         approval.sent_at = datetime.now(timezone.utc)
+        approval.delivery_message_id = delivery.get("id") if isinstance(delivery, dict) else None
         db.commit()
         return f"Email successfully sent to {approval.recipient_email}."
 
@@ -535,5 +598,6 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         classify_email,
         get_email_attachments,
         draft_email,
+        schedule_email,
         send_email,
     ]

@@ -39,6 +39,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
     name: Mapped[str | None] = mapped_column(String(255))
     picture: Mapped[str | None] = mapped_column(String(500))
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, server_default=text("CURRENT_TIMESTAMP"), nullable=False)
 
@@ -127,6 +128,7 @@ class Label(Base):
         UniqueConstraint("gmail_account_id", "gmail_label_id", name="uq_labels_account_gmail_label"),
         UniqueConstraint("id", "gmail_account_id", name="uq_labels_id_account"),
         Index("ix_labels_account_name", "gmail_account_id", "name"),
+        Index("ix_labels_gmail_label_account", "gmail_label_id", "gmail_account_id"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -147,6 +149,7 @@ class EmailLabel(Base):
         ForeignKeyConstraint(["email_id", "gmail_account_id"], ["emails.id", "emails.gmail_account_id"], ondelete="CASCADE", name="fk_email_labels_email_account"),
         ForeignKeyConstraint(["label_id", "gmail_account_id"], ["labels.id", "labels.gmail_account_id"], ondelete="CASCADE", name="fk_email_labels_label_account"),
         Index("ix_email_labels_label_id", "label_id"),
+        Index("ix_email_labels_account_label_email", "gmail_account_id", "label_id", "email_id"),
     )
 
     email_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
@@ -177,6 +180,16 @@ class EmailClassification(Base):
         CheckConstraint("confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)", name="ck_email_classifications_confidence"),
         CheckConstraint("classification_status IN ('PENDING', 'SUCCEEDED', 'FAILED')", name="ck_email_classifications_status"),
         Index("ix_email_classifications_email_current", "email_id", "is_current"),
+        # Dashboard metrics and charts only need the current successful result.
+        # Keeping this index partial avoids indexing historical, pending, and
+        # failed classifications while making the email_id join selective.
+        Index(
+            "ix_email_classifications_dashboard_lookup",
+            "email_id",
+            "category_id",
+            postgresql_where=text("is_current = true AND classification_status = 'SUCCEEDED'"),
+            sqlite_where=text("is_current = 1 AND classification_status = 'SUCCEEDED'"),
+        ),
         Index("ix_email_classifications_category_id", "category_id"),
     )
 

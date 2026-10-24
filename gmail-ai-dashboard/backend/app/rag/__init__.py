@@ -1,45 +1,26 @@
-"""LangChain Gmail RAG and AI Assistant module."""
+"""Lazy exports: mailbox helpers must not initialize the entire AI stack."""
+from importlib import import_module
 
-from app.rag.agent import GmailAIAssistant, default_assistant
-from app.rag.chains import GroundedRAGChain
-from app.rag.chunking import EmailChunker
-from app.rag.embeddings import get_embedding_model
-from app.rag.indexing import RAGIndexingPipeline, default_pipeline
-from app.rag.loaders import GmailDocumentAdapter
-from app.rag.memory import PostgresChatMessageHistory, get_or_create_chat_session
-from app.rag.retrieval import (
-    ChromaSemanticRetriever,
-    GmailCustomHybridRetriever,
-    GmailHybridRetriever,
-    HistoryAwareRetriever,
-    MultiQueryRetriever,
-    RetrievedCitation,
-    default_retriever,
-    documents_to_citations,
-)
-from app.rag.tools import create_gmail_tools
-from app.rag.vectorstore import ChromaVectorStoreManager, default_vectorstore
+_EXPORTS = {
+    'GmailAIAssistant': 'agent', 'default_assistant': 'agent',
+    'GroundedRAGChain': 'chains', 'EmailChunker': 'chunking',
+    'get_embedding_model': 'embeddings',
+    'RAGIndexingPipeline': 'indexing', 'default_pipeline': 'indexing',
+    'GmailDocumentAdapter': 'loaders',
+    'PostgresChatMessageHistory': 'memory', 'get_or_create_chat_session': 'memory',
+    'PostgresSemanticRetriever': 'retrieval', 'ChromaSemanticRetriever': 'retrieval', 'GmailCustomHybridRetriever': 'retrieval',
+    'GmailHybridRetriever': 'retrieval', 'HistoryAwareRetriever': 'retrieval',
+    'MultiQueryRetriever': 'retrieval', 'RetrievedCitation': 'retrieval',
+    'default_retriever': 'retrieval', 'documents_to_citations': 'retrieval',
+    'create_gmail_tools': 'tools',
+    'PostgresVectorStoreManager': 'pgvector_store', 'ChromaVectorStoreManager': 'vectorstore', 'default_vectorstore': 'vectorstore',
+}
+__all__ = list(_EXPORTS)
 
-__all__ = [
-    "GmailAIAssistant",
-    "default_assistant",
-    "GroundedRAGChain",
-    "EmailChunker",
-    "get_embedding_model",
-    "RAGIndexingPipeline",
-    "default_pipeline",
-    "GmailDocumentAdapter",
-    "PostgresChatMessageHistory",
-    "get_or_create_chat_session",
-    "ChromaSemanticRetriever",
-    "GmailCustomHybridRetriever",
-    "GmailHybridRetriever",
-    "HistoryAwareRetriever",
-    "MultiQueryRetriever",
-    "documents_to_citations",
-    "RetrievedCitation",
-    "default_retriever",
-    "create_gmail_tools",
-    "ChromaVectorStoreManager",
-    "default_vectorstore",
-]
+
+def __getattr__(name):
+    if name not in _EXPORTS:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    value = getattr(import_module(f'.{_EXPORTS[name]}', __name__), name)
+    globals()[name] = value
+    return value

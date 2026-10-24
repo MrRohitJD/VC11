@@ -2,8 +2,8 @@
 
 Provides:
 - POST /api/rag/chat: Run 10-pattern Gmail AI Assistant with citations and tool reasoning
-- POST /api/rag/index: Trigger incremental ChromaDB indexing for user emails
-- GET  /api/rag/status: Diagnostic overview of ChromaDB and PostgreSQL sync status
+- POST /api/rag/index: Trigger incremental PostgreSQL pgvector indexing for user emails
+- GET  /api/rag/status: Diagnostic overview of PostgreSQL vector and metadata sync status
 - GET  /api/rag/sessions: User conversational sessions list
 - GET  /api/rag/sessions/{id}: Message history and citation logs for a session
 - DELETE /api/rag/sessions/{id}: Delete a chat session
@@ -16,17 +16,26 @@ Provides:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+import json
+from queue import Queue, Empty
+from threading import Thread, Event
+from datetime import datetime, timezone
+from email.utils import parseaddr
+from time import perf_counter
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user
-from app.database.connection import get_db
+from app.database.connection import get_db, SessionLocal
+from app.services.chat_quota import reserve_chat_request
+from app.services.gmail_service import send_gmail_message
+from app.rag.activity import activity_context
 from app.models.email import Email, GmailAccount, User
 from app.models.rag import (
     Attachment,
@@ -37,10 +46,14 @@ from app.models.rag import (
     EmailEmbedding,
     EmailSendApproval,
 )
-from app.rag.agent import default_assistant
+from app.rag.graph_agent import default_assistant
+from app.rag.preprocessing import clean_email_text
+from app.rag.query_constraints import mailbox_time_context
 from app.rag.indexing import default_pipeline
 from app.rag.memory import list_user_sessions
 from app.rag.vectorstore import default_vectorstore
+from app.rag.retrieval import normalize_key_points
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -51,32 +64,8 @@ router = APIRouter(prefix="/api/rag", tags=["rag"])
 # Authentication Helper with Development Fallback
 # ---------------------------------------------------------------------------
 def get_user_for_rag(request: Request, db: Session = Depends(get_db)) -> User:
-    """Retrieve authenticated user from session cookie, falling back to active user in dev."""
-    try:
-        return get_current_user(request, db)
-    except HTTPException:
-        # Development convenience: pick the user with the most recently updated GmailAccount
-        recent_account = (
-            db.query(GmailAccount)
-            .order_by(GmailAccount.updated_at.desc().nullslast(), GmailAccount.created_at.desc().nullslast())
-            .first()
-        )
-        if recent_account and recent_account.user:
-            return recent_account.user
-        user = db.scalar(
-            select(User).order_by(
-                User.updated_at.desc().nullslast(),
-                User.created_at.desc().nullslast(),
-            ).limit(1)
-        )
-        if user:
-            return user
-        # Auto-create dev user if table is empty
-        dev_user = User(id=uuid4(), google_id="dev_google_id", email="dev@example.com", name="Development User")
-        db.add(dev_user)
-        db.commit()
-        db.refresh(dev_user)
-        return dev_user
+    """Never substitute another account when a session is absent or invalid."""
+    return get_current_user(request, db)
 
 
 # ---------------------------------------------------------------------------
@@ -85,13 +74,13 @@ def get_user_for_rag(request: Request, db: Session = Depends(get_db)) -> User:
 class ChatRequest(BaseModel):
     query: str = Field(..., description="User question or instruction")
     session_id: Optional[str] = Field(None, description="Optional existing session UUID")
-    top_k: int = Field(5, description="Number of source citations to retrieve")
+    top_k: int = Field(5, ge=1, le=8, description="Number of source citations to retrieve")
     filter_dict: Optional[Dict[str, Any]] = Field(None, description="Optional metadata filters")
     sender: Optional[str] = Field(None, description="Filter by sender email or domain")
     label: Optional[str] = Field(None, description="Filter by label or category")
     is_read: Optional[bool] = Field(None, description="Filter by read status")
     thread_id: Optional[str] = Field(None, description="Filter by thread ID")
-    use_multi_query: bool = Field(False, description="Enable multi-query retrieval")
+    use_multi_query: Optional[bool] = Field(None, description="None selects automatically; true/false overrides query expansion")
 
 
 class CitationItem(BaseModel):
@@ -115,6 +104,11 @@ class ChatResponse(BaseModel):
     session_id: str
     message_id: str
     key_points: List[str] = Field(default_factory=list, description="Extracted key points based on user query in single-sentence bullets")
+    search_plan: Optional[Dict[str, Any]] = None
+    trace_id: Optional[str] = None
+    trace_url: Optional[str] = None
+    tracing_enabled: bool = False
+    duration_ms: Optional[int] = None
 
 
 class IndexRequest(BaseModel):
@@ -135,13 +129,20 @@ class ApprovalActionResponse(BaseModel):
 @router.post("/chat", response_model=ChatResponse)
 def chat_with_assistant(
     body: ChatRequest,
+    request: Request,
     user: User = Depends(get_user_for_rag),
     db: Session = Depends(get_db),
+    x_timezone: Optional[str] = Header(None, alias="X-Timezone"),
 ):
     """Execute grounded question answering or agent execution for the user's emails."""
     if not body.query or not body.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    reserve_chat_request(db, request, user)
+    return _run_chat(body, user, db, x_timezone)
 
+
+def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[str]) -> ChatResponse:
+    started = perf_counter()
     try:
         f_dict = dict(body.filter_dict or {})
         if body.sender:
@@ -153,15 +154,16 @@ def chat_with_assistant(
         if body.thread_id:
             f_dict["thread_id"] = body.thread_id
 
-        agent_res = default_assistant.run(
-            query=body.query.strip(),
-            db=db,
-            user_id=user.id,
-            session_id=body.session_id,
-            top_k=body.top_k,
-            filter_dict=f_dict if f_dict else None,
-            use_multi_query=body.use_multi_query,
-        )
+        with mailbox_time_context(x_timezone):
+            agent_res = default_assistant.run(
+                query=body.query.strip(),
+                db=db,
+                user_id=user.id,
+                session_id=body.session_id,
+                top_k=body.top_k,
+                filter_dict=f_dict if f_dict else None,
+                use_multi_query=body.use_multi_query,
+            )
 
         citation_items = [
             CitationItem(
@@ -171,7 +173,7 @@ def chat_with_assistant(
                 date=c.date,
                 snippet=c.snippet,
                 score=round(c.score, 4),
-                key_points=getattr(c, "key_points", []) or [],
+                key_points=normalize_key_points(getattr(c, "key_points", []) or []),
             )
             for c in agent_res.citations
         ]
@@ -181,6 +183,10 @@ def chat_with_assistant(
         seen_kp = set()
         for c in agent_res.citations:
             for kp in (getattr(c, "key_points", []) or []):
+                normalized = normalize_key_points([kp], max_points=1)
+                if not normalized:
+                    continue
+                kp = normalized[0]
                 norm_kp = kp.strip().lower()
                 if norm_kp and norm_kp not in seen_kp:
                     seen_kp.add(norm_kp)
@@ -188,9 +194,8 @@ def chat_with_assistant(
 
         # Fallback if citations had snippets but no explicit key points
         if not extracted_key_points and agent_res.citations:
-            from app.rag.retrieval import split_into_single_sentence_bullets
             for c in agent_res.citations:
-                bullets = split_into_single_sentence_bullets(c.snippet, max_points=3)
+                bullets = normalize_key_points([c.snippet], max_points=2)
                 for b in bullets:
                     norm_b = b.strip().lower()
                     if norm_b and norm_b not in seen_kp:
@@ -208,6 +213,11 @@ def chat_with_assistant(
             session_id=agent_res.session_id or "",
             message_id=agent_res.message_id or "",
             key_points=extracted_key_points,
+            search_plan=getattr(agent_res, "search_plan", None),
+            trace_id=getattr(agent_res, "trace_id", None),
+            trace_url=getattr(agent_res, "trace_url", None),
+            tracing_enabled=getattr(agent_res, "tracing_enabled", False),
+            duration_ms=round((perf_counter() - started) * 1000),
         )
     except Exception as exc:
         logger.exception("RAG assistant execution error: %s", exc)
@@ -217,13 +227,76 @@ def chat_with_assistant(
         )
 
 
+@router.post("/chat/stream")
+def stream_chat(
+    body: ChatRequest,
+    request: Request,
+    user: User = Depends(get_user_for_rag),
+    db: Session = Depends(get_db),
+    x_timezone: Optional[str] = Header(None, alias="X-Timezone"),
+):
+    """Stream observable progress and one final response; never stream reasoning."""
+    if not body.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    reserve_chat_request(db, request, user)
+    user_id = user.id
+    events = Queue()
+    disconnected = Event()
+
+    def publish(step):
+        if not disconnected.is_set():
+            events.put(("activity", step))
+
+    def work():
+        try:
+            # A SQLAlchemy session belongs to one worker, not the request thread.
+            with SessionLocal() as db:
+                scoped_user = db.get(User, user_id)
+                if scoped_user is None:
+                    raise ValueError("User session is unavailable")
+                with activity_context(publish):
+                    response = _run_chat(body, scoped_user, db, x_timezone)
+                if not disconnected.is_set():
+                    events.put(("result", response.model_dump()))
+        except HTTPException as exc:
+            logger.warning("Streaming mailbox request failed with HTTP error: %s", exc.detail)
+            if not disconnected.is_set():
+                events.put(("error", {"message": str(exc.detail)}))
+        except Exception as exc:
+            logger.warning("Streaming mailbox request failed: %s", type(exc).__name__)
+            if not disconnected.is_set():
+                events.put(("error", {"message": "The mailbox request could not finish. Please try again."}))
+        finally:
+            events.put(None)
+
+    def generate():
+        Thread(target=work, daemon=True).start()
+        try:
+            while True:
+                try:
+                    item = events.get(timeout=15)
+                except Empty:
+                    yield ": keepalive\n\n"
+                    continue
+                if item is None:
+                    break
+                kind, payload = item
+                yield f"event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        finally:
+            disconnected.set()
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+    })
+
+
 @router.post("/index")
 def trigger_rag_indexing(
     body: IndexRequest = IndexRequest(),
     user: User = Depends(get_user_for_rag),
     db: Session = Depends(get_db),
 ):
-    """Run incremental indexing of user's emails into ChromaDB vector store."""
+    """Run incremental indexing of user's emails into PostgreSQL pgvector."""
     try:
         results = default_pipeline.index_user_emails(
             db=db,
@@ -250,8 +323,8 @@ def get_rag_system_status(
     user: User = Depends(get_user_for_rag),
     db: Session = Depends(get_db),
 ):
-    """Return live status of ChromaDB vector collection, chunks, and pending approvals."""
-    chroma_count = default_vectorstore.count()
+    """Return live status of the PostgreSQL pgvector index and pending approvals."""
+    vector_count = default_vectorstore.count(user.id)
 
     total_chunks = db.scalar(
         select(func.count(EmailChunk.id))
@@ -281,15 +354,17 @@ def get_rag_system_status(
 
     return {
         "status": "operational",
-        "chromadb": {
+        "vector_store": {
             "collection_name": default_vectorstore.collection_name,
-            "persist_directory": str(default_vectorstore.persist_directory),
-            "total_vectors": chroma_count,
+            "backend": settings.vector_backend,
+            "total_vectors": vector_count,
         },
         "postgresql": {
             "user_emails": user_email_count,
             "total_chunks": total_chunks,
             "indexed_embeddings": total_embeddings_indexed,
+            "indexed_emails": db.scalar(select(func.count(func.distinct(Email.id))).join(EmailChunk, EmailChunk.email_id == Email.id).join(EmailEmbedding, EmailEmbedding.chunk_id == EmailChunk.id).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(GmailAccount.user_id == user.id, EmailEmbedding.status == "INDEXED")) or 0,
+            "pending_emails": max(0, user_email_count - (db.scalar(select(func.count(func.distinct(Email.id))).join(EmailChunk, EmailChunk.email_id == Email.id).join(EmailEmbedding, EmailEmbedding.chunk_id == EmailChunk.id).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(GmailAccount.user_id == user.id, EmailEmbedding.status == "INDEXED")) or 0)),
             "pending_approvals": pending_approvals,
         },
         "timestamp": datetime.utcnow().isoformat(),
@@ -420,7 +495,9 @@ def get_approvals(
             "status": a.status,
             "created_at": a.created_at.isoformat() if a.created_at else "",
             "approved_at": a.approved_at.isoformat() if a.approved_at else None,
+                "scheduled_for": a.scheduled_for.isoformat() if a.scheduled_for else None,
             "sent_at": a.sent_at.isoformat() if a.sent_at else None,
+                "delivery_message_id": a.delivery_message_id,
         }
         for a in approvals
     ]
@@ -451,16 +528,39 @@ def approve_email_send(
         raise HTTPException(status_code=400, detail=f"Draft cannot be approved from status '{approval.status}'.")
 
     approval.status = "APPROVED"
-    approval.approved_at = datetime.utcnow()
-    # In live mode, send email via Gmail API or mark SENT
+    approval.approved_at = datetime.now(timezone.utc)
+
+    # Scheduled approvals are queued only after this explicit confirmation;
+    # the background worker performs delivery at the requested time.
+    if approval.scheduled_for:
+        approval.status = "SCHEDULED"
+        db.commit()
+        return ApprovalActionResponse(
+            approval_id=str(approval.id),
+            status="SCHEDULED",
+            message=f"Email to {approval.recipient_email} scheduled for {approval.scheduled_for.isoformat()}.",
+        )
+
+    db.commit()
+    try:
+        delivery = send_gmail_message(db, user, approval.recipient_email, approval.subject, approval.draft_body)
+    except Exception as exc:
+        # A delivery failure must remain retryable; approval alone is not
+        # evidence that Gmail accepted the message.
+        approval.status = "PENDING"
+        db.commit()
+        logger.warning("Approved Gmail delivery failed for %s: %s", approval.id, type(exc).__name__)
+        raise HTTPException(status_code=502, detail=f"Email was approved but could not be delivered: {exc}") from exc
+
     approval.status = "SENT"
-    approval.sent_at = datetime.utcnow()
+    approval.sent_at = datetime.now(timezone.utc)
+    approval.delivery_message_id = delivery.get("id") if isinstance(delivery, dict) else None
     db.commit()
 
     return ApprovalActionResponse(
         approval_id=str(approval.id),
         status="SENT",
-        message=f"Email to {approval.recipient_email} authorized and marked as sent.",
+        message=f"Email sent successfully to {approval.recipient_email}.",
     )
 
 
@@ -519,14 +619,25 @@ def get_source_email_details(
         select(Attachment).where(Attachment.email_id == email.id)
     ).all()
 
+    sender_name, sender_address = parseaddr(email.from_email or "")
+    received_at = email.received_at
+    if received_at and received_at.tzinfo is None:
+        received_at = received_at.replace(tzinfo=timezone.utc)
+
     return {
         "id": str(email.id),
         "subject": email.subject or "",
         "from": email.from_email or "",
+        "from_email": sender_address or email.from_email or "",
+        "sender_name": email.sender_name or sender_name,
         "to": email.to_email or "",
-        "date": email.received_at.isoformat() if email.received_at else "",
+        "cc": email.cc or "",
+        "bcc": email.bcc or "",
+        "date": received_at.isoformat() if received_at else None,
+        "received_at": received_at.isoformat() if received_at else None,
         "snippet": email.snippet or "",
-        "body": email.body or "",
+        "body": clean_email_text(email.body, email.body_html, remove_quotes=False, remove_signatures=False),
+        "body_html": email.body_html or "",
         "is_read": email.is_read,
         "attachments": [
             {

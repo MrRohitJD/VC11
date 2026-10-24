@@ -4,7 +4,9 @@ tokens and provides full-mailbox sync with progress reporting."""
 import json
 import logging
 import time
+import base64
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 from uuid import UUID
 
@@ -27,7 +29,9 @@ GMAIL_SCOPES = [
 	"https://www.googleapis.com/auth/userinfo.email",
 	"https://www.googleapis.com/auth/userinfo.profile",
 	"https://www.googleapis.com/auth/gmail.readonly",
+	"https://www.googleapis.com/auth/gmail.send",
 ]
+GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 
 
 # ------------------------------------------------------------------
@@ -54,6 +58,10 @@ def build_gmail_service_for_user(db: Session, user: User):
 		client_secret=settings.google_client_secret,
 		scopes=account.scope.split(" ") if account.scope else GMAIL_SCOPES,
 	)
+	# Without expiry, google-auth treats a stored expired token as valid and
+	# the first live Gmail search fails instead of refreshing the OAuth session.
+	if account.token_expiry:
+		creds.expiry = account.token_expiry.astimezone(timezone.utc).replace(tzinfo=None) if account.token_expiry.tzinfo else account.token_expiry
 
 	if creds.expired and creds.refresh_token:
 		creds.refresh(GoogleAuthRequest())
@@ -65,6 +73,36 @@ def build_gmail_service_for_user(db: Session, user: User):
 		db.commit()
 
 	return build("gmail", "v1", credentials=creds)
+
+
+def send_gmail_message(
+	db: Session,
+	user: User,
+	recipient: str,
+	subject: str | None,
+	body: str,
+) -> dict:
+	"""Deliver one approved message through the user's authenticated Gmail API."""
+	account = db.scalar(select(GmailAccount).where(GmailAccount.user_id == user.id))
+	if account is None:
+		raise ValueError("No Gmail account linked to this user")
+	scopes = set((account.scope or "").split())
+	if scopes and GMAIL_SEND_SCOPE not in scopes:
+		raise PermissionError("Gmail send permission is missing; reconnect Gmail to enable sending")
+	if not recipient or "@" not in recipient:
+		raise ValueError("A valid recipient email address is required")
+
+	message = EmailMessage()
+	message["To"] = recipient.strip()
+	message["Subject"] = (subject or "").strip()
+	message.set_content(body or "")
+	raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+	service = build_gmail_service_for_user(db, user)
+	return _call_with_retry(
+		lambda: service.users().messages().send(
+			userId="me", body={"raw": raw}
+		).execute()
+	)
 
 
 # ------------------------------------------------------------------
@@ -148,13 +186,13 @@ def sync_all_labels(
 # List all message IDs (paginated)
 # ------------------------------------------------------------------
 
-def _list_all_message_ids(service, *, progress_callback=None) -> list[str]:
+def _list_all_message_ids(service, *, progress_callback=None, max_messages: int | None = None) -> list[str]:
 	"""Fetch every message ID in the user's mailbox using pagination."""
 	message_ids: list[str] = []
 	page_token = None
 
 	while True:
-		kwargs: dict = {"userId": "me", "maxResults": 500}
+		kwargs: dict = {"userId": "me", "maxResults": min(500, max_messages - len(message_ids)) if max_messages else 500}
 		if page_token:
 			kwargs["pageToken"] = page_token
 
@@ -163,12 +201,14 @@ def _list_all_message_ids(service, *, progress_callback=None) -> list[str]:
 		)
 		for msg in response.get("messages", []):
 			message_ids.append(msg["id"])
+			if max_messages and len(message_ids) >= max_messages:
+				break
 
 		if progress_callback:
 			progress_callback("listing", len(message_ids), 0)
 
 		page_token = response.get("nextPageToken")
-		if not page_token:
+		if not page_token or (max_messages and len(message_ids) >= max_messages):
 			break
 
 	return message_ids
@@ -465,7 +505,9 @@ def sync_all_emails(
 	# 2. List all message IDs
 	if progress_callback:
 		progress_callback("listing", 0, 0)
-	message_ids = _list_all_message_ids(service, progress_callback=progress_callback)
+	from app.core.config import settings
+	message_ids = _list_all_message_ids(service, progress_callback=progress_callback,
+	                                   max_messages=settings.gmail_sync_limit if settings.vector_backend == "postgres" else None)
 	total_found = len(message_ids)
 
 	if total_found == 0:
