@@ -408,7 +408,14 @@ def get_session_details(
         # Load citation chunks linked to this message
         retrievals = db.scalars(
             select(ChatRetrieval)
-            .where(ChatRetrieval.chat_message_id == msg.id)
+            .join(EmailChunk, EmailChunk.id == ChatRetrieval.chunk_id)
+            .join(Email, Email.id == EmailChunk.email_id)
+            .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
+            .where(
+                ChatRetrieval.chat_session_id == s_uuid,
+                ChatRetrieval.chat_message_id == msg.id,
+                GmailAccount.user_id == user.id,
+            )
             .order_by(ChatRetrieval.retrieval_rank.asc())
         ).all()
 
