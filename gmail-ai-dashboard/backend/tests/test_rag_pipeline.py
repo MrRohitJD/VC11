@@ -249,6 +249,10 @@ class TestAgentPatterns(unittest.TestCase):
 
     def test_router_intent_heuristics(self):
         self.assertEqual(self.assistant.route_intent("Draft an email to recruiter thanking them"), "ACTION_DRAFT")
+        self.assertEqual(
+            self.assistant.route_intent("Draft a professional mail to adijadhav651@gmail.com related to education load"),
+            "ACTION_DRAFT",
+        )
         self.assertEqual(self.assistant.route_intent("Send the draft email now"), "ACTION_SEND")
         self.assertEqual(self.assistant.route_intent("Summarize my inbox for today"), "SUMMARIZE")
         self.assertEqual(
@@ -265,6 +269,17 @@ class TestAgentPatterns(unittest.TestCase):
             "RAG_QUERY",
         )
         self.assertEqual(self.assistant.route_intent("What is the capital of France?"), "GENERAL_CHAT")
+
+    def test_deterministic_draft_extraction_requires_explicit_draft_language(self):
+        from app.rag.agent import build_deterministic_draft_request
+
+        request = build_deterministic_draft_request(
+            "Draft a professional mail to adijadhav651@gmail.com related to education load"
+        )
+        self.assertEqual(request["recipient"], "adijadhav651@gmail.com")
+        self.assertEqual(request["subject"], "Regarding education load")
+        self.assertIn("education load", request["body"])
+        self.assertIsNone(build_deterministic_draft_request("Search emails from adijadhav651@gmail.com"))
 
     def test_contextual_compression(self):
         cits = [

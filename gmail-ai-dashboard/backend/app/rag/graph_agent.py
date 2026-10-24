@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, TypedDict
 from uuid import UUID
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 # LangGraph is an optional execution enhancement.  The core assistant can run
 # through the LangChain agent when an older/minimal deployment has not yet
@@ -36,6 +36,7 @@ from app.models.email import User
 from app.rag.agent import (
     GmailAIAssistant, AgentResponse, AGENT_SYSTEM_PROMPT,
     extract_citations_from_tool_observation,
+    deterministic_action_answer,
     select_deterministic_tool_fallback,
 )
 from app.rag.memory import (
@@ -123,6 +124,33 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
             }
 
     def agent(state):
+        # Simple explicit drafts with a recipient address do not need model
+        # tool-calling. Creating the approval record directly avoids waiting
+        # for an unavailable provider and preserves the same send gate.
+        deterministic = select_deterministic_tool_fallback(state["effective_query"], tools)
+        if deterministic and deterministic[0] == "draft_email":
+            tool_name, tool_args = deterministic
+            tool = tools[tool_name]
+            emit_activity("tool_agent", "Creating the draft for your review", status="running", lane="agent")
+            try:
+                observation = str(tool.invoke(tool_args))
+                emit_activity("mailbox_tool", "Draft created and awaiting approval", status="completed", lane="tool")
+            except Exception as exc:
+                logger.warning("Deterministic draft creation failed: %s", type(exc).__name__)
+                observation = "The draft could not be created. Please try again."
+                emit_activity("mailbox_tool", "Draft creation failed", status="warning", lane="tool")
+            match = re.search(r"Approval ID: ([0-9a-f-]{36})", observation)
+            approval_id = match.group(1) if match else None
+            citations.extend(extract_citations_from_tool_observation(observation))
+            answer = deterministic_action_answer(tool_name, tool_args, observation)
+            return {
+                "messages": [AIMessage(content=answer)],
+                "iterations": state["iterations"] + 1,
+                "answer": answer,
+                "approval_id": approval_id,
+                "steps": [{"action": tool_name, "arguments": tool_args, "observation": observation[:500]}],
+            }
+
         providers = [getattr(assistant.model, "runnable", assistant.model),
                      *getattr(assistant.model, "fallbacks", [])]
         bound = []

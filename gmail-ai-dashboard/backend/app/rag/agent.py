@@ -198,6 +198,14 @@ def select_deterministic_tool_fallback(
     date_words = {"last", "past", "month", "months", "day", "days", "week", "weeks", "year", "years", "today", "yesterday"}
     stop_words = {"the", "a", "an", "my", "all", "our"}
 
+    # Draft requests are handled before sender extraction because the
+    # recipient address is also a valid sender-looking token. This keeps a
+    # straightforward draft request out of the LLM timeout path and still
+    # creates the normal approval record enforced by draft_email.
+    draft_request = build_deterministic_draft_request(clean_q)
+    if draft_request and "draft_email" in tool_map:
+        return "draft_email", draft_request
+
     # 1. Email ID check (UUID format)
     uuid_match = re.search(r"\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b", clean_lower)
     if uuid_match and "get_email_by_id" in tool_map:
@@ -262,6 +270,61 @@ def select_deterministic_tool_fallback(
         return "search_emails", {"query": clean_q}
 
     return None
+
+
+def build_deterministic_draft_request(query: str) -> Optional[Dict[str, Any]]:
+    """Extract a safe, professional draft request without requiring an LLM."""
+    if not re.search(
+        r"\b(?:draft|write|compose|prepare|create)\b.*\b(?:mail|email|message|reply|response)\b",
+        query,
+        re.IGNORECASE,
+    ):
+        return None
+    recipient_match = re.search(
+        r"\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b",
+        query,
+    )
+    if not recipient_match:
+        return None
+
+    clean_query = re.sub(r"\s+", " ", query).strip()
+    topic_match = re.search(
+        r"\b(?:related to|regarding|about|concerning)\s+(.+?)(?:[.!?]|$)",
+        clean_query,
+        re.IGNORECASE,
+    )
+    topic = topic_match.group(1).strip(" .,:;!?\t") if topic_match else "the matter discussed"
+    topic = re.sub(r"\s+", " ", topic).strip()
+    topic = re.sub(r"\s+(?:please|kindly)$", "", topic, flags=re.IGNORECASE).strip()
+    if not topic:
+        topic = "the matter discussed"
+
+    return {
+        "recipient": recipient_match.group(1),
+        "subject": f"Regarding {topic[:80]}",
+        "body": (
+            "Hello,\n\n"
+            f"I hope you are doing well. I am writing to discuss {topic}. "
+            "Please let me know a convenient time to connect and review the details.\n\n"
+            "Best regards,\n"
+            "[Your Name]"
+        ),
+    }
+
+
+def deterministic_action_answer(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    observation: str,
+) -> str:
+    """Return a useful action result when the model provider is unavailable."""
+    if tool_name == "draft_email":
+        return (
+            f"I created a professional draft for {tool_args.get('recipient', 'the recipient')} "
+            f"with subject '{tool_args.get('subject', 'No subject')}'. It is pending your approval before sending.\n\n"
+            f"{observation}"
+        )
+    return observation
 
 
 class GmailAIAssistant:
@@ -476,7 +539,7 @@ class GmailAIAssistant:
             return "ACTION_SCHEDULE"
         if any(w in clean_q for w in ["send the draft", "approve send", "send approval", "send email", "send this draft"]):
             return "ACTION_SEND"
-        if any(w in clean_q for w in ["draft an email", "compose an email", "write an email", "prepare an email", "create a draft"]):
+        if re.search(r"\b(?:draft|write|compose|prepare|create)\b.*\b(?:mail|email|message|reply|response)\b", clean_q):
             return "ACTION_DRAFT"
 
         # Multi-step action workflow requiring PLAN_AND_EXECUTE (must combine search with active drafting/sending)
@@ -529,6 +592,12 @@ class GmailAIAssistant:
     @traceable(name="query_rewriting", run_type="chain")
     def transform_query(self, query: str, history: List[BaseMessage]) -> str:
         """Rewrite contextual follow-up questions into standalone retrieval queries using LLM."""
+        # An explicit draft already contains the recipient and requested
+        # subject. Rewriting it can add an unnecessary provider round trip
+        # (especially when the topic includes "related to") and may change
+        # the action intent, so keep it intact.
+        if build_deterministic_draft_request(query):
+            return query
         if not history or getattr(self.model, "_llm_type", "") == "unavailable":
             return query
 
@@ -682,6 +751,26 @@ class GmailAIAssistant:
                     seen_cit_ids.add(c.email_id)
                     citations_collected.append(c)
 
+        # Do not invoke a provider for a simple explicit draft request. The
+        # recipient, subject, and body can be safely extracted here, and the
+        # tool still persists the same approval-gated record.
+        deterministic = select_deterministic_tool_fallback(query, tool_map)
+        if deterministic and deterministic[0] == "draft_email":
+            tool_name, tool_args = deterministic
+            try:
+                observation = str(tool_map[tool_name].invoke(tool_args))
+            except Exception as exc:
+                logger.warning("Deterministic draft creation failed: %s", type(exc).__name__)
+                observation = "The draft could not be created. Please try again."
+            steps.append({
+                "step": 1,
+                "thought": "Selected draft_email from the explicit recipient and mail request",
+                "action": tool_name,
+                "arguments": tool_args,
+                "observation": observation[:500],
+            })
+            return deterministic_action_answer(tool_name, tool_args, observation), citations_collected, steps
+
         messages: List[BaseMessage] = [
             SystemMessage(content=AGENT_SYSTEM_PROMPT),
             HumanMessage(content=query),
@@ -768,11 +857,18 @@ class GmailAIAssistant:
 
                     steps.append({
                         "step": len(steps) + 1,
-                        "thought": f"Selected tool {tname} for search query",
+                        "thought": f"Selected tool {tname} from the explicit request",
                         "action": tname,
                         "arguments": targs,
                         "observation": obs[:500] if len(obs) > 500 else obs,
                     })
+
+                    # A deterministic draft is complete once the approval
+                    # record exists. Do not make a second LLM call merely to
+                    # phrase the result; that was the source of the long
+                    # timeout and misleading error for simple draft requests.
+                    if tname == "draft_email":
+                        return deterministic_action_answer(tname, targs, obs), citations_collected, steps
 
         # Formulate grounded response using LLM based on verified citations and tool execution
         final_text = self.generate_llm_response(
