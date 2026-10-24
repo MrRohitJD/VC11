@@ -531,7 +531,7 @@ export default function AiAssistant({ user: propUser }) {
 										<Bot size={22} />
 									</div>
 									<div>
-										<h2>Mailbox Assistant · LangGraph</h2>
+										<h2>Mailbox Assistant</h2>
 										<p>{isDemo ? 'Search and summarize the fictional mailbox. Outbound email is disabled.' : 'Answers search all non-junk Gmail categories.'}</p>
 									</div>
 								</div>
