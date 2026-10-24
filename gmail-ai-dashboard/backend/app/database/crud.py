@@ -83,6 +83,10 @@ def serialize_user(user: User) -> dict[str, Any]:
 		"name": user.name,
 		"picture": user.picture,
 		"is_demo": user.is_demo,
+		"features": {
+			"ai_assistant_enabled": True,
+			"send_mail_enabled": not user.is_demo,
+		},
 	}
 
 

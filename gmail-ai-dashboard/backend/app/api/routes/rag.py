@@ -178,6 +178,12 @@ def _apply_draft_update(approval: EmailSendApproval, body: ApprovalDraftUpdate) 
     approval.draft_body = draft_body
 
 
+def _ensure_outbound_mail_enabled(user: User) -> None:
+    """Keep the public demo assistant strictly read-only."""
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail="Outbound email is disabled for the demo account.")
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -590,6 +596,7 @@ def approve_email_send(
     db: Session = Depends(get_db),
 ):
     """Explicit human approval to authorize sending drafted email."""
+    _ensure_outbound_mail_enabled(user)
     approval = _find_user_approval(db, approval_id, user)
 
     if approval.status != "PENDING":

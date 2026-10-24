@@ -88,7 +88,7 @@ def main() -> None:
                     or category_ids != {key for key, _ in GMAIL_CATEGORIES}
                     or ai_label_count != len(AI_DESCRIPTIONS)
                     or classification_count != len(SAMPLE_MAIL)
-                    or chunk_count or embedding_count
+                    or not account.ai_classification_enabled
                     or account.provider != "demo" or account.access_token):
                 raise RuntimeError("Demo mailbox verification failed")
         except Exception:

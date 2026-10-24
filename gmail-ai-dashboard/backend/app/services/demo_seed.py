@@ -94,6 +94,95 @@ SAMPLE_MAIL = (
 )
 
 
+ADDITIONAL_DEMO_THEMES = (
+    ("Research briefing", "NEWSLETTERS", "Research", "research"),
+    ("Accessibility review", "PROJECTS", "Accessibility", "design"),
+    ("Cloud cost forecast", "FINANCE", "Finance", "finance"),
+    ("Campus wellness reminder", "HEALTH", "Wellness", "health"),
+    ("Conference speaker update", "EVENTS", "Events", "events"),
+    ("Repository security notice", "SECURITY", "Security", "security"),
+    ("Customer success check-in", "CUSTOMER_SUPPORT", "Support", "support"),
+    ("Travel itinerary revision", "TRAVEL", "Travel", "travel"),
+    ("Product roadmap preview", "UPDATES", "Roadmap", "product"),
+    ("Study group reading list", "EDUCATION", "Study", "education"),
+    ("Order preparation notice", "ORDERS", "Orders", "orders"),
+    ("Subscription renewal options", "SUBSCRIPTIONS", "Subscriptions", "subscriptions"),
+    ("Community volunteer schedule", "SOCIAL", "Volunteer", "community"),
+    ("Contract review checklist", "LEGAL", "Legal", "legal"),
+    ("Civic services bulletin", "GOVERNMENT", "Civic", "civic"),
+)
+
+
+def _long_demo_body(index: int, theme: str, sender_name: str, category: str, label: str) -> str:
+    """Create a substantial, deterministic body for assistant/search fixtures."""
+    paragraphs = [
+        [
+            f"Hello Demo, this fictional message {index} is part of the expanded {theme.lower()} mailbox sample.",
+            f"The note was prepared by {sender_name} to exercise realistic search, categorization, and label behavior.",
+            f"It belongs to the {category} Gmail category and carries the {label} label in the demo account.",
+            "Nothing in this message represents a real person, company, payment, appointment, or external commitment.",
+            "The content is intentionally detailed so the mailbox assistant can retrieve context instead of relying only on a short snippet.",
+        ],
+        [
+            f"The main topic for this sample is {theme.lower()}, with enough surrounding context to resemble a normal correspondence thread.",
+            "A reader might use the subject, sender, category, label, or receipt time to find this message later.",
+            "The message can also support questions about deadlines, decisions, responsibilities, follow-up items, and related conversations.",
+            "When a search request mentions this topic, the assistant should use the body as evidence and preserve the fictional framing.",
+            "The sender has included background, a current status, a practical recommendation, and a suggested next step for review.",
+        ],
+        [
+            "For background, the sample mailbox contains messages distributed across several dates and times rather than one artificial batch.",
+            "That variation helps test chronological filters, date summaries, activity charts, category counts, and sender-specific searches.",
+            "The surrounding sentences are deliberately concrete enough to produce useful key points while avoiding sensitive real-world data.",
+            "If the user asks for a summary, the assistant can identify the purpose, the important detail, and the action implied by this note.",
+            "If the user asks for related mail, the shared theme and label provide stable metadata for a grounded answer.",
+        ],
+        [
+            "Please treat every date, amount, name, and organization in this paragraph as fictional test content.",
+            "The mailbox is designed for demonstrations of classification, retrieval augmented generation, and interface behavior.",
+            "The long body also verifies that full-message views, chunking, indexing, and previews handle more than a short notification.",
+            "A useful assistant response should be concise, should cite the matching message, and should avoid inventing facts outside this body.",
+            "The account owner can safely explore the message because it is isolated from real Gmail and cannot send outbound mail.",
+        ],
+        [
+            "As a final note, this fixture intentionally repeats key metadata in natural language so keyword and semantic retrieval can be compared.",
+            "The content includes a clear subject, sender context, category context, label context, and a request for careful follow-up.",
+            "It is suitable for testing unread and read states, starred messages, category tabs, label chips, and assistant citations.",
+            "The generated record remains stable across seed runs because its message identifier, sender address, and topic are deterministic.",
+            "Thank you for using this fictional sample mailbox to validate the dashboard and its read-only AI assistant experience.",
+        ],
+    ]
+    body = "\n\n".join(" ".join(lines) for lines in paragraphs)
+    while len(body.split()) < 320:
+        body += (
+            f" Additional fictional context for message {index} keeps the {theme.lower()} topic searchable, "
+            f"the {label.lower()} label visible, and the {category.lower()} category meaningful."
+        )
+    return body
+
+
+ADDITIONAL_MAIL = tuple(
+    (
+        f"{theme} — sample message {index:02d}",
+        f"{theme} Desk {index:02d}",
+        f"contact-{index:02d}@{domain}.example",
+        _long_demo_body(index, theme, f"{theme} Desk {index:02d}", category_key.removeprefix("CATEGORY_"), label),
+        45 + (index - 31),
+        (index * 3) % 24,
+        (index * 7) % 60,
+        category_key,
+        ai_category,
+        label,
+    )
+    for index in range(31, 91)
+    for theme, ai_category, label, domain in (ADDITIONAL_DEMO_THEMES[(index - 31) % len(ADDITIONAL_DEMO_THEMES)],)
+    for category_key in (GMAIL_CATEGORIES[(index - 31) % len(GMAIL_CATEGORIES)][0],)
+)
+
+
+SAMPLE_MAIL = SAMPLE_MAIL + ADDITIONAL_MAIL
+
+
 def seed_demo_mailbox(db: Session) -> User:
     """Create or complete the one public, read-only demo mailbox."""
     user = db.scalar(select(User).where(User.email == DEMO_EMAIL))
@@ -108,11 +197,12 @@ def seed_demo_mailbox(db: Session) -> User:
     account = db.scalar(select(GmailAccount).where(GmailAccount.user_id == user.id))
     if account is None:
         account = GmailAccount(user_id=user.id, email=DEMO_EMAIL, provider="demo",
-                               access_token="", ai_classification_enabled=False)
+                               access_token="", ai_classification_enabled=True)
         db.add(account)
         db.flush()
     elif account.provider != "demo":
         raise RuntimeError("demo@gmail.com has a real Gmail connection")
+    account.ai_classification_enabled = True
 
     specs = [("INBOX", "INBOX", "system"), ("IMPORTANT", "IMPORTANT", "system"),
              ("STARRED", "STARRED", "system")]
@@ -158,6 +248,18 @@ def seed_demo_mailbox(db: Session) -> User:
                           is_starred=index in {1, 3, 6, 10, 21})
             db.add(email)
             db.flush()
+        elif index > 30:
+            # Keep the expanded fixture deterministic if the seed is rerun
+            # after an interrupted or partially completed deployment.
+            received_at = (now - timedelta(days=days)).replace(hour=hour, minute=minute,
+                                                                 second=0, microsecond=0)
+            email.subject = subject
+            email.sender_name = sender_name
+            email.from_email = sender
+            email.to_email = DEMO_EMAIL
+            email.snippet = body[:160]
+            email.body = body
+            email.received_at = received_at
         elif email.received_at and email.received_at > now:
             email.received_at -= timedelta(days=1)
         label_keys = {"INBOX", gmail_category, f"AI_{ai_category}",

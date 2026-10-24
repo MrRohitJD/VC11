@@ -1189,8 +1189,6 @@ function Loader(props) {
 
 function AssistantRoute() {
 	const { user } = useAuth();
-	const navigate = useNavigate();
-	if (user?.is_demo) return <div className="settings-shell"><div className="settings-card"><h1>AI Assistant preview</h1><p>The demo mailbox includes sample AI labels. Assistant search will be available after demo embeddings are added.</p><button className="settings-btn" onClick={() => navigate('/')}>Back to mailbox</button></div></div>;
 	return <AiAssistant />;
 }
 

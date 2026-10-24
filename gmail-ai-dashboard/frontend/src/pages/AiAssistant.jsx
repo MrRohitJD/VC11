@@ -97,6 +97,7 @@ export default function AiAssistant({ user: propUser }) {
 	const navigate = useNavigate();
 	const { user: authUser } = useAuth();
 	const user = propUser || authUser;
+	const isDemo = Boolean(user?.is_demo);
 
 	const [input, setInput] = useState('');
 	const [isTyping, setIsTyping] = useState(false);
@@ -515,7 +516,7 @@ export default function AiAssistant({ user: propUser }) {
 									</div>
 									<div>
 										<h2>Mailbox Assistant · LangGraph</h2>
-										<p>Answers search all non-junk Gmail categories.</p>
+										<p>{isDemo ? 'Search and summarize the fictional mailbox. Outbound email is disabled.' : 'Answers search all non-junk Gmail categories.'}</p>
 									</div>
 								</div>
 								<div className="assistant-header-controls">
@@ -766,9 +767,9 @@ export default function AiAssistant({ user: propUser }) {
 										<button onClick={() => setInput('Summarize unread emails from ')}>
 											<FileText size={13} /> Summarize
 										</button>
-										<button onClick={() => setInput('Draft a professional reply to ')}>
+										{!isDemo && <button onClick={() => setInput('Draft a professional reply to ')}>
 											<PenLine size={13} /> Draft Reply
-										</button>
+										</button>}
 										<button onClick={() => setInput('List upcoming meetings this week')}>
 											<CalendarDays size={13} /> Meetings
 										</button>

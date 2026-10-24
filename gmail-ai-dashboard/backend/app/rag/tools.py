@@ -625,7 +625,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         db.commit()
         return f"Email successfully sent to {approval.recipient_email}."
 
-    return [
+    tools = [
         search_emails,
         search_emails_multi_query,
         get_email_by_id,
@@ -642,3 +642,10 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         schedule_email,
         send_email,
     ]
+    owner = db.get(User, user_uuid)
+    if owner is not None and owner.is_demo:
+        # The public demo can use the assistant for mailbox search and
+        # summaries, but it must never create or deliver outbound mail.
+        outbound_tools = {"draft_email", "schedule_email", "send_email"}
+        tools = [candidate for candidate in tools if candidate.name not in outbound_tools]
+    return tools
