@@ -39,7 +39,12 @@ except ImportError:
 from app.core.config import settings
 from app.database.connection import SessionLocal
 from app.models.email import User
-from app.rag.retrieval import RetrievedCitation, default_retriever, scoped_mailbox_documents
+from app.rag.retrieval import (
+    MIN_SEMANTIC_CONFIDENCE,
+    RetrievedCitation,
+    default_retriever,
+    scoped_mailbox_documents,
+)
 from app.rag.query_constraints import mailbox_now, is_financial_query
 from app.rag.mailbox_scope import primary_email_ids
 from app.rag.relevance import validate_email_relevance, RelevanceResult
@@ -55,6 +60,40 @@ def _scoped_documents_in_worker(user_id, query, filters):
     """Load lexical candidates with a request-local session in a worker."""
     with SessionLocal() as worker_db:
         return scoped_mailbox_documents(worker_db, user_id, query, filters)
+
+
+def _mark_deterministic_matches(documents, source="metadata_filter"):
+    """Mark documents proven by an exact mailbox filter, not similarity."""
+    marked = []
+    for doc in documents:
+        metadata = dict(doc.metadata or {})
+        metadata.setdefault("score", 1.0)
+        metadata.setdefault("score_source", source)
+        marked.append(Document(page_content=doc.page_content, metadata=metadata))
+    return marked
+
+
+def _score_summary(documents):
+    """Return safe score telemetry for the optional retrieval Details view."""
+    scored = []
+    sources = set()
+    for doc in documents:
+        value = doc.metadata.get("score")
+        try:
+            scored.append(float(value))
+        except (TypeError, ValueError):
+            pass
+        source = doc.metadata.get("score_source")
+        if source:
+            sources.add(str(source))
+    if not scored:
+        return {}
+    return {
+        "top_score": round(max(scored), 4),
+        "min_score": round(min(scored), 4),
+        "score_count": len(scored),
+        "score_source": ", ".join(sorted(sources)) or "unknown",
+    }
 
 USER_RESPONSE_STYLE = """
 Write for the mailbox owner, using plain language and addressing them as "you".
@@ -380,18 +419,17 @@ class GroundedRAGChain:
         # local vector/BM25 path.
         current_user = db.get(User, UUID(str(user_id)))
         mcp_allowed = bool(settings.gmail_mcp_enabled and not (current_user and current_user.is_demo))
+        parsed_sender = requested_sender(effective_query)
+        if parsed_sender and not filters.get("sender"):
+            filters["sender"] = parsed_sender
         sender_only = sender_only_request(effective_query)
-        if sender_only and not filters.get("sender"):
-            parsed_sender = requested_sender(effective_query)
-            if parsed_sender:
-                filters["sender"] = parsed_sender
         search_plan = plan_retrieval(
             effective_query, filters, use_multi_query, retrieval_mode,
             mcp_enabled=mcp_allowed,
         )
         all_requested = search_plan.exhaustive
         date_only = search_plan.date_only
-        envelope_only = date_only or sender_only
+        envelope_only = date_only or (sender_only and bool(filters.get("sender")))
         use_multi_query = search_plan.multi_query
         emit_activity("plan_search", search_plan.label, plan=search_plan.public(),
                       providers=search_plan.providers, routing_reason=search_plan.routing_reason,
@@ -565,6 +603,8 @@ class GroundedRAGChain:
         if all_requested or envelope_only:
             # Enumerate records, not chunks: no rank cutoff or missing-index loss.
             docs = scoped_mailbox_documents(db, user_id, effective_query, filters)
+            if envelope_only:
+                docs = _mark_deterministic_matches(docs)
             eligible_ids = {str(doc.metadata.get("email_id")) for doc in docs}
             retrieval_strategy_used = "exhaustive_primary"
         else:
@@ -610,8 +650,12 @@ class GroundedRAGChain:
             # Live label/date membership supersedes stale local sync evidence.
             live_ids = set(live_status["email_ids"])
             docs = [doc for doc in docs if str(doc.metadata["email_id"]) in live_ids]
-        emit_activity("retrieve_candidates", f"Found {len(docs)} unique candidates in Primary", count=len(docs), strategy=retrieval_strategy_used,
-                      duration_ms=round((perf_counter() - retrieval_started) * 1000), lane="semantic")
+        score_details = _score_summary(docs)
+        score_text = f"; top score {score_details['top_score']:.3f}" if score_details else ""
+        emit_activity("retrieve_candidates", f"Found {len(docs)} unique candidates in Primary{score_text}", count=len(docs),
+                      strategy=retrieval_strategy_used, duration_ms=round((perf_counter() - retrieval_started) * 1000),
+                      lane="semantic", score_threshold=None if envelope_only else MIN_SEMANTIC_CONFIDENCE,
+                      **score_details)
 
         # The LLM receives real envelope metadata and content, then explicitly
         # accepts/rejects each candidate before it can become a cited source.

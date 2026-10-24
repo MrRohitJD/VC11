@@ -22,7 +22,8 @@ class SearchActivity:
         public_keys = {
             "count", "evaluated", "source_count", "intent", "strategy", "providers",
             "provider", "parallel", "branch", "branch_count", "plan", "routing_reason",
-            "duration_ms", "lane", "parallel_group",
+            "duration_ms", "lane", "parallel_group", "top_score", "min_score",
+            "score_count", "score_threshold", "score_source",
         }
         safe_details = {
             key: value for key, value in details.items()

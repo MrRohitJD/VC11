@@ -132,9 +132,20 @@ def bm25_rank(documents, query, limit=30):
                 idf = math.log(1 + (len(documents) - frequency[term] + 0.5) / (frequency[term] + 0.5))
                 score += idf * tf * 2.5 / (tf + 1.5 * (0.25 + 0.75 * length / average))
         if score:
-            ranked.append((score, Document(page_content=doc.page_content, metadata={**doc.metadata, "bm25_score": score, "retrieval_strategy": "bm25"})))
+            ranked.append((score, doc))
     ranked.sort(key=lambda item: item[0], reverse=True)
-    return [doc for _, doc in ranked[:limit]]
+    max_score = ranked[0][0] if ranked else 0.0
+    normalized = []
+    for raw_score, doc in ranked[:limit]:
+        metadata = {**doc.metadata, "bm25_score": round(raw_score, 4), "retrieval_strategy": "bm25"}
+        # Keep scores comparable with cosine similarity for the UI and for
+        # confidence decisions. BM25 itself is unbounded, so normalize it
+        # against the strongest candidate in this request.
+        if metadata.get("score") is None:
+            metadata["score"] = round(raw_score / max_score, 4) if max_score else 0.0
+            metadata["score_source"] = "bm25_normalized"
+        normalized.append(Document(page_content=doc.page_content, metadata=metadata))
+    return normalized
 
 
 def fuse_rankings(*rankings, limit=30):
@@ -150,5 +161,9 @@ def fuse_rankings(*rankings, limit=30):
             documents.setdefault(eid, doc)
             scores[eid] = scores.get(eid, 0) + 1 / (60 + rank)
     ids = sorted(scores, key=scores.get, reverse=True)[:limit]
-    return [Document(page_content=documents[eid].page_content,
-                     metadata={**documents[eid].metadata, "fused_score": scores[eid]}) for eid in ids]
+    fused = []
+    for eid in ids:
+        metadata = {**documents[eid].metadata, "fused_score": round(scores[eid], 4)}
+        metadata.setdefault("score_source", metadata.get("retrieval_strategy", "rank_fusion"))
+        fused.append(Document(page_content=documents[eid].page_content, metadata=metadata))
+    return fused

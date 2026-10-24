@@ -10,8 +10,8 @@ from langchain_core.retrievers import BaseRetriever
 from pydantic import ConfigDict, Field
 
 from app.rag.activity import activity_context
-from app.rag.adaptive import plan_retrieval
-from app.rag.retrieval import MultiQueryRetriever
+from app.rag.adaptive import bm25_rank, fuse_rankings, plan_retrieval
+from app.rag.retrieval import MultiQueryRetriever, documents_to_citations
 
 
 def test_provider_routing_is_query_dependent():
@@ -29,13 +29,41 @@ def test_provider_routing_is_query_dependent():
 
 def test_activity_events_are_public_and_ordered():
     with activity_context() as activity:
-        activity.emit("retrieve_candidates", "Found candidates", provider="vector", secret="do not publish")
+        activity.emit("retrieve_candidates", "Found candidates", provider="vector", top_score=0.82,
+                      score_threshold=0.65, secret="do not publish")
         activity.emit("answer_ready", "Answer ready", count=2)
 
     assert [event["event_id"] for event in activity.steps] == [1, 2]
     assert [event["phase"] for event in activity.steps] == ["retrieve_candidates", "answer_ready"]
     assert activity.steps[0]["provider"] == "vector"
+    assert activity.steps[0]["top_score"] == 0.82
+    assert activity.steps[0]["score_threshold"] == 0.65
     assert "secret" not in activity.steps[0]
+
+
+def test_bm25_scores_are_normalized_for_public_relevance_values():
+    docs = [
+        Document(page_content="invoice payment", metadata={"email_id": "1", "subject": "Invoice payment"}),
+        Document(page_content="invoice reminder", metadata={"email_id": "2", "subject": "Invoice reminder"}),
+    ]
+
+    ranked = bm25_rank(docs, "invoice payment", limit=2)
+
+    assert ranked
+    assert ranked[0].metadata["score_source"] == "bm25_normalized"
+    assert ranked[0].metadata["score"] == 1.0
+    assert all(0.0 <= doc.metadata["score"] <= 1.0 for doc in ranked)
+    fused = fuse_rankings(ranked, limit=2)
+    assert fused[0].metadata["score"] == ranked[0].metadata["score"]
+    assert fused[0].metadata["fused_score"] > 0
+
+
+def test_missing_citation_score_is_reported_as_unknown_not_high_confidence():
+    citation = documents_to_citations([
+        Document(page_content="message", metadata={"email_id": "1", "subject": "Subject"}),
+    ])[0]
+
+    assert citation.score == 0.0
 
 
 class _ParallelRetriever(BaseRetriever):

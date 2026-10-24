@@ -49,6 +49,11 @@ from app.rag.activity import emit_activity
 
 logger = logging.getLogger(__name__)
 
+# This is a fallback trigger, not a hard relevance cutoff. Exact metadata
+# filters and live Gmail membership must not be rejected because an embedding
+# score is unavailable.
+MIN_SEMANTIC_CONFIDENCE = 0.65
+
 
 def scoped_mailbox_documents(db, user_id, query, filters, email_ids=None):
     """Enumerate authorized Primary records, preserving explicit API filters.
@@ -169,7 +174,10 @@ def documents_to_citations(documents: List[Document]) -> List[RetrievedCitation]
 
         score = meta.get("score")
         if score is None:
-            score = 0.85
+            score = meta.get("similarity_score")
+        if score is None:
+            # Missing scores are unknown, not high-confidence matches.
+            score = 0.0
 
         citations.append(
             RetrievedCitation(
@@ -297,7 +305,8 @@ class PostgresSemanticRetriever(BaseRetriever):
                     continue
 
             meta = dict(doc.metadata or {})
-            meta["score"] = round(float(score) if score is not None else 0.85, 4)
+            meta["score"] = round(float(score), 4) if score is not None else 0.0
+            meta.setdefault("score_source", "vector_similarity" if score is not None else "unscored")
             meta.setdefault("source", "postgresql")
             meta["retrieval_mode"] = self.search_type
             meta["search_type"] = self.search_type
@@ -519,7 +528,8 @@ class GmailCustomHybridRetriever(BaseRetriever):
                 if allowed_ids is not None and str(doc.metadata.get("email_id", "")) not in allowed_ids:
                     continue
                 meta = dict(doc.metadata or {})
-                meta["score"] = round(float(score) if score is not None else 0.85, 4)
+                meta["score"] = round(float(score), 4) if score is not None else 0.0
+                meta.setdefault("score_source", "vector_similarity" if score is not None else "unscored")
                 meta.setdefault("source", "postgresql")
                 semantic_docs.append(Document(page_content=doc.page_content, metadata=meta))
         except Exception as exc:
@@ -638,6 +648,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
                                 "is_read": e.is_read,
                                 "labels": self.label or "EMAIL",
                                 "score": 1.0,
+                                "score_source": "keyword_exact",
                                 "source": "postgresql",
                             },
                         )
@@ -673,8 +684,10 @@ class GmailCustomHybridRetriever(BaseRetriever):
         final_docs: List[Document] = []
         for eid in sorted_eids[:self.top_k]:
             doc = doc_store[eid]
-            doc.metadata["score"] = round(fused_scores[eid], 4)
-            doc.metadata.setdefault("fused_score", round(fused_scores[eid], 4))
+            doc.metadata["fused_score"] = round(fused_scores[eid], 4)
+            if doc.metadata.get("score") is None:
+                doc.metadata["score"] = round(fused_scores[eid], 4)
+                doc.metadata["score_source"] = "rank_fusion"
             doc.metadata.setdefault("retrieval_strategy", "hybrid_rrf")
             final_docs.append(doc)
 
@@ -1563,7 +1576,7 @@ class RetrievalStrategyEvaluator:
 
         t0 = time.perf_counter()
         doc_count = len(documents)
-        scores = [float(d.metadata.get("score") or 0.85) for d in documents[:k]]
+        scores = [float(d.metadata.get("score") or 0.0) for d in documents[:k]]
         score_margin = (max(scores) - min(scores)) if len(scores) > 1 else 1.0
 
         is_ambiguous = score_margin < 0.05 and doc_count > 1

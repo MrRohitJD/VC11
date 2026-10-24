@@ -261,6 +261,16 @@ export default function SearchActivity({
 									<div className="search-activity-step-copy">
 										<div className="search-activity-step-title"><strong>{meta.label}</strong><span>{statusLabel(status)}</span></div>
 										<p>{event.observation || 'Stage completed.'}</p>
+										{Number.isFinite(Number(event.top_score)) && (
+											<small className="search-activity-score">
+												{event.score_source === 'metadata_filter'
+													? 'Exact metadata filter'
+													: `Top score ${(Number(event.top_score) * 100).toFixed(1)}%`}
+												{event.score_threshold != null
+													? ` · fallback at ${(Number(event.score_threshold) * 100).toFixed(1)}%`
+													: ''}
+											</small>
+										)}
 									</div>
 									{Number.isFinite(Number(event.duration_ms))
 										? <time title="Stage duration">{formatElapsed(Number(event.duration_ms))}</time>
