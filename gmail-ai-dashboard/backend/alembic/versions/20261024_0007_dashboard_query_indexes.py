@@ -1,14 +1,14 @@
 """Add the selective index used by dashboard classification lookups.
 
 Revision ID: 20261024_0007
-Revises: 20261024_0005
+Revises: 20261024_0006
 """
 
 from alembic import op
 
 
 revision = "20261024_0007"
-down_revision = "20261024_0005"
+down_revision = "20261024_0006"
 branch_labels = None
 depends_on = None
 

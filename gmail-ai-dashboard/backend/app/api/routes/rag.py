@@ -2,8 +2,8 @@
 
 Provides:
 - POST /api/rag/chat: Run 10-pattern Gmail AI Assistant with citations and tool reasoning
-- POST /api/rag/index: Trigger incremental ChromaDB indexing for user emails
-- GET  /api/rag/status: Diagnostic overview of ChromaDB and PostgreSQL sync status
+- POST /api/rag/index: Trigger incremental PostgreSQL pgvector indexing for user emails
+- GET  /api/rag/status: Diagnostic overview of PostgreSQL vector and metadata sync status
 - GET  /api/rag/sessions: User conversational sessions list
 - GET  /api/rag/sessions/{id}: Message history and citation logs for a session
 - DELETE /api/rag/sessions/{id}: Delete a chat session
@@ -287,7 +287,7 @@ def trigger_rag_indexing(
     user: User = Depends(get_user_for_rag),
     db: Session = Depends(get_db),
 ):
-    """Run incremental indexing of user's emails into ChromaDB vector store."""
+    """Run incremental indexing of user's emails into PostgreSQL pgvector."""
     try:
         results = default_pipeline.index_user_emails(
             db=db,
@@ -314,8 +314,8 @@ def get_rag_system_status(
     user: User = Depends(get_user_for_rag),
     db: Session = Depends(get_db),
 ):
-    """Return live status of ChromaDB vector collection, chunks, and pending approvals."""
-    vector_count = default_vectorstore.count(user.id) if settings.vector_backend == "postgres" else default_vectorstore.count()
+    """Return live status of the PostgreSQL pgvector index and pending approvals."""
+    vector_count = default_vectorstore.count(user.id)
 
     total_chunks = db.scalar(
         select(func.count(EmailChunk.id))

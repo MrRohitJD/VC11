@@ -14,8 +14,20 @@ from typing import Any, TypedDict
 from uuid import UUID
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.sqlite import SqliteSaver
+
+# LangGraph is an optional execution enhancement.  The core assistant can run
+# through the LangChain agent when an older/minimal deployment has not yet
+# installed the LangGraph packages.  Importing the API must not fail merely
+# because that optional layer is absent.
+try:
+    from langgraph.graph import StateGraph, START, END
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    _LANGGRAPH_AVAILABLE = True
+except ImportError:
+    StateGraph = None
+    START = END = None
+    SqliteSaver = None
+    _LANGGRAPH_AVAILABLE = False
 from langsmith import Client, trace, tracing_context
 
 from app.core.config import settings
@@ -85,6 +97,8 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         tasks = [retrieval.label, "Validate matching email evidence", "Answer each part of your request"]
         if state["intent"] in {"ACTION_DRAFT", "PLAN_AND_EXECUTE"}:
             tasks.append("Prepare a draft for your review when requested")
+        emit_activity("plan_workflow", "Prepared a bounded mailbox workflow", strategy=retrieval.strategy,
+                      providers=retrieval.providers, routing_reason=retrieval.routing_reason)
         return {"plan": tasks, "search_plan": retrieval.public()}
 
     def retrieve(state):
@@ -340,4 +354,11 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
                              session_id=str(session.id), message_id=str(message.id))
 
 
-default_assistant = LangGraphMailboxAssistant()
+if _LANGGRAPH_AVAILABLE:
+    default_assistant = LangGraphMailboxAssistant()
+else:
+    logger.warning(
+        "LangGraph is unavailable; using the compatible LangChain assistant path. "
+        "Install langgraph and its checkpoint packages to enable graph checkpoints."
+    )
+    default_assistant = GmailAIAssistant()

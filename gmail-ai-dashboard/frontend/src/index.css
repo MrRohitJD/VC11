@@ -191,6 +191,7 @@ button { border: 0; cursor: pointer; }
 .erase-cancel:hover { background: #ebedf2; }
 .erase-confirm { align-items: center; background: #e54b47; border-radius: 7px; color: white; display: flex; font-size: 12px; font-weight: 600; gap: 6px; padding: 10px 20px; }
 .erase-confirm:hover { background: #d03f3b; }
+.erase-confirm:disabled, .erase-cancel:disabled { cursor: wait; opacity: .72; }
 
 /* ============================================================
    SETTINGS PAGE

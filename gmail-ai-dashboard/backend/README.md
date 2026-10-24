@@ -46,10 +46,11 @@ retain all accepted sources instead of silently truncating the result to five.
 
 ## PostgreSQL and pgvector setup
 
-Production retrieval uses the configured PostgreSQL database with pgvector. Set
-`RAG_VECTOR_BACKEND=postgres` (the application default) and ensure the database
-has the `vector` extension. ChromaDB is retained only as an explicit local
-fallback with `RAG_VECTOR_BACKEND=chroma`.
+Retrieval and indexing use the configured PostgreSQL database with pgvector.
+Set `RAG_VECTOR_BACKEND=postgres` (the application default) and ensure the
+database has the `vector` extension. Local ChromaDB storage is no longer
+supported; all vectors and searchable email metadata live in
+`email_embeddings`.
 
 Apply the migrations, including the pgvector embedding metadata and HNSW index,
 before indexing mail:

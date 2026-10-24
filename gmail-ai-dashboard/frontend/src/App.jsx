@@ -496,7 +496,7 @@ function AuthPage({ signup }) {
 	return <div className={`auth-shell ${signup ? 'auth-signup' : 'auth-login'}`}><main className="auth-card"><div className="auth-brand"><GmailMark /><strong>Gmail AI Dashboard</strong></div><div className="auth-copy"><h1>{signup ? 'Create Your Account' : 'Welcome Back'}</h1><p>{signup ? 'Get started with your Gmail AI Dashboard' : 'Sign in to access your Gmail AI Dashboard'}</p></div><form className="auth-form" onSubmit={submit}><button className="google-button" type="submit"><span className="google-g">G</span>{signup ? 'Sign up with Google' : 'Continue with Google'}</button><p>Gmail sign-in is available to invited test users.</p><div className="auth-divider"><span /> <em>OR</em> <span /></div><button className="google-button" type="button" onClick={tryDemo} disabled={openingDemo}>{openingDemo ? 'Opening demo...' : 'Open demo@gmail.com'}</button><p>Explore a read-only mailbox with fictional emails. No Google sign-in needed.</p>{demoError && <p role="alert">{demoError}</p>}<p className="auth-switch">{signup ? 'Already have an account?' : "Don't have an account?"} <button type="button" onClick={() => navigate(signup ? '/login' : '/signup')}>{signup ? 'Sign in' : 'Sign up'}</button></p></form><AuthIllustration signup={signup} /><p className="auth-tagline">{signup ? 'Join and make your inbox work smarter.' : 'Your Gmail. Smarter with AI.'}</p></main></div>;
 }
 
-function EraseDialog({ open, onClose, onConfirm }) {
+function EraseDialog({ open, onClose, onConfirm, confirming }) {
 	if (!open) return null;
 	return <div className="modal-overlay" onClick={onClose}>
 		<div className="modal-card erase-modal" onClick={(e) => e.stopPropagation()}>
@@ -505,14 +505,15 @@ function EraseDialog({ open, onClose, onConfirm }) {
 			</div>
 			<h2>Erase all data?</h2>
 			<p>
-				This will permanently delete all data associated with your account from our database,
-				including synchronized emails, labels, profile data, and stored OAuth tokens.
+				This will permanently delete your synchronized emails and all data stored with them,
+				including subjects, bodies, dates, attachments, classifications, and AI embeddings.
+				Your profile and labels will be kept.
 			</p>
 			<p className="erase-warning">This action cannot be undone.</p>
 			<div className="erase-actions">
-				<button className="erase-cancel" onClick={onClose}>Cancel</button>
-				<button className="erase-confirm" onClick={onConfirm}>
-					<UserX size={15} /> Erase All Data
+				<button type="button" className="erase-cancel" onClick={onClose} disabled={confirming}>Cancel</button>
+				<button type="button" className="erase-confirm" onClick={onConfirm} disabled={confirming} aria-busy={confirming}>
+					<UserX size={15} /> {confirming ? 'Erasing...' : 'Erase All Data'}
 				</button>
 			</div>
 		</div>
@@ -523,6 +524,7 @@ function SettingsPage() {
 	const { user, logout, eraseAllData } = useAuth();
 	const navigate = useNavigate();
 	const [eraseOpen, setEraseOpen] = useState(false);
+	const [erasing, setErasing] = useState(false);
 	const [eraseToast, setEraseToast] = useState('');
 	const [exportStats, setExportStats] = useState(null);
 	const [includeBody, setIncludeBody] = useState(false);
@@ -574,6 +576,8 @@ function SettingsPage() {
 	};
 
 	const handleErase = async () => {
+		if (erasing) return;
+		setErasing(true);
 		try {
 			await eraseAllData();
 			setEraseOpen(false);
@@ -581,6 +585,8 @@ function SettingsPage() {
 			setTimeout(() => navigate('/login', { replace: true }), 1500);
 		} catch {
 			setEraseToast('Failed to erase data. Please try again.');
+		} finally {
+			setErasing(false);
 		}
 	};
 
@@ -760,16 +766,16 @@ function SettingsPage() {
 			<section className="settings-section settings-danger">
 				<h2>Danger Zone</h2>
 				<p className="settings-desc">
-					Permanently delete all your data from this application, including synced emails,
-					labels, tokens, and your user profile. This does not affect your actual Gmail account.
+					Permanently delete your synced emails and all related stored mail data.
+					Your profile and labels are preserved. This does not affect your actual Gmail account.
 				</p>
-				<button className="settings-btn erase-btn" onClick={() => setEraseOpen(true)}>
+				<button type="button" className="settings-btn erase-btn" onClick={() => setEraseOpen(true)}>
 					<UserX size={16} /> Erase All Data
 				</button>
 			</section>
 		</div>
 
-		<EraseDialog open={eraseOpen} onClose={() => setEraseOpen(false)} onConfirm={handleErase} />
+		<EraseDialog open={eraseOpen} onClose={() => setEraseOpen(false)} onConfirm={handleErase} confirming={erasing} />
 		{eraseToast && <div className="toast"><Zap size={16} /> {eraseToast}</div>}
 	</div>;
 }

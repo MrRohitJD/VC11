@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Any, List, Optional
 from uuid import UUID
@@ -186,7 +187,7 @@ def format_context_from_citations(citations: List[RetrievedCitation]) -> str:
 
 
 from app.rag.retrieval import (
-    ChromaSemanticRetriever,
+    PostgresSemanticRetriever,
     ConditionalMultiQueryRetriever,
     ContextualCompressionRetriever,
     EmailKeyPointsCompressor,
@@ -365,29 +366,45 @@ class GroundedRAGChain:
             )
             logger.info("Rewrote ambiguous query '%s' -> '%s'", query, effective_query)
 
-        # 2. Step 2: Determine retrieval strategy
-        search_plan = plan_retrieval(effective_query, filters, use_multi_query, retrieval_mode)
+        # 2. Step 2: Determine retrieval strategy and provider fan-out.
+        # Live discovery is only routed for requests where freshness or broad
+        # Primary membership is valuable; focused requests stay on the fast
+        # local vector/BM25 path.
+        current_user = db.get(User, UUID(str(user_id)))
+        mcp_allowed = bool(settings.gmail_mcp_enabled and not (current_user and current_user.is_demo))
+        search_plan = plan_retrieval(
+            effective_query, filters, use_multi_query, retrieval_mode,
+            mcp_enabled=mcp_allowed,
+        )
         all_requested = search_plan.exhaustive
         date_only = search_plan.date_only
         sender_only = sender_only_request(effective_query)
         envelope_only = date_only or sender_only
         use_multi_query = search_plan.multi_query
-        emit_activity("plan_search", search_plan.label, plan=search_plan.public())
+        emit_activity("plan_search", search_plan.label, plan=search_plan.public(),
+                      providers=search_plan.providers, routing_reason=search_plan.routing_reason)
         live_status = None
         live_failed = False
         live_error = ''
-        current_user = db.get(User, UUID(str(user_id)))
-        if settings.gmail_mcp_enabled and not (current_user and current_user.is_demo):
-            emit_activity("gmail_search", "Searching live Primary mail", status="running")
+        live_executor = None
+        live_future = None
+        if "gmail_mcp" in search_plan.providers and mcp_allowed:
+            # The MCP client owns its subprocess/session.  Running it in a
+            # bounded worker overlaps network discovery with local vector
+            # retrieval without sharing the request SQLAlchemy Session.
+            emit_activity("gmail_search", "Searching live Primary mail in parallel", status="running",
+                          provider="gmail_mcp", parallel=True)
             try:
                 from app.rag.gmail_mcp import search_live_primary
-                live_status = search_live_primary(user_id, effective_query)
-                db.expire_all()
-                emit_activity("gmail_search", f"Read {len(live_status['email_ids'])} live Primary emails", count=len(live_status["email_ids"]), status="completed" if live_status["complete"] else "warning")
+                live_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gmail-mcp")
+                live_future = live_executor.submit(search_live_primary, user_id, effective_query)
             except Exception as exc:
                 live_error = error_code(exc)
-                logger.warning("Gmail MCP discovery unavailable: %s", live_error)
                 live_failed = True
+                logger.warning("Gmail MCP discovery could not start: %s", live_error)
+                if live_executor is not None:
+                    live_executor.shutdown(wait=False, cancel_futures=True)
+                    live_executor = None
                 emit_activity("gmail_search", "Live search unavailable; using synced Primary mail", status="warning")
         candidate_k = max(top_k * 4, 20)
         if all_requested:
@@ -395,10 +412,11 @@ class GroundedRAGChain:
         is_hybrid_mode = retrieval_mode == "hybrid" or search_plan.strategy in {"hybrid_rrf", "structured"}
         has_exact, exact_reason = detect_exact_identifier_or_term(effective_query, filters)
         search_type = "mmr" if search_plan.diverse else "similarity"
-        emit_activity("retrieve_candidates", search_plan.label, status="running", strategy=search_plan.strategy)
+        emit_activity("retrieve_candidates", search_plan.label, status="running", strategy=search_plan.strategy,
+                      providers=search_plan.providers)
 
         # Primary fast retriever: LangChain + configured vector backend similarity search
-        semantic_retriever = ChromaSemanticRetriever(
+        semantic_retriever = PostgresSemanticRetriever(
             user_id=user_str,
             db_session=db,
             primary_only=True,
@@ -417,7 +435,8 @@ class GroundedRAGChain:
         retrieval_strategy_used = "standard"
         docs: List[Document] = []
 
-        if not all_requested and not envelope_only and not is_hybrid_mode and not has_exact and use_multi_query is not True:
+        run_vector = "vector" in search_plan.providers
+        if run_vector and not all_requested and not envelope_only and not is_hybrid_mode and not has_exact and use_multi_query is not True:
             # Fast default path: single query embedding through the configured vector backend
             docs = semantic_retriever.invoke(effective_query)
             if docs:
@@ -431,7 +450,7 @@ class GroundedRAGChain:
             min_confidence_score=0.65,
         )
 
-        if not (all_requested or envelope_only) and (is_hybrid_mode or has_exact or needs_fallback or use_multi_query is True):
+        if run_vector and not (all_requested or envelope_only) and (is_hybrid_mode or has_exact or needs_fallback or use_multi_query is True):
             logger.info(
                 "Using Hybrid Keyword + Vector Retrieval with RRF (exact=%s: %s, fallback=%s: %s)",
                 has_exact,
@@ -472,23 +491,51 @@ class GroundedRAGChain:
                 docs = hybrid_retriever.invoke(effective_query)
                 retrieval_strategy_used = "standard"
 
+        if live_future is not None:
+            try:
+                live_status = live_future.result()
+                db.expire_all()
+                emit_activity("gmail_search", f"Read {len(live_status['email_ids'])} live Primary emails",
+                              count=len(live_status["email_ids"]), provider="gmail_mcp",
+                              status="completed" if live_status["complete"] else "warning")
+            except Exception as exc:
+                live_error = error_code(exc)
+                logger.warning("Gmail MCP discovery unavailable: %s", live_error)
+                live_failed = True
+                emit_activity("gmail_search", "Live search unavailable; using synced Primary mail",
+                              provider="gmail_mcp", status="warning")
+            finally:
+                live_executor.shutdown(wait=True)
+
+        eligible_ids = None
         if all_requested or envelope_only:
             # Enumerate records, not chunks: no rank cutoff or missing-index loss.
             docs = scoped_mailbox_documents(db, user_id, effective_query, filters)
+            eligible_ids = {str(doc.metadata.get("email_id")) for doc in docs}
             retrieval_strategy_used = "exhaustive_primary"
         else:
-            lexical_pool = [] if filters.get("custom_filter") else scoped_mailbox_documents(db, user_id, effective_query, filters)
+            lexical_pool = (
+                [] if filters.get("custom_filter") or "bm25" not in search_plan.providers
+                else scoped_mailbox_documents(db, user_id, effective_query, filters)
+            )
             if live_status and live_status["complete"]:
                 live_ids = set(live_status["email_ids"])
                 lexical_pool = [doc for doc in lexical_pool if str(doc.metadata["email_id"]) in live_ids]
+            if lexical_pool:
+                # scoped_mailbox_documents has already applied the full
+                # tenant/Primary/date filter; reuse its IDs instead of
+                # issuing a second full Primary-ID query below.
+                eligible_ids = {str(doc.metadata.get("email_id")) for doc in lexical_pool}
             lexical_docs = bm25_rank(lexical_pool, effective_query, limit=candidate_k)
             docs = fuse_rankings(docs, lexical_docs, limit=candidate_k)
             retrieval_strategy_used = search_plan.strategy
-            emit_activity("keyword_search", f"BM25 found {len(lexical_docs)} keyword candidates", count=len(lexical_docs))
+            emit_activity("keyword_search", f"BM25 found {len(lexical_docs)} keyword candidates",
+                          count=len(lexical_docs), provider="bm25")
 
         # Use current database metadata and full bodies even for legacy indexes.
         docs = hydrate_email_documents(docs, db, user_id, full_body=True)
-        eligible_ids = set(primary_email_ids(db, user_id, effective_query))
+        if eligible_ids is None:
+            eligible_ids = set(primary_email_ids(db, user_id, effective_query))
         docs = [doc for doc in docs if str(doc.metadata.get("email_id")) in eligible_ids]
         unique_docs = {}
         for doc in docs:

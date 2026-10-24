@@ -2,7 +2,7 @@
 import math
 import re
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from langchain_core.documents import Document
 from app.rag.search_plan import exhaustive_request, date_only_request
@@ -27,17 +27,46 @@ class RetrievalPlan:
     label: str
     date_start: str | None = None
     date_end: str | None = None
+    # Public provider routing is deliberately descriptive.  It tells the UI
+    # which bounded retrieval branches are active without exposing prompts or
+    # model reasoning.
+    providers: list[str] = field(default_factory=list)
+    routing_reason: str = ""
 
     def public(self):
         return asdict(self)
 
 
-def plan_retrieval(query, filters=None, use_multi_query=None, mode="similarity"):
+def plan_retrieval(query, filters=None, use_multi_query=None, mode="similarity",
+                   mcp_enabled=None):
+    """Choose the retrieval strategy and the providers worth paying for.
+
+    The local index is the fast default.  Live Gmail discovery is reserved for
+    freshness-sensitive or broad Primary queries, where it provides current
+    label/date membership.  Exact and structured requests stay local because
+    their SQL/BM25 path is both faster and more precise than broad Gmail
+    discovery.  Complex requests fan out to vector and BM25, with live Gmail
+    added when freshness is part of the request.
+    """
+    if mcp_enabled is None:
+        try:
+            from app.core.config import settings
+            mcp_enabled = bool(settings.gmail_mcp_enabled)
+        except Exception:
+            mcp_enabled = False
+
+    query = query or ""
     exhaustive, date_only = exhaustive_request(query), date_only_request(query)
     bounds = received_date_bounds(query)
     diverse = bool(re.search(r"\b(?:overview|different topics|across|variety|themes)\b", query, re.I))
     complex_query = bool(re.search(r"\b(?:compare|versus|both|across)\b|\band\b.+\b(?:bills?|interviews?|meetings?|payments?)\b", query, re.I))
     multi = use_multi_query is True or (use_multi_query is None and complex_query)
+    exact_filter = any((filters or {}).get(key) for key in
+                       ("email_id", "gmail_message_id", "thread_id", "sender", "label"))
+    freshness = bool(re.search(
+        r"\b(?:today|yesterday|latest|newest|recent|recently|inbox|unread|upcoming|received|last|past)\b",
+        query, re.I,
+    ))
     if exhaustive or date_only:
         strategy, label, multi = "exhaustive_primary", "Read every matching Primary email", False
     elif any((filters or {}).get(key) for key in ("email_id", "gmail_message_id", "thread_id")):
@@ -47,9 +76,29 @@ def plan_retrieval(query, filters=None, use_multi_query=None, mode="similarity")
     elif diverse or mode == "mmr":
         strategy, label = "mmr", "Search for diverse email context"
     else:
-        strategy, label = "hybrid_rrf", "Combine keyword and semantic search"
+        strategy, label = "vector", "Search the semantic email index"
+
+    if exhaustive or date_only:
+        providers = ["bm25"]
+        routing_reason = "Broad or date-scoped Primary membership needs lexical coverage"
+    elif exact_filter:
+        providers = ["bm25", "vector"]
+        routing_reason = "Explicit sender/label/identifier filters use precise local retrieval"
+    elif multi or diverse:
+        providers = ["vector", "bm25"]
+        routing_reason = "Multi-topic requests benefit from dense and lexical recall"
+    else:
+        providers = ["vector"]
+        routing_reason = "Focused requests use the indexed vector path first; lexical fallback is available on low confidence"
+
+    if mcp_enabled and (exhaustive or date_only or freshness or multi or diverse):
+        providers.append("gmail_mcp")
+        routing_reason += "; live Gmail validates current Primary membership"
+
     return RetrievalPlan(strategy, exhaustive, date_only, multi, diverse or mode == "mmr", label,
-                         bounds[0].isoformat() if bounds else None, bounds[1].isoformat() if bounds else None)
+                         bounds[0].isoformat() if bounds else None,
+                         bounds[1].isoformat() if bounds else None,
+                         providers, routing_reason)
 
 
 def tokens(text):
