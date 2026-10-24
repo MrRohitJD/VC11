@@ -60,6 +60,21 @@ class Settings(BaseSettings):
         0,
         validation_alias=AliasChoices("LLM_MAX_RETRIES"),
     )
+    # Keep interactive mailbox answers bounded.  These defaults are deliberately
+    # conservative: a grounded answer should be concise, while long provider
+    # retries are more damaging to UX than a short, source-backed response.
+    llm_max_completion_tokens: int = Field(
+        1600,
+        ge=256,
+        le=8192,
+        validation_alias=AliasChoices("LLM_MAX_COMPLETION_TOKENS"),
+    )
+    rag_relevance_parallelism: int = Field(
+        2,
+        ge=1,
+        le=8,
+        validation_alias=AliasChoices("RAG_RELEVANCE_PARALLELISM"),
+    )
 
     embedding_provider: str = Field("azure_openai", validation_alias=AliasChoices("RAG_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"))
     embedding_model_name: str = Field("text-embedding-3-large", validation_alias=AliasChoices("RAG_EMBEDDING_MODEL", "EMBEDDING_MODEL"))

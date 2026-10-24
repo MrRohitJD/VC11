@@ -123,7 +123,11 @@ export const getRagSessions = (limit = 20) => api.get('/api/rag/sessions', { par
 export const getRagSession = (sessionId) => api.get(`/api/rag/sessions/${sessionId}`);
 export const deleteRagSession = (sessionId) => api.delete(`/api/rag/sessions/${sessionId}`);
 export const getRagApprovals = (statusFilter) => api.get('/api/rag/approvals', { params: { status_filter: statusFilter } });
-export const approveRagEmail = (approvalId) => api.post(`/api/rag/approvals/${approvalId}/approve`);
+export const updateRagEmailDraft = (approvalId, draft) => api.patch(`/api/rag/approvals/${approvalId}`, draft);
+export const approveRagEmail = (approvalId, draft) => api.post(
+	`/api/rag/approvals/${approvalId}/approve`,
+	draft || undefined,
+);
 export const rejectRagEmail = (approvalId) => api.post(`/api/rag/approvals/${approvalId}/reject`);
 export const getRagSourceEmail = (emailId) => api.get(`/api/rag/sources/${emailId}`);
 

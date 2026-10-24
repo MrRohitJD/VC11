@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 from app.core.security import get_current_user
 from app.database.connection import get_db, SessionLocal
 from app.services.chat_quota import reserve_chat_request
-from app.services.gmail_service import send_gmail_message
+from app.services.gmail_service import normalize_recipient_header, send_gmail_message
 from app.rag.activity import activity_context
 from app.models.email import Email, GmailAccount, User
 from app.models.rag import (
@@ -121,6 +121,61 @@ class ApprovalActionResponse(BaseModel):
     approval_id: str
     status: str
     message: str
+
+
+class ApprovalDraftUpdate(BaseModel):
+    """Editable fields for a pending outbound draft.
+
+    Updates are accepted only while the approval is still PENDING. The final
+    approval request applies the same validation immediately before delivery,
+    so the user reviews and authorizes the exact bytes that are sent.
+    """
+
+    recipient_email: str = Field(..., min_length=3, max_length=320)
+    cc: str = Field("", max_length=5000)
+    bcc: str = Field("", max_length=5000)
+    subject: str = Field("", max_length=998)
+    draft_body: str = Field(..., max_length=100_000)
+
+
+def _validated_draft_values(body: ApprovalDraftUpdate) -> tuple[str, str, str, str, str]:
+    try:
+        recipient = normalize_recipient_header(body.recipient_email, "recipient", required=True)
+        cc = normalize_recipient_header(body.cc, "Cc")
+        bcc = normalize_recipient_header(body.bcc, "Bcc")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    subject = body.subject.strip()
+    draft_body = body.draft_body.strip()
+    if not draft_body:
+        raise HTTPException(status_code=422, detail="The email body cannot be empty.")
+    return recipient, cc, bcc, subject, draft_body
+
+
+def _find_user_approval(db: Session, approval_id: str, user: User) -> EmailSendApproval:
+    try:
+        a_uuid = UUID(approval_id.strip())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid approval UUID.")
+
+    approval = db.scalar(
+        select(EmailSendApproval).where(
+            EmailSendApproval.id == a_uuid,
+            EmailSendApproval.user_id == user.id,
+        )
+    )
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval request not found.")
+    return approval
+
+
+def _apply_draft_update(approval: EmailSendApproval, body: ApprovalDraftUpdate) -> None:
+    recipient, cc, bcc, subject, draft_body = _validated_draft_values(body)
+    approval.recipient_email = recipient
+    approval.cc = cc or None
+    approval.bcc = bcc or None
+    approval.subject = subject
+    approval.draft_body = draft_body
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +547,8 @@ def get_approvals(
         {
             "id": str(a.id),
             "recipient_email": a.recipient_email,
+            "cc": a.cc or "",
+            "bcc": a.bcc or "",
             "subject": a.subject or "",
             "draft_body": a.draft_body,
             "status": a.status,
@@ -505,30 +562,43 @@ def get_approvals(
     ]
 
 
+@router.patch("/approvals/{approval_id}", response_model=ApprovalActionResponse)
+def update_email_draft(
+    approval_id: str,
+    body: ApprovalDraftUpdate,
+    user: User = Depends(get_user_for_rag),
+    db: Session = Depends(get_db),
+):
+    """Save edits to a draft without granting delivery approval."""
+    approval = _find_user_approval(db, approval_id, user)
+    if approval.status != "PENDING":
+        raise HTTPException(status_code=400, detail=f"Draft cannot be edited from status '{approval.status}'.")
+    _apply_draft_update(approval, body)
+    db.commit()
+    return ApprovalActionResponse(
+        approval_id=str(approval.id),
+        status=approval.status,
+        message="Draft changes saved. Delivery still requires explicit approval.",
+    )
+
+
 @router.post("/approvals/{approval_id}/approve", response_model=ApprovalActionResponse)
 def approve_email_send(
     approval_id: str,
+    body: ApprovalDraftUpdate | None = None,
     user: User = Depends(get_user_for_rag),
     db: Session = Depends(get_db),
 ):
     """Explicit human approval to authorize sending drafted email."""
-    try:
-        a_uuid = UUID(approval_id.strip())
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid approval UUID.")
-
-    approval = db.scalar(
-        select(EmailSendApproval).where(
-            EmailSendApproval.id == a_uuid,
-            EmailSendApproval.user_id == user.id,
-        )
-    )
-    if not approval:
-        raise HTTPException(status_code=404, detail="Approval request not found.")
+    approval = _find_user_approval(db, approval_id, user)
 
     if approval.status != "PENDING":
         raise HTTPException(status_code=400, detail=f"Draft cannot be approved from status '{approval.status}'.")
 
+    # The review window may edit all outbound fields. Apply those edits before
+    # changing status or calling Gmail so the approved record is the one sent.
+    if body is not None:
+        _apply_draft_update(approval, body)
     approval.status = "APPROVED"
     approval.approved_at = datetime.now(timezone.utc)
 
@@ -545,7 +615,15 @@ def approve_email_send(
 
     db.commit()
     try:
-        delivery = send_gmail_message(db, user, approval.recipient_email, approval.subject, approval.draft_body)
+        delivery = send_gmail_message(
+            db,
+            user,
+            approval.recipient_email,
+            approval.subject,
+            approval.draft_body,
+            approval.cc,
+            approval.bcc,
+        )
     except Exception as exc:
         # A delivery failure must remain retryable; approval alone is not
         # evidence that Gmail accepted the message.
@@ -573,19 +651,10 @@ def reject_email_send(
     db: Session = Depends(get_db),
 ):
     """Explicit human rejection to cancel drafted email."""
-    try:
-        a_uuid = UUID(approval_id.strip())
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid approval UUID.")
+    approval = _find_user_approval(db, approval_id, user)
 
-    approval = db.scalar(
-        select(EmailSendApproval).where(
-            EmailSendApproval.id == a_uuid,
-            EmailSendApproval.user_id == user.id,
-        )
-    )
-    if not approval:
-        raise HTTPException(status_code=404, detail="Approval request not found.")
+    if approval.status != "PENDING":
+        raise HTTPException(status_code=400, detail=f"Draft cannot be discarded from status '{approval.status}'.")
 
     approval.status = "REJECTED"
     db.commit()

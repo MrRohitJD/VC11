@@ -7,7 +7,8 @@ import time
 import base64
 from datetime import datetime, timezone
 from email.message import EmailMessage
-from email.utils import parsedate_to_datetime
+from email.utils import getaddresses, parsedate_to_datetime
+import re
 from uuid import UUID
 
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -81,6 +82,8 @@ def send_gmail_message(
 	recipient: str,
 	subject: str | None,
 	body: str,
+	cc: str | None = None,
+	bcc: str | None = None,
 ) -> dict:
 	"""Deliver one approved message through the user's authenticated Gmail API."""
 	account = db.scalar(select(GmailAccount).where(GmailAccount.user_id == user.id))
@@ -89,11 +92,16 @@ def send_gmail_message(
 	scopes = set((account.scope or "").split())
 	if scopes and GMAIL_SEND_SCOPE not in scopes:
 		raise PermissionError("Gmail send permission is missing; reconnect Gmail to enable sending")
-	if not recipient or "@" not in recipient:
-		raise ValueError("A valid recipient email address is required")
+	to_header = normalize_recipient_header(recipient, "recipient", required=True)
+	cc_header = normalize_recipient_header(cc, "Cc")
+	bcc_header = normalize_recipient_header(bcc, "Bcc")
 
 	message = EmailMessage()
-	message["To"] = recipient.strip()
+	message["To"] = to_header
+	if cc_header:
+		message["Cc"] = cc_header
+	if bcc_header:
+		message["Bcc"] = bcc_header
 	message["Subject"] = (subject or "").strip()
 	message.set_content(body or "")
 	raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
@@ -103,6 +111,26 @@ def send_gmail_message(
 			userId="me", body={"raw": raw}
 		).execute()
 	)
+
+
+def normalize_recipient_header(value: str | None, field_name: str, *, required: bool = False) -> str:
+	"""Validate and normalize one or more comma/semicolon-separated addresses."""
+	raw = str(value or "").strip()
+	if not raw:
+		if required:
+			raise ValueError("A valid recipient email address is required")
+		return ""
+	if "\r" in raw or "\n" in raw:
+		raise ValueError(f"{field_name} contains an invalid line break")
+
+	entries = getaddresses([raw.replace(";", ",")])
+	addresses = [address.strip() for _, address in entries]
+	if not addresses or any(
+		not re.fullmatch(r"[^@\s,<>]+@[^@\s,<>]+\.[^@\s,<>]+", address)
+		for address in addresses
+	):
+		raise ValueError(f"Enter valid email address(es) for {field_name}")
+	return ", ".join(addresses)
 
 
 # ------------------------------------------------------------------

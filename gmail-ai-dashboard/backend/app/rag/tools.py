@@ -15,12 +15,13 @@ from uuid import UUID
 
 from langchain_core.tools import tool
 from sqlalchemy import or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.email import AiCategory, Email, EmailClassification, EmailLabel, GmailAccount, Label, User
 from app.models.rag import Attachment, EmailSendApproval
 from app.rag.mailbox_scope import mailbox_email_condition
-from app.services.gmail_service import send_gmail_message
+from app.services.gmail_service import normalize_recipient_header, send_gmail_message
 from app.rag.retrieval import (
     PostgresSemanticRetriever,
     ConditionalMultiQueryRetriever,
@@ -487,19 +488,35 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         return json.dumps(res, indent=2)
 
     @tool
-    def draft_email(recipient: str, subject: str, body: str) -> str:
+    def draft_email(recipient: str, subject: str, body: str, cc: str = "", bcc: str = "") -> str:
         """Create a drafted outbound email requiring user confirmation before sending."""
-        sanitized = sanitize_tool_args({"recipient": recipient, "subject": subject, "body": body})
+        try:
+            recipient = normalize_recipient_header(recipient, "recipient", required=True)
+            cc = normalize_recipient_header(cc, "Cc")
+            bcc = normalize_recipient_header(bcc, "Bcc")
+        except ValueError as exc:
+            return f"Draft could not be created: {exc}"
+        sanitized = sanitize_tool_args({"recipient": recipient, "cc": cc, "bcc": bcc, "subject": subject, "body": body})
         logger.info("Tool chosen: draft_email with args: %s", sanitized)
         approval = EmailSendApproval(
             user_id=user_uuid,
             recipient_email=recipient,
+            cc=cc or None,
+            bcc=bcc or None,
             subject=subject,
             draft_body=body,
             status="PENDING",
         )
         db.add(approval)
-        db.commit()
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
+            logger.exception("Could not persist drafted email approval")
+            return (
+                "I couldn't save the draft because the email database schema is out of date. "
+                "Please run `alembic upgrade head` from the backend directory and try again."
+            )
         return (
             f"Draft created successfully (Approval ID: {approval.id}). "
             f"Subject: '{subject}' to '{recipient}'. "
@@ -507,10 +524,24 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         )
 
     @tool
-    def schedule_email(recipient: str, subject: str, body: str, scheduled_for: str) -> str:
+    def schedule_email(
+        recipient: str,
+        subject: str,
+        body: str,
+        scheduled_for: str,
+        cc: str = "",
+        bcc: str = "",
+    ) -> str:
         """Create a future email delivery requiring explicit user approval."""
+        try:
+            recipient = normalize_recipient_header(recipient, "recipient", required=True)
+            cc = normalize_recipient_header(cc, "Cc")
+            bcc = normalize_recipient_header(bcc, "Bcc")
+        except ValueError as exc:
+            return f"Scheduled draft could not be created: {exc}"
         sanitized = sanitize_tool_args({
-            "recipient": recipient, "subject": subject, "body": body, "scheduled_for": scheduled_for,
+            "recipient": recipient, "cc": cc, "bcc": bcc, "subject": subject,
+            "body": body, "scheduled_for": scheduled_for,
         })
         logger.info("Tool chosen: schedule_email with args: %s", sanitized)
         try:
@@ -526,6 +557,8 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         approval = EmailSendApproval(
             user_id=user_uuid,
             recipient_email=recipient,
+            cc=cc or None,
+            bcc=bcc or None,
             subject=subject,
             draft_body=body,
             status="PENDING",
@@ -573,7 +606,15 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         if user is None:
             return "Email could not be sent because the authenticated user was not found."
         try:
-            delivery = send_gmail_message(db, user, approval.recipient_email, approval.subject, approval.draft_body)
+            delivery = send_gmail_message(
+                db,
+                user,
+                approval.recipient_email,
+                approval.subject,
+                approval.draft_body,
+                approval.cc,
+                approval.bcc,
+            )
         except Exception as exc:
             logger.warning("Approved Gmail delivery failed: %s", type(exc).__name__)
             return f"Email could not be sent: {exc}"

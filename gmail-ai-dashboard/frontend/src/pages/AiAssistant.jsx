@@ -14,6 +14,7 @@ import {
 	getRagStatus,
 	rejectRagEmail,
 	sendRagChat,
+	updateRagEmailDraft,
 } from '../services/api';
 import './AiAssistant.css';
 
@@ -105,6 +106,8 @@ export default function AiAssistant({ user: propUser }) {
 	const [ragStatus, setRagStatus] = useState(null);
 	const [approvalFeedback, setApprovalFeedback] = useState({});
 	const [draftReview, setDraftReview] = useState(null);
+	const [draftReviewBusy, setDraftReviewBusy] = useState(false);
+	const [draftReviewActionError, setDraftReviewActionError] = useState('');
 	const [showExecutionDetails, setShowExecutionDetails] = useState(false);
 	const [navigationOpen, setNavigationOpen] = useState(true);
 	const [sidePanelOpen, setSidePanelOpen] = useState(true);
@@ -153,6 +156,7 @@ export default function AiAssistant({ user: propUser }) {
 	}, [draftReview]);
 
 	const openDraftReview = (preview, approvalId) => {
+		setDraftReviewActionError('');
 		if (!preview) {
 			setDraftReview({
 				id: approvalId,
@@ -163,6 +167,13 @@ export default function AiAssistant({ user: propUser }) {
 		}
 		setDraftReview({ ...preview, id: preview.id || approvalId, loading: false, error: null });
 	};
+
+	const approvalErrorMessage = (error, fallback) => (
+		error?.response?.data?.detail
+		|| error?.response?.data?.message
+		|| error?.message
+		|| fallback
+	);
 
 	const handleSend = async (queryText) => {
 		const text = (queryText || input).trim();
@@ -278,9 +289,11 @@ export default function AiAssistant({ user: propUser }) {
 		}
 	};
 
-	const handleApprove = async (approvalId) => {
+	const handleApprove = async (approvalId, draft) => {
+		setDraftReviewBusy(true);
+		setDraftReviewActionError('');
 		try {
-			const response = await approveRagEmail(approvalId);
+			const response = await approveRagEmail(approvalId, draft);
 			setApprovalFeedback((prev) => ({
 				...prev,
 				[approvalId]: {
@@ -290,15 +303,21 @@ export default function AiAssistant({ user: propUser }) {
 			}));
 			return true;
 		} catch (err) {
+			const message = approvalErrorMessage(err, 'Your email could not be sent. Please try again.');
+			setDraftReviewActionError(message);
 			setApprovalFeedback((prev) => ({
 				...prev,
-				[approvalId]: { status: 'ERROR', message: 'Your email could not be sent. Please try again.' },
+				[approvalId]: { status: 'ERROR', message },
 			}));
 			return false;
+		} finally {
+			setDraftReviewBusy(false);
 		}
 	};
 
 	const handleReject = async (approvalId) => {
+		setDraftReviewBusy(true);
+		setDraftReviewActionError('');
 		try {
 			await rejectRagEmail(approvalId);
 			setApprovalFeedback((prev) => ({
@@ -307,11 +326,37 @@ export default function AiAssistant({ user: propUser }) {
 			}));
 			return true;
 		} catch (err) {
+			const message = approvalErrorMessage(err, 'Your draft could not be discarded. Please try again.');
+			setDraftReviewActionError(message);
 			setApprovalFeedback((prev) => ({
 				...prev,
-				[approvalId]: { status: 'ERROR', message: 'Your draft could not be discarded. Please try again.' },
+				[approvalId]: { status: 'ERROR', message },
 			}));
 			return false;
+		} finally {
+			setDraftReviewBusy(false);
+		}
+	};
+
+	const handleSaveDraft = async () => {
+		if (!draftReview) return false;
+		setDraftReviewBusy(true);
+		setDraftReviewActionError('');
+		try {
+			await updateRagEmailDraft(draftReview.id, {
+				recipient_email: draftReview.recipient_email || '',
+				cc: draftReview.cc || '',
+				bcc: draftReview.bcc || '',
+				subject: draftReview.subject || '',
+				draft_body: draftReview.draft_body || '',
+			});
+			return true;
+		} catch (err) {
+			const message = approvalErrorMessage(err, 'Your draft changes could not be saved. Please try again.');
+			setDraftReviewActionError(message);
+			return false;
+		} finally {
+			setDraftReviewBusy(false);
 		}
 	};
 
@@ -857,34 +902,87 @@ export default function AiAssistant({ user: propUser }) {
 							<div className="draft-review-loading" role="status">Loading the saved draft for review…</div>
 						) : (
 							<>
-								<div className="draft-review-recipient">
+								<label className="draft-review-field draft-review-recipient-field">
 									<span>To</span>
-									<strong>{draftReview.recipient_email}</strong>
-								</div>
+									<input
+										type="email"
+										value={draftReview.recipient_email || ''}
+										onChange={(event) => setDraftReview((current) => ({ ...current, recipient_email: event.target.value }))}
+										aria-label="Draft recipient"
+										disabled={draftReviewBusy}
+									/>
+								</label>
+								<label className="draft-review-field">
+									<span>Cc</span>
+									<input
+										type="text"
+										value={draftReview.cc || ''}
+										onChange={(event) => setDraftReview((current) => ({ ...current, cc: event.target.value }))}
+										aria-label="Draft cc recipients"
+										placeholder="Optional, comma-separated email addresses"
+										disabled={draftReviewBusy}
+									/>
+								</label>
+								<label className="draft-review-field">
+									<span>Bcc</span>
+									<input
+										type="text"
+										value={draftReview.bcc || ''}
+										onChange={(event) => setDraftReview((current) => ({ ...current, bcc: event.target.value }))}
+										aria-label="Draft bcc recipients"
+										placeholder="Optional, comma-separated email addresses"
+										disabled={draftReviewBusy}
+									/>
+								</label>
 								<label className="draft-review-field">
 									<span>Subject</span>
-									<input value={draftReview.subject || ''} readOnly aria-label="Draft subject" />
+									<input
+										value={draftReview.subject || ''}
+										onChange={(event) => setDraftReview((current) => ({ ...current, subject: event.target.value }))}
+										aria-label="Draft subject"
+										disabled={draftReviewBusy}
+									/>
 								</label>
 								<label className="draft-review-field draft-review-body-field">
 									<span>Message body</span>
-									<textarea value={draftReview.draft_body || ''} readOnly aria-label="Draft message body" />
+									<textarea
+										value={draftReview.draft_body || ''}
+										onChange={(event) => setDraftReview((current) => ({ ...current, draft_body: event.target.value }))}
+										aria-label="Draft message body"
+										disabled={draftReviewBusy}
+									/>
 								</label>
 								<div className="draft-review-notice">
 									<ShieldCheck size={17} />
 									<span>Review complete? Approving below authorizes Gmail delivery.</span>
 								</div>
+								{draftReviewActionError && (
+									<div className="draft-review-action-error" role="alert">
+										<AlertCircle size={16} />
+										<span>{draftReviewActionError}</span>
+									</div>
+								)}
 							</>
 						)}
 
 						<footer className="draft-review-footer">
-							<button className="draft-review-secondary" type="button" onClick={() => setDraftReview(null)}>
+							<button className="draft-review-secondary" type="button" onClick={() => setDraftReview(null)} disabled={draftReviewBusy}>
 								Close
 							</button>
 							{!draftReview.error && !draftReview.loading && (
 								<>
 									<button
+										className="draft-review-secondary"
+										type="button"
+										disabled={draftReviewBusy}
+										onClick={handleSaveDraft}
+									>
+										{draftReviewBusy ? 'Saving…' : 'Save changes'}
+									</button>
+									<button
 										className="draft-review-reject"
 										type="button"
+										disabled={draftReviewBusy}
 										onClick={async () => {
 											const rejected = await handleReject(draftReview.id);
 											if (rejected) setDraftReview(null);
@@ -895,12 +993,19 @@ export default function AiAssistant({ user: propUser }) {
 									<button
 										className="draft-review-approve"
 										type="button"
+										disabled={draftReviewBusy}
 										onClick={async () => {
-											const approved = await handleApprove(draftReview.id);
+											const approved = await handleApprove(draftReview.id, {
+												recipient_email: draftReview.recipient_email || '',
+												cc: draftReview.cc || '',
+												bcc: draftReview.bcc || '',
+												subject: draftReview.subject || '',
+												draft_body: draftReview.draft_body || '',
+											});
 											if (approved) setDraftReview(null);
 										}}
 									>
-										<Check size={15} /> Approve &amp; send
+										<Check size={15} /> {draftReviewBusy ? 'Sending…' : 'Approve & send'}
 									</button>
 								</>
 							)}

@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -87,6 +89,38 @@ def test_multiple_validation_batches_keep_every_accepted_source():
     result = validate_email_relevance([candidate(str(i)) for i in range(7)], "Find all interviews", RunnableLambda(respond))
     assert not result.failed
     assert len(result.documents) == result.evaluated == 7
+
+
+def test_validation_batches_can_run_concurrently_with_a_bounded_fanout():
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def respond(messages):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.03)
+            data = json.loads(messages[-1].content)
+            return AIMessage(content=json.dumps({
+                "decisions": [decision(c["email_id"]) for c in data["candidates"]],
+            }))
+        finally:
+            with lock:
+                active -= 1
+
+    result = validate_email_relevance(
+        [candidate(str(i)) for i in range(6)],
+        "Find all interviews",
+        RunnableLambda(respond),
+        batch_size=2,
+        max_workers=3,
+    )
+    assert not result.failed
+    assert result.evaluated == 6
+    assert max_active >= 2
 
 
 def test_bad_json_uses_next_provider_instead_of_failing_entire_search():

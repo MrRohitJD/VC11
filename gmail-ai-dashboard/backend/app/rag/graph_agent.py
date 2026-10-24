@@ -37,6 +37,7 @@ from app.rag.agent import (
     GmailAIAssistant, AgentResponse, AGENT_SYSTEM_PROMPT,
     extract_citations_from_tool_observation,
     deterministic_action_answer,
+    parse_draft_request,
     select_deterministic_tool_fallback,
 )
 from app.rag.memory import (
@@ -130,6 +131,17 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         deterministic = select_deterministic_tool_fallback(state["effective_query"], tools)
         if deterministic and deterministic[0] == "draft_email":
             tool_name, tool_args = deterministic
+            draft_request = parse_draft_request(state["effective_query"])
+            generate_draft = getattr(assistant, "generate_email_draft", None)
+            if draft_request and callable(generate_draft):
+                try:
+                    generated = generate_draft(draft_request)
+                    tool_args = {**tool_args, **generated}
+                    emit_activity("compose_draft", "Generated a topic-specific email draft", status="completed", lane="agent")
+                except Exception as exc:
+                    # The deterministic parser still provides a usable,
+                    # editable fallback when the drafting provider is down.
+                    logger.warning("Email draft generation failed (%s); using fallback draft", type(exc).__name__)
             tool = tools[tool_name]
             emit_activity("tool_agent", "Creating the draft for your review", status="running", lane="agent")
             try:
@@ -387,6 +399,8 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
                 approval_preview = {
                     "id": str(approval.id),
                     "recipient_email": approval.recipient_email,
+                    "cc": approval.cc or "",
+                    "bcc": approval.bcc or "",
                     "subject": approval.subject or "",
                     "draft_body": approval.draft_body,
                     "status": approval.status,

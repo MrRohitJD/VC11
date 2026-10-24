@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from langchain_core.documents import Document
@@ -14,6 +15,11 @@ from app.rag.activity import emit_activity
 from app.rag.retrieval import normalize_key_points
 
 logger = logging.getLogger(__name__)
+
+# Relevance validation is a precision stage, not a document export. Capping
+# the body keeps provider token usage predictable while retaining both the
+# opening context and the closing date/signature details.
+MAX_RELEVANCE_BODY_CHARS = 8000
 
 RELEVANCE_INSTRUCTIONS = """You decide which candidate emails actually answer the user's query.
 Embedding similarity is only a candidate ranking, never proof of relevance.
@@ -100,64 +106,130 @@ def _invoke_decisions(model, messages, candidates, disabled=None):
     raise schema_error or last_error or RuntimeError('No available relevance provider')
 
 
-def validate_email_relevance(documents, query, model, batch_size=5, _disabled=None):
+def _compact_body(value: str, limit: int = MAX_RELEVANCE_BODY_CHARS) -> str:
+    value = str(value or "")
+    if len(value) <= limit:
+        return value
+    head = max(1, int(limit * 0.72))
+    tail = max(1, limit - head)
+    return f"{value[:head]}\n[...body truncated for validation...]\n{value[-tail:]}"
+
+
+def _validate_batch(documents, query, model, disabled, max_single_retries=None):
+    """Validate one batch; independent batches can run concurrently."""
+    result = RelevanceResult()
+    candidates = []
+    for doc in documents:
+        meta = doc.metadata
+        candidates.append({
+            "email_id": str(meta.get("email_id", "")),
+            "gmail_message_id": meta.get("gmail_message_id", ""),
+            "subject": meta.get("subject", ""),
+            "sender_email": meta.get("sender_email") or meta.get("sender") or meta.get("from_email", ""),
+            "sender_name": meta.get("sender_name", ""),
+            "recipient_email": meta.get("recipient_email", ""),
+            "received_at": meta.get("received_at") or meta.get("received_date") or meta.get("date", ""),
+            "body": _compact_body(doc.page_content),
+        })
+    try:
+        payload = _invoke_decisions(model, [
+            SystemMessage(content=RELEVANCE_INSTRUCTIONS),
+            HumanMessage(content=json.dumps({
+                "query": query, "current_datetime": mailbox_now().isoformat(),
+                "candidates": candidates,
+            }, ensure_ascii=False)),
+        ], candidates, disabled)
+        decisions = payload["decisions"]
+        by_id = {item["email_id"]: item for item in decisions}
+        for doc in documents:
+            item = by_id[str(doc.metadata["email_id"])]
+            if item["relevant"]:
+                meta = dict(doc.metadata)
+                key_points = normalize_key_points(item["key_points"][:5])
+                meta.update(relevance_validated=True, relevance_reason=item["reason"], key_points=key_points)
+                result.documents.append(Document(page_content="\n".join(key_points), metadata=meta))
+        result.evaluated = len(documents)
+        return result
+    except Exception as exc:
+        logger.warning("Email relevance validation failed: %s", error_code(exc))
+        if len(documents) > 1 and isinstance(exc, (ValueError, KeyError, TypeError)):
+            # A malformed multi-email response must not strand valid emails.
+            # Retry smaller units inside this worker, keeping the normal path
+            # to one bounded provider call per batch.
+            retry_documents = documents
+            bounded_retry = max_single_retries is not None
+            if bounded_retry:
+                # A broken/truncated provider response must not turn into one
+                # network timeout per candidate. Keep a small strict retry
+                # budget and report incomplete coverage if it is exhausted.
+                retry_documents = documents[:max(0, int(max_single_retries))]
+                if not retry_documents:
+                    result.failed = True
+                    result.error_type = "invalid_response"
+                    return result
+            retried = validate_email_relevance(
+                retry_documents,
+                query,
+                model,
+                batch_size=1,
+                _disabled=disabled,
+                max_workers=1,
+                max_single_retries=0 if bounded_retry else None,
+            )
+            if bounded_retry and len(retry_documents) < len(documents):
+                retried.failed = True
+                retried.error_type = retried.error_type or "invalid_response"
+            return retried
+        result.failed = True
+        result.error_type = error_code(exc)
+        return result
+
+
+def validate_email_relevance(
+    documents,
+    query,
+    model,
+    batch_size=5,
+    _disabled=None,
+    max_workers=1,
+    max_single_retries=None,
+):
     """Accept only schema-valid model decisions for actual candidate IDs.
 
-    Missing, malformed, or failed decisions never become lexical/random matches.
-    Keep verified matches and report incomplete coverage if a batch fails.
+    Missing, malformed, or failed decisions never become lexical/random
+    matches. Independent batches use a bounded fan-out/fan-in so wall time is
+    close to the slowest batch instead of the sum of all batch latencies.
     """
     result = RelevanceResult()
     disabled = set() if _disabled is None else _disabled
-    for offset in range(0, len(documents), batch_size):
-        batch = documents[offset:offset + batch_size]
-        candidates = []
-        for doc in batch:
-            meta = doc.metadata
-            candidates.append({
-                "email_id": str(meta.get("email_id", "")),
-                "gmail_message_id": meta.get("gmail_message_id", ""),
-                "subject": meta.get("subject", ""),
-                "sender_email": meta.get("sender_email") or meta.get("sender") or meta.get("from_email", ""),
-                "sender_name": meta.get("sender_name", ""),
-                "recipient_email": meta.get("recipient_email", ""),
-                "received_at": meta.get("received_at") or meta.get("received_date") or meta.get("date", ""),
-                "body": doc.page_content,
-            })
-        try:
-            payload = _invoke_decisions(model, [
-                SystemMessage(content=RELEVANCE_INSTRUCTIONS),
-                HumanMessage(content=json.dumps({
-                    "query": query, "current_datetime": mailbox_now().isoformat(),
-                    "candidates": candidates,
-                }, ensure_ascii=False)),
-            ], candidates, disabled)
-            decisions = payload["decisions"]
-            by_id = {item["email_id"]: item for item in decisions}
-            for doc in batch:
-                item = by_id[str(doc.metadata["email_id"])]
-                if item["relevant"]:
-                    meta = dict(doc.metadata)
-                    key_points = normalize_key_points(item["key_points"][:5])
-                    meta.update(relevance_validated=True, relevance_reason=item["reason"], key_points=key_points)
-                    result.documents.append(Document(page_content="\n".join(key_points), metadata=meta))
-            result.evaluated += len(batch)
-            emit_activity('validate_evidence', f'Checked {result.evaluated} of {len(documents)} emails; {len(result.documents)} matches verified',
-                          count=len(result.documents), evaluated=result.evaluated, status='running')
-        except Exception as exc:
-            logger.warning("Email relevance validation failed: %s", error_code(exc))
-            if len(batch) > 1 and isinstance(exc, (ValueError, KeyError, TypeError)):
-                # A malformed multi-email response must not strand valid emails.
-                # Retry smaller units, still requiring the same strict evidence.
-                retried = validate_email_relevance(batch, query, model, batch_size=1, _disabled=disabled)
-                result.documents.extend(retried.documents)
-                result.evaluated += retried.evaluated
-                result.failed |= retried.failed
-                result.error_type = retried.error_type or result.error_type
-                continue
-            result.failed = True
-            result.error_type = error_code(exc)
-            if result.error_type != 'invalid_response':
-                break
+    batches = [documents[offset:offset + batch_size] for offset in range(0, len(documents), batch_size)]
+    if not batches:
+        return result
+
+    worker_count = max(1, min(int(max_workers or 1), len(batches)))
+    if worker_count == 1:
+        batch_results = [
+            _validate_batch(batch, query, model, disabled, max_single_retries)
+            for batch in batches
+        ]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="rag-relevance") as executor:
+            futures = [executor.submit(
+                _validate_batch, batch, query, model, disabled, max_single_retries,
+            ) for batch in batches]
+            # Preserve candidate order for deterministic citations and tests.
+            batch_results = [future.result() for future in futures]
+
+    for batch_result in batch_results:
+        result.documents.extend(batch_result.documents)
+        result.evaluated += batch_result.evaluated
+        result.failed |= batch_result.failed
+        result.error_type = result.error_type or batch_result.error_type
+        emit_activity(
+            'validate_evidence',
+            f'Checked {result.evaluated} of {len(documents)} emails; {len(result.documents)} matches verified',
+            count=len(result.documents), evaluated=result.evaluated, status='running',
+        )
     return result
 
 

@@ -1188,19 +1188,20 @@
 .draft-review-close { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; flex: 0 0 auto; border: 1px solid #dbe3f0; border-radius: 8px; background: #fff; color: #64748b; cursor: pointer; }
 .draft-review-close:hover { background: #f1f5f9; color: #17233a; }
 .draft-review-recipient, .draft-review-field, .draft-review-notice { margin: 22px 32px 0; }
-.draft-review-recipient { display: flex; align-items: center; gap: 16px; padding: 13px 16px; border: 1px solid #e2e8f0; border-radius: 9px; background: #f8fafc; color: #475569; font-size: 13px; }
+.draft-review-recipient-field { padding: 13px 16px; border: 1px solid #e2e8f0; border-radius: 9px; background: #f8fafc; }
 .draft-review-recipient span, .draft-review-field > span { color: #64748b; font-size: 11px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
-.draft-review-recipient strong { color: #17233a; font-size: 14px; }
 .draft-review-field { display: flex; flex-direction: column; gap: 8px; }
 .draft-review-field input, .draft-review-field textarea { box-sizing: border-box; width: 100%; border: 1px solid #cfd8e6; border-radius: 9px; background: #fff; color: #17233a; font: inherit; font-size: 14px; line-height: 1.55; outline: none; }
+.draft-review-field input:focus, .draft-review-field textarea:focus { border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124, 58, 237, .12); }
 .draft-review-field input { min-height: 44px; padding: 10px 12px; }
-.draft-review-field textarea { min-height: 260px; flex: 1; padding: 14px; resize: none; white-space: pre-wrap; }
-.draft-review-field input:read-only, .draft-review-field textarea:read-only { background: #fbfcfe; }
+.draft-review-field textarea { min-height: 260px; flex: 1; padding: 14px; resize: vertical; white-space: pre-wrap; }
+.draft-review-field input:disabled, .draft-review-field textarea:disabled { background: #f8fafc; cursor: wait; }
 .draft-review-body-field { flex: 1; min-height: 0; }
 .draft-review-notice { display: flex; align-items: center; gap: 8px; margin-top: 16px; padding: 11px 13px; border: 1px solid #c7d2fe; border-radius: 8px; background: #eef2ff; color: #3730a3; font-size: 12px; }
+.draft-review-action-error { display: flex; align-items: flex-start; gap: 8px; margin: 12px 32px 0; padding: 11px 13px; border: 1px solid #fecaca; border-radius: 8px; background: #fef2f2; color: #b91c1c; font-size: 12px; line-height: 1.45; }
 .draft-review-loading, .draft-review-error { margin: auto 32px; color: #64748b; font-size: 14px; line-height: 1.6; text-align: center; }
 .draft-review-error { display: flex; align-items: center; justify-content: center; gap: 8px; color: #b91c1c; }
-.draft-review-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; padding: 18px 32px 24px; border-top: 1px solid #e8edf5; background: #fbfcfe; }
+.draft-review-footer { position: relative; z-index: 1; display: flex; flex-shrink: 0; justify-content: flex-end; gap: 10px; margin-top: 24px; padding: 18px 32px 24px; border-top: 1px solid #e8edf5; background: #fbfcfe; }
 .draft-review-footer button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 0 16px; border-radius: 8px; font-size: 13px; font-weight: 700; cursor: pointer; }
 .draft-review-secondary { border: 1px solid #cbd5e1; background: #fff; color: #475569; }
 .draft-review-reject { border: 1px solid #fecaca; background: #fff; color: #b91c1c; }
@@ -1208,6 +1209,7 @@
 .draft-review-secondary:hover { background: #f8fafc; }
 .draft-review-reject:hover { background: #fef2f2; }
 .draft-review-approve:hover { background: #166534; }
+.draft-review-footer button:disabled { opacity: .6; cursor: wait; }
 
 @media (max-width: 960px) {
   .assistant-layout-grid { grid-template-columns: minmax(0, 1fr); }
@@ -1220,7 +1222,7 @@
   .draft-review-modal { max-height: none; min-height: 100%; border-radius: 0; }
   .draft-review-header { padding: 22px 20px 18px; }
   .draft-review-header h2 { font-size: 20px; }
-  .draft-review-recipient, .draft-review-field, .draft-review-notice { margin-left: 20px; margin-right: 20px; }
+  .draft-review-recipient, .draft-review-field, .draft-review-notice, .draft-review-action-error { margin-left: 20px; margin-right: 20px; }
   .draft-review-footer { flex-wrap: wrap; padding-left: 20px; padding-right: 20px; }
   .draft-review-footer button { flex: 1 1 auto; }
   .assistant-main-content { padding: 12px; }

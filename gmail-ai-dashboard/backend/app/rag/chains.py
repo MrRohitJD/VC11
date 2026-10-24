@@ -167,7 +167,9 @@ def get_chat_model() -> Any:
             from langchain_nvidia_ai_endpoints import ChatNVIDIA
             models.append(ChatNVIDIA(
                 model="openai/gpt-oss-20b", api_key=settings.nvidia_api_key,
-                temperature=1, max_completion_tokens=4096, timeout=60,
+                temperature=1,
+                max_completion_tokens=settings.llm_max_completion_tokens,
+                timeout=settings.llm_request_timeout_seconds,
                 model_kwargs={"reasoning_effort": "low"},
             ))
         except Exception as exc:
@@ -183,7 +185,9 @@ def get_chat_model() -> Any:
                 api_version=settings.azure_openai_api_version,
                 azure_deployment=getattr(settings, "azure_openai_deployment", "gpt-4.1-mini"),
                 temperature=1,
-                timeout=20, max_retries=0,
+                max_tokens=settings.llm_max_completion_tokens,
+                timeout=settings.llm_request_timeout_seconds,
+                max_retries=settings.llm_max_retries,
             ))
         except Exception as exc:
             logger.warning("Could not initialize AzureChatOpenAI (%s). Falling back.", exc)
@@ -194,7 +198,9 @@ def get_chat_model() -> Any:
                 api_key=settings.openai_api_key,
                 model="gpt-4o-mini",
                 temperature=1,
-                timeout=20, max_retries=0,
+                max_tokens=settings.llm_max_completion_tokens,
+                timeout=settings.llm_request_timeout_seconds,
+                max_retries=settings.llm_max_retries,
             ))
         except Exception:
             pass
@@ -202,7 +208,11 @@ def get_chat_model() -> Any:
     if settings.explabs_api_key:
         models.append(ChatOpenAI(
             model="deepseek-v4-flash", base_url="https://api.experientiallabs.ai/v1",
-            api_key=settings.explabs_api_key, temperature=1, timeout=20, max_retries=0,
+            api_key=settings.explabs_api_key,
+            temperature=1,
+            max_tokens=settings.llm_max_completion_tokens,
+            timeout=settings.llm_request_timeout_seconds,
+            max_retries=settings.llm_max_retries,
         ))
     if models:
         return models[0].with_fallbacks(models[1:]) if len(models) > 1 else models[0]
@@ -454,7 +464,11 @@ class GroundedRAGChain:
                     live_executor.shutdown(wait=False, cancel_futures=True)
                     live_executor = None
                 emit_activity("gmail_search", "Live search unavailable; using synced mailbox mail", status="warning")
-        candidate_k = max(top_k * 4, 20)
+        # Retrieval is a cascade: keep a small high-recall candidate pool, then
+        # let the evidence validator make the precision decision.  The old
+        # 20-document minimum made every ordinary question pay for two large
+        # validation prompts, even when only five citations could be returned.
+        candidate_k = max(top_k * 3, 12)
         if all_requested:
             candidate_k = max(1, len(mailbox_email_ids(db, user_id, effective_query)))
         is_hybrid_mode = retrieval_mode == "hybrid" or search_plan.strategy in {"hybrid_rrf", "structured"}
@@ -672,7 +686,12 @@ class GroundedRAGChain:
         emit_activity("validate_evidence", "Checking sender, receipt dates and mailbox labels" if envelope_only else "Checking which emails answer your question", status="running")
         candidate_count = len(docs)
         validation = RelevanceResult(documents=docs, evaluated=len(docs)) if envelope_only else validate_email_relevance(
-            docs, effective_query, self.model, batch_size=10,
+            docs,
+            effective_query,
+            self.model,
+            batch_size=10,
+            max_workers=settings.rag_relevance_parallelism,
+            max_single_retries=2,
         )
         if (
             not envelope_only
@@ -704,7 +723,14 @@ class GroundedRAGChain:
                 recovery = hydrate_email_documents(recovery, db, user_id, full_body=True)
                 candidate_count += len(recovery)
                 emit_activity("corrective_search", f"Checking {len(recovery)} additional keyword matches", count=len(recovery))
-                corrected = validate_email_relevance(recovery, effective_query, self.model, batch_size=10)
+                corrected = validate_email_relevance(
+                    recovery,
+                    effective_query,
+                    self.model,
+                    batch_size=10,
+                    max_workers=settings.rag_relevance_parallelism,
+                    max_single_retries=2,
+                )
                 corrected.evaluated += validation.evaluated
                 validation = corrected
         emit_activity("validate_evidence", f"Validated {len(validation.documents)} matching emails" if not validation.failed else f"Search incomplete; kept {len(validation.documents)} verified matches", count=len(validation.documents), evaluated=validation.evaluated, status="warning" if validation.failed else "completed")

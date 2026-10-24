@@ -227,6 +227,8 @@ class EmailSendApproval(Base):
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     recipient_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    cc: Mapped[str | None] = mapped_column(Text)
+    bcc: Mapped[str | None] = mapped_column(Text)
     subject: Mapped[str | None] = mapped_column(Text)
     draft_body: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="PENDING", server_default="PENDING", nullable=False)

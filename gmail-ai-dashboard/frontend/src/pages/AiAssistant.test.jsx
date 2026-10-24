@@ -1,13 +1,13 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import AiAssistant from './AiAssistant';
-import { getRagSourceEmail, getRagStatus, sendRagChat } from '../services/api';
+import { approveRagEmail, getRagSourceEmail, getRagStatus, rejectRagEmail, sendRagChat, updateRagEmailDraft } from '../services/api';
 
 vi.mock('../context/AuthContext', () => ({ useAuth: () => ({ user: { name: 'Mailbox Owner' } }) }));
 vi.mock('../services/api', () => ({
     getRagStatus: vi.fn(), sendRagChat: vi.fn(), getRagSourceEmail: vi.fn(),
-    approveRagEmail: vi.fn(), rejectRagEmail: vi.fn(),
+    approveRagEmail: vi.fn(), rejectRagEmail: vi.fn(), updateRagEmailDraft: vi.fn(),
 }));
 
 it('opens the complete message when View email is clicked on a citation', async () => {
@@ -48,13 +48,13 @@ it('lets the user collapse both side panels to expand the chat area', async () =
     expect(screen.getByRole('button', { name: 'Open key points panel' })).toBeInTheDocument();
 });
 
-it('opens a full-size human review window with the exact draft subject and body', async () => {
+it('opens an editable human review window and sends the reviewed draft values', async () => {
     Element.prototype.scrollIntoView = vi.fn();
     getRagStatus.mockResolvedValue({ data: {} });
     sendRagChat.mockResolvedValue({ data: {
         answer: 'A draft is ready for your review.', session_id: 'session-draft', citations: [], steps: [],
         approval_required: true, approval_id: 'approval-one', approval_preview: {
-            id: 'approval-one', recipient_email: 'adijadhav651@gmail.com', subject: 'Education load follow-up',
+            id: 'approval-one', recipient_email: 'adijadhav651@gmail.com', cc: 'advisor@example.com', bcc: 'archive@example.com', subject: 'Education load follow-up',
             draft_body: 'Hello,\n\nI am writing to discuss the education load.\n\nBest regards,\nRohini', status: 'PENDING',
         },
     } });
@@ -66,9 +66,37 @@ it('opens a full-size human review window with the exact draft subject and body'
     fireEvent.click(screen.getByRole('button', { name: /^Send$/ }));
 
     const dialog = await screen.findByRole('dialog', { name: 'Review email before sending' });
-    expect(within(dialog).getByText('adijadhav651@gmail.com')).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue('adijadhav651@gmail.com')).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue('advisor@example.com')).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue('archive@example.com')).toBeInTheDocument();
     expect(within(dialog).getByDisplayValue('Education load follow-up')).toBeInTheDocument();
     expect(within(dialog).getByDisplayValue(/I am writing to discuss the education load/)).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: 'Approve & send' })).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: 'Discard draft' })).toBeInTheDocument();
+
+    approveRagEmail.mockResolvedValue({ data: { status: 'SENT', message: 'Email sent successfully.' } });
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Draft recipient' }), {
+        target: { value: 'updated@example.com' },
+    });
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Draft cc recipients' }), {
+        target: { value: 'updated-cc@example.com' },
+    });
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Draft bcc recipients' }), {
+        target: { value: 'updated-bcc@example.com' },
+    });
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Draft subject' }), {
+        target: { value: 'Updated education loan question' },
+    });
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Draft message body' }), {
+        target: { value: 'Hello,\n\nPlease confirm the education loan payout details.\n\nRegards' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Approve & send' }));
+
+    await waitFor(() => expect(approveRagEmail).toHaveBeenCalledWith('approval-one', {
+        recipient_email: 'updated@example.com',
+        cc: 'updated-cc@example.com',
+        bcc: 'updated-bcc@example.com',
+        subject: 'Updated education loan question',
+        draft_body: 'Hello,\n\nPlease confirm the education loan payout details.\n\nRegards',
+    }));
 });

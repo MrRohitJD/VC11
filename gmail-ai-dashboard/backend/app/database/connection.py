@@ -42,8 +42,14 @@ def get_db() -> Generator[Session, None, None]:
 REQUIRED_TABLES = frozenset({
     "users", "gmail_accounts", "emails", "labels", "email_labels",
     "ai_categories", "email_classifications", "sync_history",
-    "llm_classification_jobs", "chat_quotas",
+    "llm_classification_jobs", "chat_quotas", "email_send_approvals",
 })
+
+REQUIRED_COLUMNS = {
+    "email_send_approvals": frozenset({
+        "cc", "bcc", "scheduled_for", "delivery_message_id",
+    }),
+}
 
 
 def verify_schema() -> None:
@@ -54,6 +60,20 @@ def verify_schema() -> None:
         names = ", ".join(sorted(missing))
         raise RuntimeError(
             f"Database schema is not current (missing: {names}). "
+            "Run `alembic upgrade head` from backend before starting the API."
+        )
+
+    missing_columns = {
+        table: sorted(columns - {column["name"] for column in inspect(engine).get_columns(table)})
+        for table, columns in REQUIRED_COLUMNS.items()
+    }
+    missing_columns = {table: columns for table, columns in missing_columns.items() if columns}
+    if missing_columns:
+        details = ", ".join(
+            f"{table}: {', '.join(columns)}" for table, columns in missing_columns.items()
+        )
+        raise RuntimeError(
+            f"Database schema is not current (missing columns: {details}). "
             "Run `alembic upgrade head` from backend before starting the API."
         )
     logger.info("Database schema verified")

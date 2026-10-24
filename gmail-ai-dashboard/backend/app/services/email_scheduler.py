@@ -42,7 +42,13 @@ def deliver_due_scheduled_emails() -> int:
                 if user is None:
                     raise ValueError("The sending user no longer exists")
                 result = send_gmail_message(
-                    db, user, approval.recipient_email, approval.subject, approval.draft_body
+                    db,
+                    user,
+                    approval.recipient_email,
+                    approval.subject,
+                    approval.draft_body,
+                    approval.cc,
+                    approval.bcc,
                 )
                 approval.status = "SENT"
                 approval.sent_at = datetime.now(timezone.utc)
