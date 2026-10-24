@@ -22,3 +22,9 @@ def test_date_scoped_summaries_use_the_exhaustive_local_path():
 
 def test_plain_sender_requests_are_deterministic_even_with_filler_words():
     assert sender_only_request("A few mails that we received from chess.com") is True
+
+
+def test_live_query_preserves_explicit_gmail_state_filters():
+    query = gmail_search_query("Show the latest unread inbox emails")
+    assert "is:unread" in query
+    assert "in:inbox" in query

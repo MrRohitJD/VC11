@@ -63,8 +63,11 @@ def plan_retrieval(query, filters=None, use_multi_query=None, mode="similarity",
     multi = use_multi_query is True or (use_multi_query is None and complex_query)
     exact_filter = any((filters or {}).get(key) for key in
                        ("email_id", "gmail_message_id", "thread_id", "sender", "label"))
+    # Only current-state requests require a live Gmail membership check.
+    # Ordinary "received/recent" questions are answered from the synced,
+    # tenant-scoped mailbox index, which avoids an unnecessary MCP round trip.
     freshness = bool(re.search(
-        r"\b(?:today|yesterday|latest|newest|recent|recently|inbox|unread|upcoming|received|last|past)\b",
+        r"\b(?:today|yesterday|latest|newest|just\s+now|right\s+now|inbox|unread)\b",
         query, re.I,
     ))
     if exhaustive or date_only:

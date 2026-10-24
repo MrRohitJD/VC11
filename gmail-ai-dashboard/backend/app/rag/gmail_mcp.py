@@ -11,6 +11,7 @@ from app.rag.search_plan import gmail_search_query
 
 
 MAX_LIVE_GMAIL_SECONDS = 30
+MAX_LIVE_GMAIL_MESSAGES = 200
 
 
 async def _search(user_id, query):
@@ -36,7 +37,10 @@ async def _search(user_id, query):
                 await session.initialize()
                 result = await session.call_tool("search_mailbox_emails", {
                     "query": gmail_search_query(query),
-                    "max_messages": settings.gmail_mcp_max_messages,
+                    # Live discovery is for fresh candidate membership, not a
+                    # full mailbox export.  The synced index handles broad
+                    # historical/date-scoped requests.
+                    "max_messages": min(settings.gmail_mcp_max_messages, MAX_LIVE_GMAIL_MESSAGES),
                 })
                 if result.isError:
                     raise RuntimeError("Live Gmail MCP search failed")

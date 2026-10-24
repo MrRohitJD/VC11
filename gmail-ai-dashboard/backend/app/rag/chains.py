@@ -47,7 +47,7 @@ from app.rag.retrieval import (
 )
 from app.rag.query_constraints import mailbox_now, is_financial_query
 from app.rag.mailbox_scope import mailbox_email_ids
-from app.rag.relevance import validate_email_relevance, RelevanceResult
+from app.rag.relevance import validate_email_relevance, local_relevance_fallback, RelevanceResult
 from app.rag.adaptive import plan_retrieval, bm25_rank, fuse_rankings
 from app.rag.activity import emit_activity
 from app.rag.search_plan import requested_sender, sender_only_request
@@ -674,17 +674,40 @@ class GroundedRAGChain:
         # Date-only membership is proven by account, labels and receipt bounds.
         emit_activity("validate_evidence", "Checking sender, receipt dates and mailbox labels" if envelope_only else "Checking which emails answer your question", status="running")
         candidate_count = len(docs)
-        validation = RelevanceResult(documents=docs, evaluated=len(docs)) if envelope_only else validate_email_relevance(docs, effective_query, self.model)
+        validation = RelevanceResult(documents=docs, evaluated=len(docs)) if envelope_only else validate_email_relevance(
+            docs, effective_query, self.model, batch_size=10,
+        )
+        if (
+            not envelope_only
+            and validation.failed
+            and not validation.documents
+            and docs
+            and validation.error_type in {
+                "authentication", "unavailable", "connection", "timeout", "rate_limit",
+            }
+        ):
+            # A provider outage must not erase already retrieved mailbox
+            # evidence.  Keep the answer grounded in this request's ranked
+            # documents and make the coverage stage complete rather than
+            # reporting a false zero-match result.
+            fallback_docs = local_relevance_fallback(docs, effective_query)
+            if fallback_docs:
+                validation = RelevanceResult(documents=fallback_docs, evaluated=len(docs))
+                emit_activity(
+                    "validate_evidence",
+                    "Evidence coverage completed with local ranked retrieval",
+                    count=len(fallback_docs), evaluated=len(docs), provider="local", status="completed",
+                )
         if not envelope_only and not all_requested and not validation.failed and not validation.documents:
-            # One bounded corrective pass over lower ranked lexical candidates.
+            # One bounded corrective pass over lower-ranked lexical candidates.
             seen = {str(doc.metadata["email_id"]) for doc in docs}
-            recovery = [doc for doc in bm25_rank(lexical_pool, effective_query, limit=max(60, candidate_k * 3))
+            recovery = [doc for doc in bm25_rank(lexical_pool, effective_query, limit=max(20, candidate_k * 2))
                         if str(doc.metadata["email_id"]) not in seen]
             if recovery:
                 recovery = hydrate_email_documents(recovery, db, user_id, full_body=True)
                 candidate_count += len(recovery)
                 emit_activity("corrective_search", f"Checking {len(recovery)} additional keyword matches", count=len(recovery))
-                corrected = validate_email_relevance(recovery, effective_query, self.model)
+                corrected = validate_email_relevance(recovery, effective_query, self.model, batch_size=10)
                 corrected.evaluated += validation.evaluated
                 validation = corrected
         emit_activity("validate_evidence", f"Validated {len(validation.documents)} matching emails" if not validation.failed else f"Search incomplete; kept {len(validation.documents)} verified matches", count=len(validation.documents), evaluated=validation.evaluated, status="warning" if validation.failed else "completed")

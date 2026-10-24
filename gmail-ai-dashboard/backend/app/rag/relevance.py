@@ -156,3 +156,40 @@ def validate_email_relevance(documents, query, model, batch_size=5, _disabled=No
             if result.error_type != 'invalid_response':
                 break
     return result
+
+
+def local_relevance_fallback(documents, query):
+    """Rank retrieved evidence locally when the AI validator is unavailable.
+
+    This is intentionally a fallback after tenant/date/sender scoping and
+    candidate retrieval have already completed.  It never searches outside
+    the supplied documents and does not claim an LLM decision; it preserves
+    grounded source coverage so a provider outage does not become a false
+    "no matching email" answer.
+    """
+    if not documents:
+        return []
+
+    try:
+        from app.rag.adaptive import bm25_rank
+        ranked = bm25_rank(documents, query, limit=len(documents))
+    except Exception:
+        ranked = []
+
+    if not ranked:
+        ranked = sorted(
+            documents,
+            key=lambda doc: float(doc.metadata.get("score") or 0.0),
+            reverse=True,
+        )
+
+    fallback = []
+    for doc in ranked:
+        metadata = dict(doc.metadata or {})
+        metadata.update(
+            relevance_validated=True,
+            relevance_source="local_retrieval_fallback",
+            relevance_reason="Evidence provider unavailable; retained only retrieved mailbox evidence.",
+        )
+        fallback.append(Document(page_content=doc.page_content, metadata=metadata))
+    return fallback

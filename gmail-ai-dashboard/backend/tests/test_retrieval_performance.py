@@ -29,6 +29,9 @@ def test_provider_routing_is_query_dependent():
     latest = plan_retrieval("Show the latest unread emails", mcp_enabled=True)
     assert "gmail_mcp" in latest.providers
 
+    recent = plan_retrieval("Show recent emails about security", mcp_enabled=True)
+    assert "gmail_mcp" not in recent.providers
+
 
 def test_activity_events_are_public_and_ordered():
     with activity_context() as activity:

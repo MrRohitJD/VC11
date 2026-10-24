@@ -80,6 +80,10 @@ def gmail_search_query(query):
     sender = requested_sender(query)
     if sender:
         parts.append(f'from:"{sender}"')
+    if re.search(r"\bunread\b", query, re.I):
+        parts.append("is:unread")
+    if re.search(r"\binbox\b", query, re.I):
+        parts.append("in:inbox")
     # Topic selection happens on complete message evidence. Broad date-scoped
     # discovery also finds invitations that never contain the word "interview".
     return " ".join(parts)
