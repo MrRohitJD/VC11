@@ -20,11 +20,14 @@ def test_provider_routing_is_query_dependent():
     assert "gmail_mcp" not in focused.providers
 
     fresh = plan_retrieval("Show all emails received last week", mcp_enabled=True)
-    assert fresh.providers == ["bm25", "gmail_mcp"]
+    assert fresh.providers == ["bm25"]
     assert "vector" not in fresh.providers
 
     disabled = plan_retrieval("Show all emails received last week", mcp_enabled=False)
     assert disabled.providers == ["bm25"]
+
+    latest = plan_retrieval("Show the latest unread emails", mcp_enabled=True)
+    assert "gmail_mcp" in latest.providers
 
 
 def test_activity_events_are_public_and_ordered():

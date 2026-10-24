@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from functools import lru_cache
 from time import perf_counter
 from typing import Any, List, Optional
@@ -570,12 +570,21 @@ class GroundedRAGChain:
         if live_future is not None:
             live_started = perf_counter()
             try:
-                live_status = live_future.result()
+                # Keep the request responsive even if an overridden settings
+                # value is larger than the production live-search budget.
+                live_status = live_future.result(timeout=min(settings.gmail_mcp_timeout_seconds, 30))
                 emit_activity("gmail_search", f"Read {len(live_status['email_ids'])} live mailbox emails",
                               count=len(live_status["email_ids"]), provider="gmail_mcp",
                               status="completed" if live_status["complete"] else "warning",
                               duration_ms=round((perf_counter() - live_started) * 1000),
                               lane="gmail", parallel_group="retrieval")
+            except FutureTimeoutError:
+                live_error = "timeout"
+                logger.warning("Gmail MCP discovery unavailable: %s", live_error)
+                live_failed = True
+                emit_activity("gmail_search", "Live search unavailable; using synced mailbox mail",
+                              provider="gmail_mcp", status="warning",
+                              duration_ms=round((perf_counter() - live_started) * 1000), lane="gmail")
             except Exception as exc:
                 live_error = error_code(exc)
                 logger.warning("Gmail MCP discovery unavailable: %s", live_error)
@@ -584,7 +593,10 @@ class GroundedRAGChain:
                               provider="gmail_mcp", status="warning",
                               duration_ms=round((perf_counter() - live_started) * 1000), lane="gmail")
             finally:
-                live_executor.shutdown(wait=True)
+                # A timed-out worker owns its own MCP subprocess/session.  Do
+                # not block the answer while waiting for its cleanup; the
+                # client-side timeout will terminate it independently.
+                live_executor.shutdown(wait=False, cancel_futures=True)
 
         # MCP persists freshly fetched messages before returning their IDs.
         # Hydrate those rows directly so a message without an embedding is

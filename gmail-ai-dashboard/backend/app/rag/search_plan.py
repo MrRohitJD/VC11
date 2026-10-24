@@ -47,8 +47,9 @@ def sender_only_request(query):
         return False
     text = (query[:sender_clause.start()] + query[sender_clause.end():]).strip()
     text = normalize_date_words(text)
+    text = re.sub(r"\b(days?|weeks?|months?|years?)['’]s\b", r"\1", text, flags=re.I)
     text = re.sub(r'\b(?:last|past)\s+\d+\s+(?:days?|weeks?|months?|years?)\b', '', text, flags=re.I)
-    allowed = set('give me we that all every emails email mails mail messages message received incoming show list find get please from in on the my this current last previous month week today yesterday'.split())
+    allowed = set('a few some couple of give me we that all every emails email mails mail messages message received incoming show list find get please from in on the my this current last previous month week today yesterday'.split())
     return set(re.findall(r'[a-z]+', text.lower())) <= allowed
 
 
@@ -62,8 +63,9 @@ def date_only_request(query):
     if not received_date_bounds(query):
         return False
     text = re.sub(r"\b(?:last|past)\s+\d+\s+(?:days?|weeks?|months?|years?)\b", " ", query, flags=re.I)
+    text = re.sub(r"\b(days?|weeks?|months?|years?)['’]s\b", r"\1", text, flags=re.I)
     words = set(re.findall(r"[a-z]+", text.lower()))
-    allowed = set("give me a brief concise summary summarize summarise of all every incoming received emails email mails mail messages message today yesterday this current last previous month week from in on the my please show list find get and for to".split())
+    allowed = set("a few some couple of give me a brief concise summary summarize summarise of all every incoming received emails email mails mail messages message today yesterday this current last previous month week from in on the my please show list find get and for to".split())
     return bool(words) and words <= allowed
 
 

@@ -91,7 +91,17 @@ def plan_retrieval(query, filters=None, use_multi_query=None, mode="similarity",
         providers = ["vector"]
         routing_reason = "Focused requests use the indexed vector path first; lexical fallback is available on low confidence"
 
-    if mcp_enabled and (exhaustive or date_only or freshness or multi or diverse):
+    # Structured mailbox requests already have a complete, tenant-scoped SQL
+    # path.  Do not pay the live Gmail startup/network cost for them: the
+    # synced mailbox is authoritative for date and sender filters, and the
+    # deterministic path can return every matching message without embeddings
+    # or LLM relevance checks.  Reserve live discovery for requests where
+    # freshness cannot be inferred from a structured filter (for example,
+    # "latest unread mail" or a broad multi-topic request).
+    live_discovery_needed = mcp_enabled and (freshness or multi or diverse) and not (
+        exhaustive or date_only or exact_filter
+    )
+    if live_discovery_needed:
         providers.append("gmail_mcp")
         routing_reason += "; live Gmail validates current mailbox membership"
 

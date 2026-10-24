@@ -10,6 +10,9 @@ from app.core.config import settings
 from app.rag.search_plan import gmail_search_query
 
 
+MAX_LIVE_GMAIL_SECONDS = 30
+
+
 async def _search(user_id, query):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
@@ -19,16 +22,17 @@ async def _search(user_id, query):
     if database_url.drivername.startswith('sqlite') and database_url.database not in (None, '', ':memory:'):
         database_url = database_url.set(database=str(Path(database_url.database).resolve()))
 
+    timeout_seconds = min(settings.gmail_mcp_timeout_seconds, MAX_LIVE_GMAIL_SECONDS)
     params = StdioServerParameters(
         command=sys.executable, args=["-m", "app.services.gmail_mcp_server"],
         cwd=str(Path(__file__).resolve().parents[2]),
         env={**os.environ, "GMAIL_MCP_USER_ID": str(user_id),
              "DATABASE_URL": database_url.render_as_string(hide_password=False),
-             "GMAIL_MCP_TIMEOUT_SECONDS": str(settings.gmail_mcp_timeout_seconds)},
+             "GMAIL_MCP_TIMEOUT_SECONDS": str(timeout_seconds)},
     )
-    async with asyncio.timeout(settings.gmail_mcp_timeout_seconds):
+    async with asyncio.timeout(timeout_seconds):
         async with stdio_client(params) as (reader, writer):
-            async with ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=settings.gmail_mcp_timeout_seconds)) as session:
+            async with ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=timeout_seconds)) as session:
                 await session.initialize()
                 result = await session.call_tool("search_mailbox_emails", {
                     "query": gmail_search_query(query),

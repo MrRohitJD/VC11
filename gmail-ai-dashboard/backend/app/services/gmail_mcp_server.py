@@ -43,7 +43,9 @@ def fetch_page(service, items):
 
 
 def search_mailbox(db, user_id, query, max_messages):
-    deadline = time.monotonic() + max(1, settings.gmail_mcp_timeout_seconds - 20)
+    # Leave a small protocol-cleanup margin without turning the 30-second
+    # request budget into an accidental 10-second Gmail budget.
+    deadline = time.monotonic() + max(1, settings.gmail_mcp_timeout_seconds - 2)
     user = db.scalar(select(User).options(load_only(User.id)).where(User.id == UUID(str(user_id))))
     if user is None:
         raise ValueError("Authenticated user is unavailable")
