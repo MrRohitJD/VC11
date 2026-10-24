@@ -10,8 +10,8 @@ from app.core.config import settings
 from app.rag.search_plan import gmail_search_query
 
 
-MAX_LIVE_GMAIL_SECONDS = 30
-MAX_LIVE_GMAIL_MESSAGES = 200
+MAX_LIVE_GMAIL_SECONDS = 15
+MAX_LIVE_GMAIL_MESSAGES = 100
 
 
 async def _search(user_id, query):

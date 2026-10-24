@@ -18,6 +18,7 @@ import os
 import unittest
 from datetime import datetime
 from uuid import uuid4
+from unittest.mock import patch
 
 from langchain_core.documents import Document
 from sqlalchemy import create_engine
@@ -198,9 +199,25 @@ class TestToolsAndHumanInTheLoop(unittest.TestCase):
         self.db.commit()
 
         # 4. Now send -> MUST SUCCEED
-        success_res = send_tool.invoke({"approval_id": str(approval.id)})
+        with patch("app.rag.tools.send_gmail_message", return_value={"id": "gmail-message-1"}) as delivery:
+            success_res = send_tool.invoke({"approval_id": str(approval.id)})
+        delivery.assert_called_once()
         self.assertIn("Email successfully sent", success_res)
         self.assertEqual(approval.status, "SENT")
+        self.assertEqual(approval.delivery_message_id, "gmail-message-1")
+
+    def test_schedule_email_requires_approval_and_persists_time(self):
+        tools = {t.name: t for t in create_gmail_tools(self.db, self.user_id)}
+        scheduled = tools["schedule_email"].invoke({
+            "recipient": "recruiter@example.com",
+            "subject": "Follow-up",
+            "body": "Let us reconnect next week.",
+            "scheduled_for": "2099-01-01T10:00:00+00:00",
+        })
+        self.assertIn("Approval ID:", scheduled)
+        approval = self.db.query(EmailSendApproval).filter_by(user_id=self.user_id).first()
+        self.assertEqual(approval.status, "PENDING")
+        self.assertEqual(approval.scheduled_for.year, 2099)
 
 
 class TestGroundedRAGChain(unittest.TestCase):

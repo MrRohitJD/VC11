@@ -4,7 +4,9 @@ tokens and provides full-mailbox sync with progress reporting."""
 import json
 import logging
 import time
+import base64
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 from uuid import UUID
 
@@ -27,7 +29,9 @@ GMAIL_SCOPES = [
 	"https://www.googleapis.com/auth/userinfo.email",
 	"https://www.googleapis.com/auth/userinfo.profile",
 	"https://www.googleapis.com/auth/gmail.readonly",
+	"https://www.googleapis.com/auth/gmail.send",
 ]
+GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 
 
 # ------------------------------------------------------------------
@@ -69,6 +73,36 @@ def build_gmail_service_for_user(db: Session, user: User):
 		db.commit()
 
 	return build("gmail", "v1", credentials=creds)
+
+
+def send_gmail_message(
+	db: Session,
+	user: User,
+	recipient: str,
+	subject: str | None,
+	body: str,
+) -> dict:
+	"""Deliver one approved message through the user's authenticated Gmail API."""
+	account = db.scalar(select(GmailAccount).where(GmailAccount.user_id == user.id))
+	if account is None:
+		raise ValueError("No Gmail account linked to this user")
+	scopes = set((account.scope or "").split())
+	if scopes and GMAIL_SEND_SCOPE not in scopes:
+		raise PermissionError("Gmail send permission is missing; reconnect Gmail to enable sending")
+	if not recipient or "@" not in recipient:
+		raise ValueError("A valid recipient email address is required")
+
+	message = EmailMessage()
+	message["To"] = recipient.strip()
+	message["Subject"] = (subject or "").strip()
+	message.set_content(body or "")
+	raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+	service = build_gmail_service_for_user(db, user)
+	return _call_with_retry(
+		lambda: service.users().messages().send(
+			userId="me", body={"raw": raw}
+		).execute()
+	)
 
 
 # ------------------------------------------------------------------

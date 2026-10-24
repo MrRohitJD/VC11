@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
 	AlertCircle, Bot, CalendarDays, Check, CircleDot, Cpu, Database, ExternalLink,
-	FileText, Inbox, LayoutDashboard, ListChecks, Mail, MoreHorizontal, PenLine,
-	RefreshCw, Search, Send, Settings, Sparkles, Star, Tag, X, Zap,
+	FileText, Inbox, LayoutDashboard, ListChecks, Mail, Menu, MoreHorizontal, PanelLeftClose,
+	PanelRightClose, PanelRightOpen, PenLine, RefreshCw, Search, Send,
+	Settings, Sparkles, Star, Tag, X, Zap,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import EmailDetailsModal, { formatEmailDate } from '../components/EmailDetailsModal';
@@ -81,6 +82,16 @@ const SUGGESTED_PROMPTS = [
 	{ label: '📊 Summarize today\'s emails', query: 'Give me a brief summary of all incoming emails received today.' },
 ];
 
+const normalizeKeyPointForDisplay = (value) => {
+	let text = String(value || '').replace(/^\s*(?:[•*\-]|\d+[.)])\s*/, '').trim();
+	text = text.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').trim();
+	const sentence = text.match(/^.*?[.!?](?:\s|$)/)?.[0]?.trim() || text;
+	if (!sentence) return '';
+	if (sentence.length <= 100) return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+	const shortened = sentence.slice(0, 97).replace(/\s+\S*$/, '').replace(/[ ,;:]+$/, '');
+	return `${shortened || sentence.slice(0, 97)}...`;
+};
+
 export default function AiAssistant({ user: propUser }) {
 	const navigate = useNavigate();
 	const { user: authUser } = useAuth();
@@ -94,9 +105,27 @@ export default function AiAssistant({ user: propUser }) {
 	const [ragStatus, setRagStatus] = useState(null);
 	const [approvalFeedback, setApprovalFeedback] = useState({});
 	const [showExecutionDetails, setShowExecutionDetails] = useState(false);
+	const [navigationOpen, setNavigationOpen] = useState(true);
+	const [sidePanelOpen, setSidePanelOpen] = useState(true);
 	const messagesEndRef = useRef(null);
 
 	const [messages, setMessages] = useState([]);
+
+	useEffect(() => {
+		try {
+			setNavigationOpen(window.localStorage.getItem('gmail-ai-navigation-open') !== 'false');
+			setSidePanelOpen(window.localStorage.getItem('gmail-ai-key-points-open') !== 'false');
+		} catch {
+			// Preferences are optional and should never block the assistant.
+		}
+	}, []);
+
+	useEffect(() => {
+		try { window.localStorage.setItem('gmail-ai-navigation-open', String(navigationOpen)); } catch { /* optional */ }
+	}, [navigationOpen]);
+	useEffect(() => {
+		try { window.localStorage.setItem('gmail-ai-key-points-open', String(sidePanelOpen)); } catch { /* optional */ }
+	}, [sidePanelOpen]);
 
 	// Fetch system status on mount
 	useEffect(() => {
@@ -225,10 +254,13 @@ export default function AiAssistant({ user: propUser }) {
 
 	const handleApprove = async (approvalId) => {
 		try {
-			await approveRagEmail(approvalId);
+			const response = await approveRagEmail(approvalId);
 			setApprovalFeedback((prev) => ({
 				...prev,
-				[approvalId]: { status: 'APPROVED', message: 'Your email has been sent.' },
+				[approvalId]: {
+					status: response.data?.status || 'SENT',
+					message: response.data?.message || 'Your email has been delivered.',
+				},
 			}));
 		} catch (err) {
 			setApprovalFeedback((prev) => ({
@@ -269,13 +301,13 @@ export default function AiAssistant({ user: propUser }) {
 	const extractedKeyPoints = useMemo(() => {
 		// 1. Direct key_points array in latestResponse
 		if (latestResponse?.key_points && Array.isArray(latestResponse.key_points) && latestResponse.key_points.length > 0) {
-			return latestResponse.key_points;
+			return latestResponse.key_points.map(normalizeKeyPointForDisplay).filter(Boolean);
 		}
 
 		// 2. Gather key_points from cited emails
 		if (latestResponse?.emails && Array.isArray(latestResponse.emails)) {
 			const emailPoints = latestResponse.emails.flatMap((e) => e.key_points || []).filter(Boolean);
-			if (emailPoints.length > 0) return emailPoints;
+			if (emailPoints.length > 0) return emailPoints.map(normalizeKeyPointForDisplay).filter(Boolean);
 		}
 
 		// 3. Extract bullets from assistant message text
@@ -284,7 +316,7 @@ export default function AiAssistant({ user: propUser }) {
 				.split('\n')
 				.map((l) => l.trim())
 				.filter((l) => l.startsWith('•') || l.startsWith('-') || l.startsWith('*'));
-			if (bulletLines.length > 0) return bulletLines;
+			if (bulletLines.length > 0) return bulletLines.map(normalizeKeyPointForDisplay).filter(Boolean);
 		}
 
 		return [];
@@ -300,7 +332,7 @@ export default function AiAssistant({ user: propUser }) {
 		return user?.email?.[0]?.toUpperCase() || '?';
 	}, [user]);
 	return (
-		<div className="app-shell assistant-shell-view">
+		<div className={`app-shell assistant-shell-view ${navigationOpen ? '' : 'navigation-collapsed'} ${sidePanelOpen ? '' : 'side-panel-collapsed'}`}>
 			{/* Shared Universal Sidebar */}
 			<aside className="sidebar">
 				<div className="brand">
@@ -356,6 +388,15 @@ export default function AiAssistant({ user: propUser }) {
 			<div className="main-shell">
 				{/* Topbar */}
 				<header className="topbar">
+					<button
+						className="panel-toggle-button"
+						type="button"
+						onClick={() => setNavigationOpen((open) => !open)}
+						aria-label={navigationOpen ? 'Close navigation and composer panel' : 'Open navigation and composer panel'}
+						title={navigationOpen ? 'Close navigation panel' : 'Open navigation panel'}
+					>
+						{navigationOpen ? <PanelLeftClose size={18} /> : <Menu size={18} />}
+					</button>
 					<div className="search-box">
 						<Search size={16} />
 						<input
@@ -412,6 +453,15 @@ export default function AiAssistant({ user: propUser }) {
 										title="Clear conversation history"
 									>
 										<RefreshCw size={14} /> Clear
+									</button>
+									<button
+										className="panel-toggle-button"
+										type="button"
+										onClick={() => setSidePanelOpen((open) => !open)}
+										aria-label={sidePanelOpen ? 'Close key points panel' : 'Open key points panel'}
+										title={sidePanelOpen ? 'Close key points panel' : 'Open key points panel'}
+									>
+										{sidePanelOpen ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}
 									</button>
 								</div>
 							</div>
@@ -549,7 +599,7 @@ export default function AiAssistant({ user: propUser }) {
 																Review the draft above. Send it when you are ready, or discard it. Nothing is sent until you confirm.
 															</p>
 															{approvalFeedback[message.response.approval_id] ? (
-																<div style={{ fontSize: 13, fontWeight: 600, color: approvalFeedback[message.response.approval_id].status === 'APPROVED' ? '#16a34a' : '#dc2626' }}>
+															<div style={{ fontSize: 13, fontWeight: 600, color: ['APPROVED', 'SCHEDULED', 'SENT'].includes(approvalFeedback[message.response.approval_id].status) ? '#16a34a' : '#dc2626' }}>
 																	{approvalFeedback[message.response.approval_id].message}
 																</div>
 															) : (
@@ -558,7 +608,7 @@ export default function AiAssistant({ user: propUser }) {
 																		style={{ padding: '6px 14px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
 																		onClick={() => handleApprove(message.response.approval_id)}
 																	>
-																		<Check size={14} /> Send email
+															<Check size={14} /> Approve delivery
 																	</button>
 																	<button
 																		style={{ padding: '6px 14px', background: '#dc2626', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
@@ -664,7 +714,7 @@ export default function AiAssistant({ user: propUser }) {
 						</section>
 
 						{/* Right: RAG Pipeline Info & Grounding Panel */}
-						<aside className="assistant-side-panel">
+						{sidePanelOpen && <aside className="assistant-side-panel">
 							{/* Key Points Based on User Query */}
 							<section className="panel side-info-card key-points-card">
 								<div className="side-card-header">
@@ -711,7 +761,7 @@ export default function AiAssistant({ user: propUser }) {
 									))}
 								</div>
 							</section>
-						</aside>
+						</aside>}
 					</div>
 				</main>
 			</div>

@@ -35,3 +35,15 @@ it('opens the complete message when View email is clicked on a citation', async 
         query: 'What are my pending bills and invoices due this month?',
     }), expect.any(Function));
 });
+
+it('lets the user collapse both side panels to expand the chat area', async () => {
+    getRagStatus.mockResolvedValue({ data: {} });
+    render(<MemoryRouter><AiAssistant /></MemoryRouter>);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close navigation and composer panel' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close key points panel' }));
+
+    expect(screen.queryByRole('heading', { name: 'Key Points' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open navigation and composer panel' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open key points panel' })).toBeInTheDocument();
+});

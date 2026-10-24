@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from app.core.security import get_current_user
 from app.database.connection import get_db, SessionLocal
 from app.services.chat_quota import reserve_chat_request
+from app.services.gmail_service import send_gmail_message
 from app.rag.activity import activity_context
 from app.models.email import Email, GmailAccount, User
 from app.models.rag import (
@@ -51,6 +52,7 @@ from app.rag.query_constraints import mailbox_time_context
 from app.rag.indexing import default_pipeline
 from app.rag.memory import list_user_sessions
 from app.rag.vectorstore import default_vectorstore
+from app.rag.retrieval import normalize_key_points
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -171,7 +173,7 @@ def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[s
                 date=c.date,
                 snippet=c.snippet,
                 score=round(c.score, 4),
-                key_points=getattr(c, "key_points", []) or [],
+                key_points=normalize_key_points(getattr(c, "key_points", []) or []),
             )
             for c in agent_res.citations
         ]
@@ -181,6 +183,10 @@ def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[s
         seen_kp = set()
         for c in agent_res.citations:
             for kp in (getattr(c, "key_points", []) or []):
+                normalized = normalize_key_points([kp], max_points=1)
+                if not normalized:
+                    continue
+                kp = normalized[0]
                 norm_kp = kp.strip().lower()
                 if norm_kp and norm_kp not in seen_kp:
                     seen_kp.add(norm_kp)
@@ -188,9 +194,8 @@ def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[s
 
         # Fallback if citations had snippets but no explicit key points
         if not extracted_key_points and agent_res.citations:
-            from app.rag.retrieval import split_into_single_sentence_bullets
             for c in agent_res.citations:
-                bullets = split_into_single_sentence_bullets(c.snippet, max_points=3)
+                bullets = normalize_key_points([c.snippet], max_points=2)
                 for b in bullets:
                     norm_b = b.strip().lower()
                     if norm_b and norm_b not in seen_kp:
@@ -408,14 +413,7 @@ def get_session_details(
         # Load citation chunks linked to this message
         retrievals = db.scalars(
             select(ChatRetrieval)
-            .join(EmailChunk, EmailChunk.id == ChatRetrieval.chunk_id)
-            .join(Email, Email.id == EmailChunk.email_id)
-            .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
-            .where(
-                ChatRetrieval.chat_session_id == s_uuid,
-                ChatRetrieval.chat_message_id == msg.id,
-                GmailAccount.user_id == user.id,
-            )
+            .where(ChatRetrieval.chat_message_id == msg.id)
             .order_by(ChatRetrieval.retrieval_rank.asc())
         ).all()
 
@@ -497,7 +495,9 @@ def get_approvals(
             "status": a.status,
             "created_at": a.created_at.isoformat() if a.created_at else "",
             "approved_at": a.approved_at.isoformat() if a.approved_at else None,
+                "scheduled_for": a.scheduled_for.isoformat() if a.scheduled_for else None,
             "sent_at": a.sent_at.isoformat() if a.sent_at else None,
+                "delivery_message_id": a.delivery_message_id,
         }
         for a in approvals
     ]
@@ -528,13 +528,39 @@ def approve_email_send(
         raise HTTPException(status_code=400, detail=f"Draft cannot be approved from status '{approval.status}'.")
 
     approval.status = "APPROVED"
-    approval.approved_at = datetime.utcnow()
+    approval.approved_at = datetime.now(timezone.utc)
+
+    # Scheduled approvals are queued only after this explicit confirmation;
+    # the background worker performs delivery at the requested time.
+    if approval.scheduled_for:
+        approval.status = "SCHEDULED"
+        db.commit()
+        return ApprovalActionResponse(
+            approval_id=str(approval.id),
+            status="SCHEDULED",
+            message=f"Email to {approval.recipient_email} scheduled for {approval.scheduled_for.isoformat()}.",
+        )
+
+    db.commit()
+    try:
+        delivery = send_gmail_message(db, user, approval.recipient_email, approval.subject, approval.draft_body)
+    except Exception as exc:
+        # A delivery failure must remain retryable; approval alone is not
+        # evidence that Gmail accepted the message.
+        approval.status = "PENDING"
+        db.commit()
+        logger.warning("Approved Gmail delivery failed for %s: %s", approval.id, type(exc).__name__)
+        raise HTTPException(status_code=502, detail=f"Email was approved but could not be delivered: {exc}") from exc
+
+    approval.status = "SENT"
+    approval.sent_at = datetime.now(timezone.utc)
+    approval.delivery_message_id = delivery.get("id") if isinstance(delivery, dict) else None
     db.commit()
 
     return ApprovalActionResponse(
         approval_id=str(approval.id),
-        status="APPROVED",
-        message=f"Draft for {approval.recipient_email} approved. Delivery is not configured; no email was sent.",
+        status="SENT",
+        message=f"Email sent successfully to {approval.recipient_email}.",
     )
 
 

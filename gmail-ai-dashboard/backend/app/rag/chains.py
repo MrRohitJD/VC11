@@ -249,6 +249,7 @@ from app.rag.retrieval import (
     route_query_retrieval_strategy,
     should_fallback_to_hybrid,
     split_into_single_sentence_bullets,
+    normalize_key_points,
     hydrate_email_documents,
     scoped_mailbox_documents,
 )
@@ -337,11 +338,7 @@ def format_grounded_key_points_summary(citations: List[RetrievedCitation], query
         chosen_sentence = ""
         if scored_candidates:
             top_cand = scored_candidates[0][1]
-            match = re.search(r"^(.*?[.!?])(?:\s+|$)", top_cand)
-            first_sent = match.group(1).strip() if match else top_cand
-            if not first_sent.endswith((".", "!", "?")):
-                first_sent += "."
-            chosen_sentence = first_sent
+            chosen_sentence = (normalize_key_points([top_cand], max_points=1) or [""])[0]
 
         if not chosen_sentence:
             chosen_sentence = f"Relevant correspondence regarding '{subject}' recorded in mailbox."
@@ -446,7 +443,7 @@ class GroundedRAGChain:
             emit_activity("gmail_search", "Searching all Gmail categories in parallel", status="running",
                           provider="gmail_mcp", parallel=True, lane="gmail", parallel_group="retrieval")
             try:
-                from app.rag.gmail_mcp import search_live_mailbox
+                from app.rag.gmail_mcp import MAX_LIVE_GMAIL_SECONDS, search_live_mailbox
                 live_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gmail-mcp")
                 live_future = live_executor.submit(search_live_mailbox, user_id, effective_query)
             except Exception as exc:
@@ -572,7 +569,7 @@ class GroundedRAGChain:
             try:
                 # Keep the request responsive even if an overridden settings
                 # value is larger than the production live-search budget.
-                live_status = live_future.result(timeout=min(settings.gmail_mcp_timeout_seconds, 30))
+                live_status = live_future.result(timeout=min(settings.gmail_mcp_timeout_seconds, MAX_LIVE_GMAIL_SECONDS))
                 emit_activity("gmail_search", f"Read {len(live_status['email_ids'])} live mailbox emails",
                               count=len(live_status["email_ids"]), provider="gmail_mcp",
                               status="completed" if live_status["complete"] else "warning",

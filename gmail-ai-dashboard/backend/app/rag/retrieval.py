@@ -53,6 +53,46 @@ logger = logging.getLogger(__name__)
 # filters and live Gmail membership must not be rejected because an embedding
 # score is unavailable.
 MIN_SEMANTIC_CONFIDENCE = 0.65
+MAX_KEY_POINT_CHARS = 100
+
+
+def normalize_key_point(value: Any) -> str:
+    """Return one grounded, display-safe key point of at most 100 characters."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^\s*(?:[•*\-]|\d+[.)])\s*", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"[`*_]", "", text)
+    text = re.sub(r"[\t\r\n\xa0\u200b\u200c\u200d\u200e\u200f\ufeff]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -")
+    if not text:
+        return ""
+    match = re.search(r"^(.*?[.!?])(?:\s|$)", text)
+    if match:
+        text = match.group(1).strip()
+    if len(text) > MAX_KEY_POINT_CHARS:
+        shortened = text[: MAX_KEY_POINT_CHARS - 3].rsplit(" ", 1)[0].rstrip(" ,;:")
+        text = f"{shortened}..." if shortened else f"{text[:MAX_KEY_POINT_CHARS - 3]}..."
+    elif not text.endswith((".", "!", "?")):
+        text = f"{text}."
+    return text[:MAX_KEY_POINT_CHARS]
+
+
+def normalize_key_points(values: Any, max_points: int = 5) -> List[str]:
+    """Normalize and deduplicate a list of LLM-produced key points."""
+    result: List[str] = []
+    seen: Set[str] = set()
+    for value in values or []:
+        point = normalize_key_point(value)
+        if not point or point.casefold() in seen:
+            continue
+        seen.add(point.casefold())
+        result.append(point)
+        if len(result) >= max_points:
+            break
+    return result
 
 
 def scoped_mailbox_documents(db, user_id, query, filters, email_ids=None):
@@ -166,7 +206,7 @@ def documents_to_citations(documents: List[Document]) -> List[RetrievedCitation]
             seen_ids.add(eid)
 
         snippet = doc.page_content or ""
-        key_points = list(meta.get("key_points") or [])
+        key_points = normalize_key_points(meta.get("key_points") or [])
 
         # If document wasn't compressed, strip header if needed
         if not key_points and "\n\n" in snippet and not snippet.startswith("•"):
@@ -1313,7 +1353,7 @@ Given a user search query and an email, extract key points that are directly rel
 
 STRICT FORMATTING REQUIREMENTS:
 1. Format each key point as a bullet point starting with '• '.
-2. Each bullet point MUST be exactly ONE sentence maximum. Never combine multiple sentences into a single bullet point.
+2. Each bullet point MUST be exactly ONE sentence and no more than 100 characters.
 3. Be concise and factual. Ground all facts solely in the email content (include dates, times, senders, action items, monetary amounts, or interview details).
 4. If the email contains no relevant information for the query, reply with: NO_RELEVANT_INFO.
 5. Do not include any introduction, conversational filler, or conclusion. Return only the bullet points.""",
@@ -1366,7 +1406,7 @@ class EmailKeyPointsCompressor:
                     meta["irrelevant"] = True
                     meta["key_points"] = []
                     return Document(page_content="", metadata=meta)
-                bullets = split_into_single_sentence_bullets(raw_out, max_points=self.max_key_points)
+                bullets = [f"• {point}" for point in normalize_key_points(raw_out.splitlines(), max_points=self.max_key_points)]
             except Exception as exc:
                 logger.debug("LLM compression error: %s. Using heuristic fallback.", exc)
 

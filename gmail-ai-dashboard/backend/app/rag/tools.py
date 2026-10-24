@@ -17,9 +17,10 @@ from langchain_core.tools import tool
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models.email import AiCategory, Email, EmailClassification, EmailLabel, GmailAccount, Label
+from app.models.email import AiCategory, Email, EmailClassification, EmailLabel, GmailAccount, Label, User
 from app.models.rag import Attachment, EmailSendApproval
 from app.rag.mailbox_scope import mailbox_email_condition
+from app.services.gmail_service import send_gmail_message
 from app.rag.retrieval import (
     PostgresSemanticRetriever,
     ConditionalMultiQueryRetriever,
@@ -506,6 +507,38 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         )
 
     @tool
+    def schedule_email(recipient: str, subject: str, body: str, scheduled_for: str) -> str:
+        """Create a future email delivery requiring explicit user approval."""
+        sanitized = sanitize_tool_args({
+            "recipient": recipient, "subject": subject, "body": body, "scheduled_for": scheduled_for,
+        })
+        logger.info("Tool chosen: schedule_email with args: %s", sanitized)
+        try:
+            value = str(scheduled_for or "").strip().replace("Z", "+00:00")
+            when = datetime.fromisoformat(value)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            when = when.astimezone(timezone.utc)
+        except Exception:
+            return "Invalid scheduled_for value. Use an ISO-8601 datetime with timezone."
+        if when <= datetime.now(timezone.utc):
+            return "The scheduled time must be in the future."
+        approval = EmailSendApproval(
+            user_id=user_uuid,
+            recipient_email=recipient,
+            subject=subject,
+            draft_body=body,
+            status="PENDING",
+            scheduled_for=when,
+        )
+        db.add(approval)
+        db.commit()
+        return (
+            f"Scheduled draft created (Approval ID: {approval.id}) for {when.isoformat()}. "
+            "Explicit approval is required before the message is queued for delivery."
+        )
+
+    @tool
     def send_email(approval_id: str) -> str:
         """Send a drafted email ONLY if explicit user approval was registered.
 
@@ -533,9 +566,21 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
                 f"Human approval must be granted explicitly by the user."
             )
 
-        # Mark sent
+        if approval.scheduled_for:
+            return "This approval is scheduled; approve it through the mailbox UI to queue delivery."
+
+        user = db.get(User, user_uuid)
+        if user is None:
+            return "Email could not be sent because the authenticated user was not found."
+        try:
+            delivery = send_gmail_message(db, user, approval.recipient_email, approval.subject, approval.draft_body)
+        except Exception as exc:
+            logger.warning("Approved Gmail delivery failed: %s", type(exc).__name__)
+            return f"Email could not be sent: {exc}"
+
         approval.status = "SENT"
         approval.sent_at = datetime.now(timezone.utc)
+        approval.delivery_message_id = delivery.get("id") if isinstance(delivery, dict) else None
         db.commit()
         return f"Email successfully sent to {approval.recipient_email}."
 
@@ -553,5 +598,6 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         classify_email,
         get_email_attachments,
         draft_email,
+        schedule_email,
         send_email,
     ]

@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.rag.query_constraints import mailbox_now
 from app.rag.service_errors import error_code
 from app.rag.activity import emit_activity
+from app.rag.retrieval import normalize_key_points
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +37,9 @@ Return JSON only, with one decision for EVERY candidate in this exact format:
 "reason": "brief evidence-based explanation", "key_points": ["A supported fact."]}]}
 Use a JSON boolean for relevant. Rejected candidates must have an empty key_points
 array. Accepted candidates need 1-5 factual key points directly addressing the
-question, including dates/times when relevant. Do not copy navigation links or
-boilerplate such as 'Get app'. All facts must come from that candidate email.
+question, including dates/times when relevant. Each point must be one sentence
+and no more than 100 characters. Do not copy navigation links or boilerplate
+such as 'Get app'. All facts must come from that candidate email.
 """
 
 
@@ -135,8 +137,9 @@ def validate_email_relevance(documents, query, model, batch_size=5, _disabled=No
                 item = by_id[str(doc.metadata["email_id"])]
                 if item["relevant"]:
                     meta = dict(doc.metadata)
-                    meta.update(relevance_validated=True, relevance_reason=item["reason"], key_points=item["key_points"][:5])
-                    result.documents.append(Document(page_content="\n".join(item["key_points"][:5]), metadata=meta))
+                    key_points = normalize_key_points(item["key_points"][:5])
+                    meta.update(relevance_validated=True, relevance_reason=item["reason"], key_points=key_points)
+                    result.documents.append(Document(page_content="\n".join(key_points), metadata=meta))
             result.evaluated += len(batch)
             emit_activity('validate_evidence', f'Checked {result.evaluated} of {len(documents)} emails; {len(result.documents)} matches verified',
                           count=len(result.documents), evaluated=result.evaluated, status='running')

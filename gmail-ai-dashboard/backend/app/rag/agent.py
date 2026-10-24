@@ -55,6 +55,7 @@ from app.rag.retrieval import (
     GmailHybridRetriever,
     RetrievedCitation,
     default_retriever,
+    normalize_key_points,
     rewrite_query_with_history,
     route_query_retrieval_strategy,
 )
@@ -76,6 +77,7 @@ Analyze the user's message and select the single most appropriate intent categor
 - RAG_QUERY: Question about specific emails, dates, senders, bills, interviews, or facts stored in the mailbox.
 - ACTION_DRAFT: Request to write, draft, or compose a new email or reply.
 - ACTION_SEND: Request to send an approved email or authorize sending.
+- ACTION_SCHEDULE: Request to schedule an email for a future time.
 - PLAN_AND_EXECUTE: Complex multi-step instructions (e.g., "Find all interview emails, summarize them, and draft a response to John").
 - SUMMARIZE: General request to summarize the inbox, unread mail, or high-priority emails.
 - GENERAL_CHAT: Greeting, capability question, or general conversation.
@@ -357,6 +359,63 @@ class GmailAIAssistant:
         from app.rag.chains import format_grounded_key_points_summary
         return format_grounded_key_points_summary(citations, query)
 
+    @traceable(name="key_points_generation", run_type="chain")
+    def ensure_citation_key_points(
+        self,
+        query: str,
+        citations: List[RetrievedCitation],
+    ) -> List[RetrievedCitation]:
+        """Generate concise LLM key points for citations that lack them.
+
+        Relevance validation already supplies points on the fast RAG path. This
+        single bounded call covers tool/agent and provider-fallback paths without
+        adding a second model call when the validator has already done the work.
+        """
+        missing = [c for c in citations if not c.key_points]
+        if not missing:
+            return citations
+
+        payload = [
+            {
+                "email_id": c.email_id,
+                "subject": c.subject,
+                "sender": c.sender,
+                "date": c.date,
+                "content": c.snippet[:1200],
+            }
+            for c in missing[:8]
+        ]
+        prompt = [
+            SystemMessage(content=(
+                "You create mailbox key points from retrieved email evidence. "
+                "Return JSON only as {\"items\":[{\"email_id\":\"...\",\"key_points\":[\"...\"]}]}. "
+                "Use only the supplied email content. Give at most two factual key points per email. "
+                "Every point must be exactly one sentence and no more than 100 characters. "
+                "Never output URLs, tracking links, navigation text, or markdown."
+            )),
+            HumanMessage(content=json.dumps({"query": query, "emails": payload}, ensure_ascii=False)),
+        ]
+        generated: Dict[str, List[str]] = {}
+        try:
+            raw = self.model.invoke(prompt).content
+            raw = "".join(block.get("text", "") if isinstance(block, dict) else str(block) for block in raw) if isinstance(raw, list) else str(raw)
+            fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", raw.strip())
+            parsed = json.loads(fenced.group(1) if fenced else raw.strip())
+            for item in parsed.get("items", []):
+                if isinstance(item, dict) and item.get("email_id"):
+                    generated[str(item["email_id"])] = normalize_key_points(item.get("key_points"), max_points=2)
+        except Exception as exc:
+            logger.debug("LLM key-point generation unavailable: %s", type(exc).__name__)
+
+        for citation in missing:
+            points = generated.get(str(citation.email_id), [])
+            if not points:
+                # Keep the UI useful during a provider outage, but still apply
+                # the same URL-free, one-sentence, 100-character contract.
+                points = normalize_key_points([citation.snippet])
+            citation.key_points = points[:2]
+        return citations
+
 
     # ------------------------------------------------------------------------
     # Pattern 3: Router Pattern
@@ -413,13 +472,15 @@ class GmailAIAssistant:
             return "GENERAL_CHAT"
 
         # Fast heuristic checks
+        if any(w in clean_q for w in ["schedule an email", "schedule a mail", "schedule this", "send later", "send at "]):
+            return "ACTION_SCHEDULE"
         if any(w in clean_q for w in ["send the draft", "approve send", "send approval", "send email", "send this draft"]):
             return "ACTION_SEND"
         if any(w in clean_q for w in ["draft an email", "compose an email", "write an email", "prepare an email", "create a draft"]):
             return "ACTION_DRAFT"
 
         # Multi-step action workflow requiring PLAN_AND_EXECUTE (must combine search with active drafting/sending)
-        has_draft_action = any(w in clean_q for w in ["draft", "compose", "write an email", "send email", "reply to"])
+        has_draft_action = any(w in clean_q for w in ["draft", "compose", "write an email", "send email", "reply to", "schedule an email", "schedule a mail"])
         has_search_action_for_plan = any(w in clean_q for w in ["find", "search", "lookup", "filter", "get"])
         if (" and " in clean_q or "then" in clean_q) and has_draft_action and has_search_action_for_plan:
             return "PLAN_AND_EXECUTE"
@@ -449,7 +510,7 @@ class GmailAIAssistant:
         try:
             chain = ROUTER_PROMPT | self.model | self.output_parser
             decision = chain.invoke({"query": query}).strip()
-            valid_intents = {"RAG_QUERY", "ACTION_DRAFT", "ACTION_SEND", "PLAN_AND_EXECUTE", "SUMMARIZE", "GENERAL_CHAT"}
+            valid_intents = {"RAG_QUERY", "ACTION_DRAFT", "ACTION_SEND", "ACTION_SCHEDULE", "PLAN_AND_EXECUTE", "SUMMARIZE", "GENERAL_CHAT"}
             for vi in valid_intents:
                 if vi in decision:
                     if vi == "GENERAL_CHAT" and has_search_term:
@@ -842,7 +903,7 @@ class GmailAIAssistant:
             # steps; the caller can distinguish it from a mailbox workflow by
             # the intent alone.
             steps = []
-        elif intent == "ACTION_DRAFT":
+        elif intent in {"ACTION_DRAFT", "ACTION_SCHEDULE"}:
             # Pattern 2 & 6: Tool-Calling + Human-in-the-Loop Drafting
             tools = create_gmail_tools(db, user_uuid)
             answer, citations, steps = self.execute_react_agent(effective_query, db, user_uuid, tools)
@@ -905,6 +966,8 @@ class GmailAIAssistant:
             citations = list({c.email_id: c for c in citations}.values())
         else:
             citations = self.compress_context(citations, max_chunks=5)
+
+        citations = self.ensure_citation_key_points(effective_query, citations)
 
         # 5. Persist Assistant Response & Citations
         asst_msg = ChatMessage(

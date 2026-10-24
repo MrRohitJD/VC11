@@ -218,7 +218,7 @@ class EmailSendApproval(Base):
     __tablename__ = "email_send_approvals"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('PENDING', 'APPROVED', 'REJECTED', 'SENT', 'CANCELLED')",
+            "status IN ('PENDING', 'APPROVED', 'SCHEDULED', 'SENDING', 'REJECTED', 'SENT', 'CANCELLED')",
             name="ck_email_send_approvals_status",
         ),
         Index("ix_email_send_approvals_user_status", "user_id", "status"),
@@ -231,7 +231,9 @@ class EmailSendApproval(Base):
     draft_body: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="PENDING", server_default="PENDING", nullable=False)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_message_id: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, server_default=text("CURRENT_TIMESTAMP"), nullable=False
     )

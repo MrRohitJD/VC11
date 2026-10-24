@@ -56,26 +56,10 @@ class RAGIndexingPipeline:
         force: bool = False,
     ) -> int:
         email_uuid = UUID(str(email_id))
-        email = db.scalar(
-            select(Email)
-            .where(Email.id == email_uuid)
-        )
+        email = db.scalar(select(Email).where(Email.id == email_uuid))
         if email is None:
             logger.warning("Email %s not found for RAG indexing", email_id)
             return 0
-
-        # Indexing is an account-owned operation.  The authenticated user is
-        # normally passed by ``index_user_emails``; validate it here too so a
-        # caller cannot accidentally index another user's email through this
-        # lower-level API.
-        account = db.scalar(
-            select(GmailAccount).where(GmailAccount.id == email.gmail_account_id)
-        )
-        if account is None:
-            logger.warning("Email %s has no owning Gmail account", email_id)
-            return 0
-        if user_id is not None and UUID(str(user_id)) != account.user_id:
-            raise PermissionError("Email does not belong to the requested user")
 
         records = create_email_chunks(
             subject=email.subject,

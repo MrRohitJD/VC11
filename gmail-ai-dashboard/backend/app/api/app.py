@@ -29,6 +29,11 @@ async def lifespan(app: FastAPI):
 		start_global_rag_auto_indexer_daemon()
 	except Exception:
 		pass
+	try:
+		from app.services.email_scheduler import start_global_email_delivery_daemon
+		start_global_email_delivery_daemon()
+	except Exception:
+		pass
 	yield
 
 

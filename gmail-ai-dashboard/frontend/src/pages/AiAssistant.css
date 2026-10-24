@@ -9,6 +9,44 @@
   background: var(--canvas, #f5f6fa);
 }
 
+.assistant-shell-view > .sidebar {
+  flex: 0 0 260px;
+  overflow: hidden;
+  transition: flex-basis .2s ease, width .2s ease, padding .2s ease, border-color .2s ease;
+}
+
+.assistant-shell-view.navigation-collapsed > .sidebar {
+  flex-basis: 0;
+  width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  border-right-color: transparent;
+}
+
+.panel-toggle-button {
+  align-items: center;
+  background: #fff;
+  border: 1px solid #e1e4ec;
+  border-radius: 7px;
+  color: #616e82;
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 31px;
+  justify-content: center;
+  padding: 0;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+  width: 31px;
+}
+
+.panel-toggle-button:hover,
+.panel-toggle-button:focus-visible {
+  background: #f4f3ff;
+  border-color: #c9c4ff;
+  color: #5649d9;
+  outline: none;
+}
+
 .assistant-main-content {
   flex: 1;
   padding: 18px 24px;
@@ -22,6 +60,10 @@
   gap: 20px;
   align-items: start;
   height: 100%;
+}
+
+.side-panel-collapsed .assistant-layout-grid {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 /* Chat Card */
@@ -912,6 +954,7 @@
   color: #1e293b;
   line-height: 1.5;
   font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .key-points-empty {

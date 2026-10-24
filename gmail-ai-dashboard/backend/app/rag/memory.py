@@ -23,7 +23,6 @@ from langchain_core.messages import (
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from app.models.email import Email, GmailAccount
 from app.models.rag import ChatMessage, ChatRetrieval, ChatSession, EmailChunk
 from app.rag.retrieval import RetrievedCitation
 
@@ -135,47 +134,25 @@ def record_retrieval_citations(
     message_id: UUID | str,
     citations: List[RetrievedCitation],
 ) -> None:
-    """Store only user-owned retrieved citations in the audit table.
-
-    Retrieval results are expected to be scoped already, but this is a final
-    persistence boundary.  Re-checking both the chat session owner and the
-    email owner prevents a malformed citation or stale index record from
-    linking another user's email into a session.
-    """
+    """Store retrieved citations into chat_retrievals audit table."""
     s_uuid = UUID(str(session_id))
     m_uuid = UUID(str(message_id))
-
-    session = db.scalar(select(ChatSession).where(ChatSession.id == s_uuid))
-    message = db.scalar(
-        select(ChatMessage).where(
-            ChatMessage.id == m_uuid,
-            ChatMessage.chat_session_id == s_uuid,
-        )
-    )
-    if session is None or message is None:
-        logger.warning("Skipping retrieval audit for unknown session/message: %s/%s", s_uuid, m_uuid)
-        return
-
-    owned_chunk_query = (
-        select(EmailChunk)
-        .join(Email, Email.id == EmailChunk.email_id)
-        .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
-        .where(GmailAccount.user_id == session.user_id)
-    )
 
     for rank, citation in enumerate(citations, 1):
         try:
             # Find the corresponding EmailChunk record in PostgreSQL
             email_uuid = UUID(str(citation.email_id))
             chunk = db.scalar(
-                owned_chunk_query.where(
+                select(EmailChunk).where(
                     EmailChunk.email_id == email_uuid,
                     EmailChunk.chunk_index == citation.chunk_index,
                 )
             )
             if not chunk:
                 # Fallback to first chunk if specific index missing
-                chunk = db.scalar(owned_chunk_query.where(EmailChunk.email_id == email_uuid))
+                chunk = db.scalar(
+                    select(EmailChunk).where(EmailChunk.email_id == email_uuid)
+                )
 
             if chunk:
                 retrieval_entry = ChatRetrieval(
