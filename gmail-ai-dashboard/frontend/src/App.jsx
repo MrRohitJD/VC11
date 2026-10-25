@@ -12,6 +12,7 @@ import { useAuth } from './context/AuthContext';
 import GmailConsent from './pages/GmailConsent';
 import SyncPage from './pages/SyncPage';
 import AiAssistant from './pages/AiAssistant';
+import { PublicHome, PrivacyPolicy } from './pages/PublicPages';
 import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex, enterDemo } from './services/api';
 
 const navItems = [
@@ -493,7 +494,7 @@ function AuthPage({ signup }) {
 			setOpeningDemo(false);
 		}
 	};
-	return <div className={`auth-shell ${signup ? 'auth-signup' : 'auth-login'}`}><main className="auth-card"><div className="auth-brand"><GmailMark /><strong>Gmail AI Dashboard</strong></div><div className="auth-copy"><h1>{signup ? 'Create Your Account' : 'Welcome Back'}</h1><p>{signup ? 'Get started with your Gmail AI Dashboard' : 'Sign in to access your Gmail AI Dashboard'}</p></div><form className="auth-form" onSubmit={submit}><button className="google-button" type="submit"><span className="google-g">G</span>{signup ? 'Sign up with Google' : 'Continue with Google'}</button><p>Gmail sign-in is available to invited test users.</p><div className="auth-divider"><span /> <em>OR</em> <span /></div><button className="google-button" type="button" onClick={tryDemo} disabled={openingDemo}>{openingDemo ? 'Opening demo...' : 'Open demo@gmail.com'}</button><p>Explore a read-only mailbox with fictional emails. No Google sign-in needed.</p>{demoError && <p role="alert">{demoError}</p>}<p className="auth-switch">{signup ? 'Already have an account?' : "Don't have an account?"} <button type="button" onClick={() => navigate(signup ? '/login' : '/signup')}>{signup ? 'Sign in' : 'Sign up'}</button></p></form><AuthIllustration signup={signup} /><p className="auth-tagline">{signup ? 'Join and make your inbox work smarter.' : 'Your Gmail. Smarter with AI.'}</p></main></div>;
+	return <div className={`auth-shell ${signup ? 'auth-signup' : 'auth-login'}`}><main className="auth-card"><div className="auth-brand"><GmailMark /><strong>Gmail AI Dashboard</strong></div><div className="auth-copy"><h1>{signup ? 'Create Your Account' : 'Welcome Back'}</h1><p>{signup ? 'Get started with your Gmail AI Dashboard' : 'Sign in to access your Gmail AI Dashboard'}</p></div><form className="auth-form" onSubmit={submit}><button className="google-button" type="submit"><span className="google-g">G</span>{signup ? 'Sign up with Google' : 'Continue with Google'}</button><p>Review our <a href="/privacy">privacy policy</a> before connecting Gmail.</p><div className="auth-divider"><span /> <em>OR</em> <span /></div><button className="google-button" type="button" onClick={tryDemo} disabled={openingDemo}>{openingDemo ? 'Opening demo...' : 'Open demo@gmail.com'}</button><p>Explore a read-only mailbox with fictional emails. No Google sign-in needed.</p>{demoError && <p role="alert">{demoError}</p>}<p className="auth-switch">{signup ? 'Already have an account?' : "Don't have an account?"} <button type="button" onClick={() => navigate(signup ? '/login' : '/signup')}>{signup ? 'Sign in' : 'Sign up'}</button></p></form><AuthIllustration signup={signup} /><p className="auth-tagline">{signup ? 'Join and make your inbox work smarter.' : 'Your Gmail. Smarter with AI.'}</p></main></div>;
 }
 
 function EraseDialog({ open, onClose, onConfirm, confirming }) {
@@ -1194,7 +1195,10 @@ function AssistantRoute() {
 
 export default function App() {
 	const location = useLocation();
+	const { isAuthenticated, loading } = useAuth();
 
+	if (location.pathname === '/privacy') return <PrivacyPolicy />;
+	if (location.pathname === '/' && !loading && !isAuthenticated) return <PublicHome />;
 	if (location.pathname === '/login') return <AuthPage signup={false} />;
 	if (location.pathname === '/signup') return <AuthPage signup={true} />;
 	if (location.pathname === '/consent') return <GmailConsent />;

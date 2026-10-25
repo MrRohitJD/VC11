@@ -54,3 +54,13 @@ git push heroku heroku_deploy_dev_lg:main --force
 ```
 
 After release, open `https://ai-powered-gmail-0007703734bc.herokuapp.com/health` to confirm the service is healthy.
+
+## Google OAuth production verification
+
+Try verifying the exact Heroku URL as a **URL-prefix property** in Google Search Console: `https://ai-powered-gmail-0007703734bc.herokuapp.com/`. Use a Google account that is an Owner or Editor of the OAuth Cloud project. Choose HTML file verification, download the unique file supplied by Search Console, and place it unchanged in `gmail-ai-dashboard/frontend/public/`. Deploy it and confirm that `https://ai-powered-gmail-0007703734bc.herokuapp.com/<verification-file-name>` serves the exact file publicly, then click Verify. Keep the file deployed so verification remains valid. A Domain property requires DNS ownership and is not appropriate for `herokuapp.com`.
+
+Deploy and confirm the public homepage (`/`) and privacy policy (`/privacy`) are readable in a private browser window. In Google Auth Platform, set the consent screen app name to **Gmail AI Dashboard** to match the homepage. Use `https://ai-powered-gmail-0007703734bc.herokuapp.com/` as the homepage URL and `https://ai-powered-gmail-0007703734bc.herokuapp.com/privacy` as the privacy policy URL. The redirect URI can remain `https://ai-powered-gmail-0007703734bc.herokuapp.com/api/auth/callback`.
+
+After Search Console says the URL-prefix property is verified, wait the 24 hours requested in Google's rejection notice before resubmitting. Google may still require a custom domain if it does not accept ownership verification for this hosted subdomain; in that case attach a domain you control to Heroku, verify it, and update the homepage, privacy policy, environment origins, and OAuth redirect URI together.
+
+Declare the two Gmail scopes requested by the app: `https://www.googleapis.com/auth/gmail.readonly` and `https://www.googleapis.com/auth/gmail.send`. Review the published privacy policy against the actual production deployment and provider contracts before submitting it to Google. Google must separately approve the scopes; resolving these website issues alone does not remove the unverified-app warning.
