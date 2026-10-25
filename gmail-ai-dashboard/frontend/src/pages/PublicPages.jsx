@@ -10,9 +10,9 @@ const APP_NAME = 'Gmail AI Dashboard & Inbox Mail Assistant';
 function PublicLayout({ children }) {
   const { isAuthenticated } = useAuth();
   return <div className="public-page">
-    <header className="public-header"><Link to="/" className="public-brand">{APP_NAME}</Link><nav><Link to="/privacy">Privacy policy</Link><Link to="/terms">Terms of Service</Link><Link to={isAuthenticated ? '/dashboard' : '/login'}>{isAuthenticated ? 'Dashboard' : 'Sign in'}</Link></nav></header>
+    <header className="public-header"><Link to="/" className="public-brand">Gmail AI Dashboard</Link><nav><Link to="/privacy">Privacy policy</Link><Link to="/terms">Terms of Service</Link><Link to={isAuthenticated ? '/dashboard' : '/login'}>{isAuthenticated ? 'Dashboard' : 'Sign in'}</Link></nav></header>
     <main className="public-main">{children}</main>
-    <footer className="public-footer"><span>{APP_NAME}</span><Link to="/privacy">Privacy policy</Link><Link to="/terms">Terms of Service</Link><a href={`mailto:${CONTACT}`}>Contact</a></footer>
+    <footer className="public-footer"><span>Gmail AI Dashboard</span><Link to="/privacy">Privacy policy</Link><Link to="/terms">Terms of Service</Link><a href={`mailto:${CONTACT}`}>Contact</a></footer>
   </div>;
 }
 
