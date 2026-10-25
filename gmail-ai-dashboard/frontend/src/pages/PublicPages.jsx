@@ -10,9 +10,9 @@ const APP_NAME = 'Gmail AI Dashboard & Inbox Mail Assistant';
 function PublicLayout({ children }) {
   const { isAuthenticated } = useAuth();
   return <div className="public-page">
-    <header className="public-header"><Link to="/" className="public-brand">{APP_NAME}</Link><nav><Link to="/privacy">Privacy policy</Link><Link to={isAuthenticated ? '/dashboard' : '/login'}>{isAuthenticated ? 'Dashboard' : 'Sign in'}</Link></nav></header>
+    <header className="public-header"><Link to="/" className="public-brand">{APP_NAME}</Link><nav><Link to="/privacy">Privacy policy</Link><Link to="/terms">Terms of Service</Link><Link to={isAuthenticated ? '/dashboard' : '/login'}>{isAuthenticated ? 'Dashboard' : 'Sign in'}</Link></nav></header>
     <main className="public-main">{children}</main>
-    <footer className="public-footer"><span>{APP_NAME}</span><Link to="/privacy">Privacy policy</Link><a href={`mailto:${CONTACT}`}>Contact</a></footer>
+    <footer className="public-footer"><span>{APP_NAME}</span><Link to="/privacy">Privacy policy</Link><Link to="/terms">Terms of Service</Link><a href={`mailto:${CONTACT}`}>Contact</a></footer>
   </div>;
 }
 
@@ -52,5 +52,18 @@ export function PrivacyPolicy() {
     <h2>Your choices and deletion</h2><p>You can disconnect the app from your Google Account permissions page to stop future Google API access. In the app's settings, you can erase stored mailbox messages, derived indexes, and assistant history; this also clears the stored Google OAuth credentials. The app retains your profile and label records after this action. To request complete account deletion or ask about retained records, email <a href={`mailto:${CONTACT}`}>{CONTACT}</a>. Erasing app data does not delete messages from Gmail.</p>
     <h2>Security</h2><p>We use access controls and authenticated sessions to limit access to each user's mailbox data. No internet service can guarantee absolute security. If you believe your account has been affected, contact us at <a href={`mailto:${CONTACT}`}>{CONTACT}</a>.</p>
     <h2>Changes</h2><p>We may update this policy as the app changes. The current version will be published on this page with its update date.</p>
+  </article></PublicLayout>;
+}
+
+export function TermsOfService() {
+  return <PublicLayout><article className="privacy-content">
+    <p className="public-kicker">Terms of Service</p><h1>Gmail AI Dashboard Terms of Service</h1><p>Last updated: 25 October 2026</p>
+    <p>These terms describe use of Gmail AI Dashboard. For questions, contact <a href={`mailto:${CONTACT}`}>{CONTACT}</a>.</p>
+    <h2>Using the app</h2><p>You need a Google account and must authorize the requested Gmail permissions to use connected mailbox features. You are responsible for activity you initiate through your account and for complying with applicable laws and Google's terms when using Gmail.</p>
+    <h2>What the app provides</h2><p>Gmail AI Dashboard offers mailbox viewing, synchronization, search, analytics, AI assisted answers, and user controlled email sending. AI generated classifications and answers can be incomplete or inaccurate. Review important information and any message before relying on it or sending it.</p>
+    <h2>Permissions and your data</h2><p>Connecting Gmail authorizes the app to read messages and send messages on your behalf as shown on Google's consent screen. The app's use of your information is described in the <Link to="/privacy">privacy policy</Link>. You can revoke Google access through your Google Account settings. You can also erase stored mailbox data through the app's settings; doing so does not remove messages from Gmail.</p>
+    <h2>Acceptable use</h2><p>Do not use the app to send spam, impersonate others, violate others' rights, or interfere with the service. Do not attempt to access another user's account or mailbox without authorization.</p>
+    <h2>Availability and changes</h2><p>Features may change or be interrupted for maintenance, provider outages, or security reasons. We may update these terms and will publish the current version here with its update date.</p>
+    <h2>Contact</h2><p>For support or questions about these terms, email <a href={`mailto:${CONTACT}`}>{CONTACT}</a>.</p>
   </article></PublicLayout>;
 }
