@@ -1,19 +1,22 @@
 import { Link } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 import './PublicPages.css';
 
 const CONTACT = 'bibinvid4@gmail.com';
 
 function PublicLayout({ children }) {
+  const { isAuthenticated } = useAuth();
   return <div className="public-page">
-    <header className="public-header"><Link to="/" className="public-brand">Gmail AI Dashboard</Link><nav><Link to="/privacy">Privacy policy</Link><Link to="/login">Sign in</Link></nav></header>
+    <header className="public-header"><Link to="/" className="public-brand">Gmail AI Dashboard</Link><nav><Link to="/privacy">Privacy policy</Link><Link to={isAuthenticated ? '/dashboard' : '/login'}>{isAuthenticated ? 'Dashboard' : 'Sign in'}</Link></nav></header>
     <main className="public-main">{children}</main>
     <footer className="public-footer"><span>Gmail AI Dashboard</span><Link to="/privacy">Privacy policy</Link><a href={`mailto:${CONTACT}`}>Contact</a></footer>
   </div>;
 }
 
 export function PublicHome() {
+  const { isAuthenticated } = useAuth();
   return <PublicLayout>
-    <section className="public-hero"><p className="public-kicker">Gmail AI Dashboard</p><h1>Understand and search your Gmail with AI</h1><p>Connect your Gmail account to view mailbox activity, organize messages, search your mail, and ask questions about your email. You control when the app sends a message on your behalf.</p><div className="public-actions"><Link className="public-primary" to="/login">Get started</Link><Link to="/privacy">How we use your data</Link></div></section>
+    <section className="public-hero"><p className="public-kicker">Gmail AI Dashboard</p><h1>Understand and search your Gmail with AI</h1><p>Connect your Gmail account to view mailbox activity, organize messages, search your mail, and ask questions about your email. You control when the app sends a message on your behalf.</p><div className="public-actions"><Link className="public-primary" to={isAuthenticated ? '/dashboard' : '/login'}>{isAuthenticated ? 'Open dashboard' : 'Get started'}</Link><Link to="/privacy">How we use your data</Link></div></section>
     <section className="public-section"><h2>What the app does</h2><div className="public-features"><article><h3>Mailbox dashboard</h3><p>Sync messages and view email activity, categories, and important mail.</p></article><article><h3>Search and assistant</h3><p>Search your mailbox and use an AI assistant to answer questions grounded in your messages.</p></article><article><h3>Send with your approval</h3><p>Compose and send email from your Gmail account when you choose to do so.</p></article></div></section>
     <section className="public-section"><h2>Google access requested</h2><p>The app requests permission to read Gmail messages and send email on your behalf. Reading is used for synchronization, search, summaries, and AI features. Sending is used for user initiated email. Read our <Link to="/privacy">privacy policy</Link> before connecting.</p></section>
   </PublicLayout>;

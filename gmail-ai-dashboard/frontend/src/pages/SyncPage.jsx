@@ -78,7 +78,7 @@ export default function SyncPage() {
 	// Redirect to dashboard after completion
 	useEffect(() => {
 		if (syncState.status === 'completed') {
-			const timer = setTimeout(() => navigate('/', { replace: true }), 2500);
+			const timer = setTimeout(() => navigate('/dashboard', { replace: true }), 2500);
 			return () => clearTimeout(timer);
 		}
 	}, [syncState.status, navigate]);

@@ -487,7 +487,7 @@ function AuthPage({ signup }) {
 			setOpeningDemo(true);
 			await enterDemo();
 			await checkAuth();
-			navigate('/', { replace: true });
+			navigate('/dashboard', { replace: true });
 		} catch (error) {
 			setDemoError(error.response?.data?.detail || 'The demo is unavailable right now.');
 		} finally {
@@ -634,11 +634,11 @@ function SettingsPage() {
 		}
 	};
 
-	if (user?.is_demo) return <div className="settings-shell"><div className="settings-card"><button className="settings-back" onClick={() => navigate('/')}>← Back to Dashboard</button><h1>Sample mailbox</h1><p>These are fictional emails for the public demo. Gmail sync and account changes are disabled.</p><button className="settings-btn logout-btn" onClick={handleLogout}><LogOut size={16} /> Leave demo</button></div></div>;
+	if (user?.is_demo) return <div className="settings-shell"><div className="settings-card"><button className="settings-back" onClick={() => navigate('/dashboard')}>← Back to Dashboard</button><h1>Sample mailbox</h1><p>These are fictional emails for the public demo. Gmail sync and account changes are disabled.</p><button className="settings-btn logout-btn" onClick={handleLogout}><LogOut size={16} /> Leave demo</button></div></div>;
 
 	return <div className="settings-shell">
 		<div className="settings-card">
-			<button className="settings-back" onClick={() => navigate('/')}>← Back to Dashboard</button>
+			<button className="settings-back" onClick={() => navigate('/dashboard')}>← Back to Dashboard</button>
 			<h1>Account Settings</h1>
 
 			<section className="settings-section">
@@ -1195,15 +1195,15 @@ function AssistantRoute() {
 
 export default function App() {
 	const location = useLocation();
-	const { isAuthenticated, loading } = useAuth();
 
 	if (location.pathname === '/privacy') return <PrivacyPolicy />;
-	if (location.pathname === '/' && !loading && !isAuthenticated) return <PublicHome />;
+	if (location.pathname === '/') return <PublicHome />;
 	if (location.pathname === '/login') return <AuthPage signup={false} />;
 	if (location.pathname === '/signup') return <AuthPage signup={true} />;
 	if (location.pathname === '/consent') return <GmailConsent />;
 	if (location.pathname === '/sync') return <ProtectedRoute><SyncPage /></ProtectedRoute>;
 	if (location.pathname === '/settings') return <ProtectedRoute><SettingsPage /></ProtectedRoute>;
 	if (location.pathname === '/assistant') return <ProtectedRoute><AssistantRoute /></ProtectedRoute>;
-	return <ProtectedRoute><Dashboard /></ProtectedRoute>;
+	if (location.pathname === '/dashboard') return <ProtectedRoute><Dashboard /></ProtectedRoute>;
+	return <Navigate to="/" replace />;
 }

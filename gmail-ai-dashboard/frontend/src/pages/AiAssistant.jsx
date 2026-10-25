@@ -429,26 +429,26 @@ export default function AiAssistant({ user: propUser }) {
 					<div className="brand-mark"><Mail size={18} /></div>
 					<span>Gmail AI <strong>Dashboard</strong></span>
 				</div>
-				<button className="compose-button" onClick={() => navigate('/')}>
+				<button className="compose-button" onClick={() => navigate('/dashboard')}>
 					<PenLine size={17} /> Compose
 				</button>
 				<div className="nav-group">
-					<button className="nav-item" onClick={() => navigate('/')}>
+					<button className="nav-item" onClick={() => navigate('/dashboard')}>
 						<LayoutDashboard size={17} />
 						<span>Dashboard</span>
 					</button>
 				</div>
 				<div className="nav-group">
 					<p className="nav-label">MAILBOX</p>
-					<button className="nav-item" onClick={() => navigate('/')}>
+					<button className="nav-item" onClick={() => navigate('/dashboard')}>
 						<Inbox size={17} />
 						<span>Inbox</span>
 					</button>
-					<button className="nav-item" onClick={() => navigate('/')}>
+					<button className="nav-item" onClick={() => navigate('/dashboard')}>
 						<Star size={17} />
 						<span>Starred</span>
 					</button>
-					<button className="nav-item" onClick={() => navigate('/')}>
+					<button className="nav-item" onClick={() => navigate('/dashboard')}>
 						<Tag size={17} />
 						<span>Important</span>
 					</button>
@@ -504,7 +504,7 @@ export default function AiAssistant({ user: propUser }) {
 						<kbd>Ctrl</kbd><kbd>K</kbd>
 					</div>
 					<div className="top-actions">
-						<button className="icon-button" onClick={() => navigate('/')} title="Back to Dashboard">
+						<button className="icon-button" onClick={() => navigate('/dashboard')} title="Back to Dashboard">
 							<LayoutDashboard size={18} />
 						</button>
 						<button className="icon-button" onClick={() => navigate('/settings')} title="Settings">
