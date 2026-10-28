@@ -15,7 +15,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from functools import lru_cache
 from time import perf_counter
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 from uuid import UUID
 
 from langchain_core.language_models import BaseChatModel
@@ -23,6 +23,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 from sqlalchemy.orm import Session
 
@@ -194,21 +195,70 @@ def get_chat_model() -> Any:
             logger.warning("NVIDIA assistant provider unavailable: %s", type(exc).__name__)
 
     if settings.explabs_api_key:
-        models.append(ChatOpenAI(
-            model="deepseek-v4-flash", base_url="https://api.experientiallabs.ai/v1",
-            api_key=settings.explabs_api_key,
-            temperature=1,
-            max_tokens=settings.llm_max_completion_tokens,
-            timeout=settings.llm_request_timeout_seconds,
-            max_retries=settings.llm_max_retries,
-        ))
+        try:
+            models.append(ChatOpenAI(
+                model="deepseek-v4-flash", base_url="https://api.experientiallabs.ai/v1",
+                api_key=settings.explabs_api_key,
+                temperature=1,
+                max_tokens=settings.llm_max_completion_tokens,
+                timeout=settings.llm_request_timeout_seconds,
+                max_retries=settings.llm_max_retries,
+            ))
+        except Exception as exc:
+            logger.warning("Experimental lab assistant provider unavailable: %s", type(exc).__name__)
     if models:
         return models[0].with_fallbacks(models[1:]) if len(models) > 1 else models[0]
     # No dummy credentials: offline/unconfigured requests fail explicitly.
-    from langchain_core.runnables import RunnableLambda
     def unavailable(_input):
         raise RuntimeError("No assistant LLM provider is configured")
     return RunnableLambda(unavailable)
+
+
+def _require_chat_answer(response: Any) -> Any:
+    """Treat an empty assistant reply as a provider failure, unless it calls a tool."""
+    if getattr(response, "tool_calls", None):
+        return response
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        has_answer = bool(content.strip())
+    elif isinstance(content, list):
+        has_answer = any(
+            bool((part.get("text", "") if isinstance(part, dict) else str(part)).strip())
+            for part in content
+        )
+    else:
+        has_answer = bool(content)
+    if not has_answer:
+        raise ValueError("Chat provider returned no answer")
+    return response
+
+
+def answer_runnable(
+    model: Any, tools: Optional[list] = None,
+    validate_response: Optional[Callable[[Any], Any]] = None,
+) -> Any:
+    """Bind each provider separately and fall through on errors or empty replies."""
+    providers = [getattr(model, "runnable", model), *getattr(model, "fallbacks", [])]
+    checked = []
+    for provider in providers:
+        if tools is not None:
+            try:
+                provider = provider.bind_tools(tools)
+            except (AttributeError, NotImplementedError):
+                continue
+            except Exception as exc:
+                logger.warning("Could not bind chat provider tools: %s", type(exc).__name__)
+                continue
+        runnable = provider if isinstance(provider, Runnable) else RunnableLambda(provider.invoke)
+        def check(response):
+            _require_chat_answer(response)
+            if validate_response is not None:
+                validate_response(response)
+            return response
+        checked.append(runnable | RunnableLambda(check))
+    if not checked:
+        raise RuntimeError("No assistant LLM provider supports this request")
+    return checked[0].with_fallbacks(checked[1:]) if len(checked) > 1 else checked[0]
 
 
 def format_context_from_citations(citations: List[RetrievedCitation]) -> str:
@@ -270,7 +320,7 @@ def format_grounded_key_points_summary(citations: List[RetrievedCitation], query
     """
     if not citations:
         if is_financial_query(query):
-            return "I could not verify any matching bills or invoices in your mailbox with the requested payment status and due date."
+            return "I could not verify matching bills, payments, or receipts in the emails checked. This does not establish that nothing needs to be paid."
         return "I could not find relevant emails in your mailbox matching this request."
 
     bullets = []
@@ -367,7 +417,7 @@ class GroundedRAGChain:
         self.output_parser = StrOutputParser()
 
         # Build LangChain Runnable composition
-        self.chain = RAG_PROMPT_TEMPLATE | self.model | self.output_parser
+        self.chain = RAG_PROMPT_TEMPLATE | answer_runnable(self.model) | self.output_parser
 
     @traceable(name="rag_answer_query", run_type="chain")
     def answer_query(

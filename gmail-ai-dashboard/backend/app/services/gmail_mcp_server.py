@@ -42,17 +42,29 @@ def fetch_page(service, items):
     return [messages[item['id']] for item in items]
 
 
-def search_mailbox(db, user_id, query, max_messages):
-    # Leave a small protocol-cleanup margin without turning the 30-second
-    # request budget into an accidental 10-second Gmail budget.
-    deadline = time.monotonic() + max(1, settings.gmail_mcp_timeout_seconds - 2)
+def search_mailbox(db, user_id, query, max_messages, *, time_budget_seconds=None):
+    # The caller subtracts subprocess startup/handshake time. Reserve a
+    # cleanup margin and never start a fresh full request budget here.
+    budget = max(1, settings.gmail_mcp_timeout_seconds - 2)
+    if time_budget_seconds is not None:
+        budget = min(budget, max(0, time_budget_seconds))
+    deadline = time.monotonic() + budget
     user = db.scalar(select(User).options(load_only(User.id)).where(User.id == UUID(str(user_id))))
     if user is None:
         raise ValueError("Authenticated user is unavailable")
     account = db.scalar(select(GmailAccount).where(GmailAccount.user_id == user.id))
     if account is None:
         raise ValueError("No linked Gmail account")
-    service = build_gmail_service_for_user(db, user)
+    if time.monotonic() >= deadline:
+        return {"email_ids": [], "complete": False, "source": "gmail_mcp", "error_code": "timeout"}
+    service = build_gmail_service_for_user(db, user, timeout_seconds=min(5, max(0.1, deadline - time.monotonic())))
+
+    def bound_transport():
+        # googleapiclient uses one AuthorizedHttp transport for list/batch calls.
+        # Bound each operation to the remaining wall-time budget.
+        transport = getattr(getattr(service, "_http", None), "http", None)
+        if transport is not None:
+            transport.timeout = min(5, max(0.1, deadline - time.monotonic()))
     token = None
     ids = []
     complete = True
@@ -63,10 +75,15 @@ def search_mailbox(db, user_id, query, max_messages):
             complete, failure = False, 'timeout'
             break
         try:
+            bound_transport()
             page = service.users().messages().list(
-                userId="me", q=query, maxResults=min(50, max_messages - scanned),
+                userId="me", q=query, maxResults=min(20, max_messages - scanned),
                 pageToken=token, includeSpamTrash=False,
             ).execute()
+            if time.monotonic() >= deadline:
+                complete, failure = False, 'timeout'
+                break
+            bound_transport()
             messages = fetch_page(service, page.get('messages', []))
         except Exception as exc:
             complete, failure = False, error_code(exc)
@@ -112,14 +129,14 @@ def search_mailbox(db, user_id, query, max_messages):
 
 
 @mcp.tool()
-def search_mailbox_emails(query: str, max_messages: int = 1000) -> dict:
+def search_mailbox_emails(query: str, max_messages: int = 1000, time_budget_seconds: float | None = None) -> dict:
     """Search and read all non-junk Gmail categories; return persisted email IDs."""
     if not 1 <= max_messages <= 10000:
         raise ValueError("max_messages must be between 1 and 10000")
     user_id = UUID(os.environ["GMAIL_MCP_USER_ID"])
     with SessionLocal() as db:
         try:
-            return search_mailbox(db, user_id, query, max_messages)
+            return search_mailbox(db, user_id, query, max_messages, time_budget_seconds=time_budget_seconds)
         except Exception as exc:
             db.rollback()
             return {"email_ids": [], "complete": False, "source": "gmail_mcp", "error_code": error_code(exc)}

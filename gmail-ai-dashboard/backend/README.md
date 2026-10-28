@@ -38,8 +38,9 @@ sender address/name, receipt timestamp, and full message text. It returns an
 explicit relevance decision with supporting key points. Only accepted
 candidates become answer context and related-email cards. Invalid decisions,
 unknown IDs, or provider failures produce no unvalidated sources and a clear
-validation-unavailable response. The assistant uses the configured NVIDIA
-provider first, with configured Azure/OpenAI and ExperientialLabs fallbacks.
+validation-unavailable response. The assistant uses configured Azure OpenAI
+first, then NVIDIA, then ExperientialLabs when an earlier provider fails or
+returns no usable answer.
 
 "Find all" requests validate the full retrieved candidate set in batches and
 retain all accepted sources instead of silently truncating the result to five.

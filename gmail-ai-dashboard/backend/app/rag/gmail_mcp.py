@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -32,12 +33,16 @@ async def _search(user_id, query, *, full_scan=False):
              "DATABASE_URL": database_url.render_as_string(hide_password=False),
              "GMAIL_MCP_TIMEOUT_SECONDS": str(timeout_seconds)},
     )
+    started = time.monotonic()
     async with asyncio.timeout(timeout_seconds):
         async with stdio_client(params) as (reader, writer):
             async with ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=timeout_seconds)) as session:
                 await session.initialize()
                 result = await session.call_tool("search_mailbox_emails", {
                     "query": gmail_search_query(query),
+                    # Startup and handshake consume the SAME deadline as Gmail
+                    # I/O; leave time to return committed partial results.
+                    "time_budget_seconds": max(0, timeout_seconds - (time.monotonic() - started) - 2),
                     # Broad categorization uses a larger, still bounded scan.
                     # Search status reports when the configured cap is reached.
                     "max_messages": (settings.gmail_mcp_max_messages if full_scan else

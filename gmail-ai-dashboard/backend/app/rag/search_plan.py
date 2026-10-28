@@ -91,6 +91,11 @@ def gmail_search_query(query):
         parts.append("is:unread")
     if re.search(r"\binbox\b", query, re.I):
         parts.append("in:inbox")
+    # Financial requests need focused discovery; fetching the first 100 messages
+    # from a busy 30-day inbox can miss bills entirely and waste the time budget.
+    from app.rag.query_constraints import is_financial_query
+    if is_financial_query(query) and not classification_request(query):
+        parts.append('{bill bills billing invoice invoices payment payments receipt receipts "amount due" "balance due"}')
     # Topic selection happens on complete message evidence. Broad date-scoped
     # discovery also finds invitations that never contain the word "interview".
     return " ".join(parts)

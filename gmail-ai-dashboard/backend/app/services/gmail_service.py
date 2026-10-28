@@ -39,7 +39,7 @@ GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 # Build authenticated Gmail service from stored OAuth tokens
 # ------------------------------------------------------------------
 
-def build_gmail_service_for_user(db: Session, user: User):
+def build_gmail_service_for_user(db: Session, user: User, *, timeout_seconds: float | None = None):
 	"""Create a Gmail API service using the user's stored OAuth credentials.
 
 	Automatically refreshes expired access tokens and persists new tokens
@@ -65,7 +65,11 @@ def build_gmail_service_for_user(db: Session, user: User):
 		creds.expiry = account.token_expiry.astimezone(timezone.utc).replace(tzinfo=None) if account.token_expiry.tzinfo else account.token_expiry
 
 	if creds.expired and creds.refresh_token:
-		creds.refresh(GoogleAuthRequest())
+		refresh_request = GoogleAuthRequest()
+		if timeout_seconds is not None:
+			from functools import partial
+			refresh_request = partial(refresh_request, timeout=timeout_seconds)
+		creds.refresh(refresh_request)
 		account.access_token = creds.token
 		if creds.refresh_token:
 			account.refresh_token = creds.refresh_token
@@ -73,6 +77,11 @@ def build_gmail_service_for_user(db: Session, user: User):
 		account.updated_at = datetime.now(timezone.utc)
 		db.commit()
 
+	if timeout_seconds is not None:
+		import httplib2
+		from google_auth_httplib2 import AuthorizedHttp
+		http = AuthorizedHttp(creds, http=httplib2.Http(timeout=timeout_seconds))
+		return build("gmail", "v1", http=http, static_discovery=True, cache_discovery=False)
 	return build("gmail", "v1", credentials=creds)
 
 

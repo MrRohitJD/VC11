@@ -1,6 +1,10 @@
 """Safe, actionable service diagnostics without logging credentials or email bodies."""
 
 
+class InvalidServiceResponse(ValueError):
+    """A service result failed its explicit output contract."""
+
+
 def error_code(exc):
     children = getattr(exc, 'exceptions', ())
     if children:
@@ -15,7 +19,7 @@ def error_code(exc):
         return 'timeout'
     if 'programmingerror' in name or 'operationalerror' in name:
         return 'database'
-    if name in {'validationerror', 'outputparserexception', 'interpretationresponseerror'}:
+    if isinstance(exc, InvalidServiceResponse) or name in {'validationerror', 'outputparserexception', 'interpretationresponseerror'}:
         return 'invalid_response'
     if isinstance(exc, (ValueError, KeyError, TypeError)):
         return 'internal_error'

@@ -239,7 +239,7 @@ def received_date_bounds(query: str, now: datetime | None = None):
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
-FINANCIAL_TOPIC = re.compile(r"\b(?:bills?|billing|invoices?|payments?|amount due|balance due|outstanding balance)\b", re.I)
+FINANCIAL_TOPIC = re.compile(r"\b(?:bills?|billing|invoices?|payments?|receipts?|amount due|balance due|outstanding balance)\b", re.I)
 PENDING_PAYMENT = re.compile(
     r"\b(?:unpaid|outstanding|amount due|balance due|payment due|payment reminder|"
     r"invoice due|pay by|due date|due on|due by|payment is due|bill is due|pending payment|payment is pending|overdue)\b", re.I,

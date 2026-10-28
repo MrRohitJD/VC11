@@ -116,7 +116,39 @@ def fallback_leave_request(query: str) -> InterpretedRequest | None:
     )
 
 
+def clarify_teacher_leave(query: str) -> InterpretedRequest | None:
+    """Clarify explicit new leave messages without guessing holiday calendars."""
+    if not re.match(r"\s*(?:please\s+)?(?:send|write|draft|compose|prepare|create)\b.{0,35}\b(?:mail|email|message)\b", query, re.I | re.S):
+        return None
+    if not re.search(r"\bteacher\b", query, re.I) or not re.search(r"\bleave\b", query, re.I):
+        return None
+    if re.search(r"\b(?:reply|forward|schedule|delete|search|find|don't|not|cancel)\b", query, re.I):
+        return None
+    addresses = _EMAIL_ADDRESS.findall(query)
+    duration = re.search(r"\b(\d{1,3})\s+days?\b", query, re.I)
+    # Specific weekday/date requests still go through semantic interpretation.
+    has_date = bool(re.search(r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|today|tomorrow)\b|\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b|\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b", query, re.I))
+    if len(addresses) > 1:
+        return None
+    missing = []
+    if not addresses:
+        missing.append("your teacher's email address")
+    if duration and not has_date:
+        missing.append(f"the exact start date (including year) for your {int(duration[1])}-day leave")
+    if not missing:
+        return None
+    return InterpretedRequest(intent="CLARIFY", clarification_question=(
+        "Please confirm " + " and ".join(missing) + ". I can then prepare the leave email for your review."
+    ))
+
+
 def interpretation_failure_message(exc):
+    failures = getattr(exc, "interpretation_failures", [])
+    if failures:
+        details = "; ".join(f"{name}: {code}" for name, code in failures)
+        return ("I could not interpret your request because the AI services failed. "
+                + details + ". Timeouts may be temporary; authentication failures require checking "
+                "the named provider's credentials or access permissions.")
     code = error_code(exc)
     return f"I could not interpret your request. {error_hint(code)} Error code: {code}. Please try again shortly."
 
@@ -191,6 +223,9 @@ def fallback_read_request(query: str) -> InterpretedRequest | None:
 
 
 def interpret_request(model, query, history=()):
+    history = list(history)
+    if not history and (clarification := clarify_teacher_leave(query)):
+        return clarification
     try:
         bounds = received_date_bounds(query)
         from app.rag.search_plan import classification_request
@@ -225,6 +260,7 @@ def interpret_request(model, query, history=()):
     # itself need not implement with_structured_output.
     providers = [getattr(model, "runnable", model), *getattr(model, "fallbacks", [])]
     repair_candidate = None
+    failures = []
     last_exc = RuntimeError("No configured provider supports structured interpretation")
     try:
         for provider in providers:
@@ -246,6 +282,9 @@ def interpret_request(model, query, history=()):
                     raise
             except Exception as exc:
                 last_exc = exc
+                provider_label = {"AzureChatOpenAI": "Azure OpenAI", "ChatOpenAI": "OpenAI-compatible provider",
+                                  "ChatNVIDIA": "NVIDIA"}.get(provider_name, provider_name)
+                failures.append((provider_label, error_code(exc)))
                 logger.warning(
                     "Interpretation attempt failed provider=%s category=%s diagnostics=%s",
                     provider_name, error_code(exc), _response_diagnostics(exc),
@@ -271,6 +310,8 @@ def interpret_request(model, query, history=()):
                     "Interpretation repair failed provider=%s category=%s diagnostics=%s",
                     provider_name, error_code(exc), _response_diagnostics(exc),
                 )
+        if len(failures) > 1:
+            last_exc.interpretation_failures = failures
         raise last_exc
     except Exception as exc:
         logger.warning("Request interpretation failed (%s, category=%s)", type(exc).__name__, error_code(exc))
@@ -278,6 +319,9 @@ def interpret_request(model, query, history=()):
         if fallback:
             logger.warning("Using explicit read-only routing after interpretation failure")
             return fallback
+        clarification = clarify_teacher_leave(query)
+        if clarification:
+            return clarification
         fallback = fallback_leave_request(query)
         if fallback:
             logger.warning("Model interpretation failed; preparing a bounded leave-request draft")

@@ -44,7 +44,7 @@ except ImportError:
         return decorator if (name is None or isinstance(name, str)) else name
 
 from app.models.rag import ChatMessage, ChatSession, EmailSendApproval
-from app.rag.chains import GroundedRAGChain, USER_RESPONSE_STYLE, get_chat_model
+from app.rag.chains import GroundedRAGChain, USER_RESPONSE_STYLE, answer_runnable, get_chat_model
 from app.rag.memory import (
     PostgresChatMessageHistory,
     get_or_create_chat_session,
@@ -586,8 +586,10 @@ class GmailAIAssistant:
         retrieval/tool selection. This prevents the tool-routing model from
         echoing the user's meta-instructions into the subject or body.
         """
-        model = getattr(self.model, "runnable", self.model)
-        response = model.invoke([
+        response = answer_runnable(
+            self.model,
+            validate_response=lambda reply: _parse_generated_draft(getattr(reply, "content", reply)),
+        ).invoke([
             SystemMessage(content=EMAIL_DRAFT_SYSTEM_PROMPT),
             HumanMessage(content=generate_email_draft_prompt(request)),
         ])
@@ -654,7 +656,7 @@ class GmailAIAssistant:
         ]
 
         try:
-            response = self.model.invoke(messages)
+            response = answer_runnable(self.model).invoke(messages)
             content = str(response.content).strip()
             if content:
                 return content
@@ -711,7 +713,7 @@ class GmailAIAssistant:
         ]
         generated: Dict[str, List[str]] = {}
         try:
-            raw = self.model.invoke(prompt).content
+            raw = answer_runnable(self.model).invoke(prompt).content
             raw = "".join(block.get("text", "") if isinstance(block, dict) else str(block) for block in raw) if isinstance(raw, list) else str(raw)
             fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", raw.strip())
             parsed = json.loads(fenced.group(1) if fenced else raw.strip())
@@ -1046,17 +1048,7 @@ class GmailAIAssistant:
         # Attempt tool binding with chat model
         model_with_tools = None
         try:
-            # Bind each real chat provider before constructing its runnable
-            # fallback chain; RunnableWithFallbacks itself has no bind_tools.
-            providers = [getattr(self.model, "runnable", self.model), *getattr(self.model, "fallbacks", [])]
-            bound_models = []
-            for provider in providers:
-                try:
-                    bound_models.append(provider.bind_tools(tools))
-                except (AttributeError, NotImplementedError):
-                    continue
-            if bound_models:
-                model_with_tools = bound_models[0].with_fallbacks(bound_models[1:]) if len(bound_models) > 1 else bound_models[0]
+            model_with_tools = answer_runnable(self.model, tools)
         except Exception as exc:
             logger.debug("Could not bind tools to chat model: %s", exc)
 
@@ -1251,9 +1243,7 @@ class GmailAIAssistant:
                 HumanMessage(content=effective_query),
             ]
             try:
-                answer = str(self.model.invoke(chat_messages).content).strip()
-                if not answer:
-                    raise ValueError("Empty LLM response")
+                answer = str(answer_runnable(self.model).invoke(chat_messages).content).strip()
             except Exception as exc:
                 logger.warning("LLM call failed for general chat (%s), using dynamic generation.", exc)
                 answer = (

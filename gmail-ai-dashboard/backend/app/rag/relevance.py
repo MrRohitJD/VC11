@@ -10,7 +10,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.rag.query_constraints import mailbox_now
-from app.rag.service_errors import error_code
+from app.rag.service_errors import InvalidServiceResponse, error_code
 from app.rag.activity import emit_activity
 from app.rag.retrieval import normalize_key_points
 
@@ -63,24 +63,27 @@ def _parse_decisions(response, candidates):
         content = "".join(block.get("text", "") if isinstance(block, dict) else str(block) for block in content)
     raw = str(content).strip()
     fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
-    payload = json.loads(fenced.group(1) if fenced else raw)
-    decisions = payload["decisions"]
+    try:
+        payload = json.loads(fenced.group(1) if fenced else raw)
+        decisions = payload["decisions"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise InvalidServiceResponse("Invalid relevance JSON") from exc
     expected = {c["email_id"] for c in candidates}
     if not isinstance(decisions, list) or len(decisions) != len(expected):
-        raise ValueError("Incomplete relevance decisions")
+        raise InvalidServiceResponse("Incomplete relevance decisions")
     seen = set()
     for item in decisions:
         if not isinstance(item, dict):
-            raise ValueError("Invalid relevance decision")
+            raise InvalidServiceResponse("Invalid relevance decision")
         eid = item.get("email_id")
         if eid not in expected or eid in seen or type(item.get("relevant")) is not bool:
-            raise ValueError("Invalid relevance identity or verdict")
+            raise InvalidServiceResponse("Invalid relevance identity or verdict")
         seen.add(eid)
         points, reason = item.get("key_points"), item.get("reason")
         if (not isinstance(points, list) or not isinstance(reason, str) or not reason.strip()
                 or any(not isinstance(p, str) or not p.strip() for p in points)
                 or (item["relevant"] and not points)):
-            raise ValueError("Missing relevance evidence")
+            raise InvalidServiceResponse("Missing relevance evidence")
     return payload
 
 
