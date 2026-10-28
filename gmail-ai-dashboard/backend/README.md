@@ -2,21 +2,14 @@
 
 ## Mailbox assistant category scope
 
-The mailbox assistant answers using only Primary emails. Semantic search,
-database fallback, multi-query search, threads, summaries, and attachments all
-use the current synced Gmail labels. Other categories are never included as a
-fallback when Primary has no matches.
-
-Primary includes `CATEGORY_PERSONAL` and `INBOX` messages without another Gmail
-category. Social, Promotions, Updates, Forums, Spam, Trash, and Drafts are
-excluded. Records without category or inbox label evidence are excluded until
-labels are synced. AI classifications and custom labels named "Primary" do not
-determine Gmail category membership. See Google's [system label reference](https://developers.google.com/workspace/gmail/api/guides/labels).
-
-Existing vector indexes work without reindexing: eligible email IDs are read
-from the database and applied before vector ranking. Gmail label changes take
-effect after sync. This restriction applies to assistant retrieval; mailbox
-sync and dashboard email lists continue to include all categories.
+The mailbox assistant searches all Gmail categories and archived mail, excluding
+Spam, Trash, and Drafts. Existing vector indexes work without reindexing:
+eligible email IDs are read from the database and applied before vector ranking.
+The Gmail API synchronizes the Inbox into the local index. For broad, date-scoped,
+sender-only, or freshness-sensitive questions, the RAG chain also queries live
+Gmail through the read-only MCP worker and merges authorized results with local
+retrieval. The agent also exposes direct Gmail API search as a separate read-only
+tool. A failed or capped live search is reported as incomplete.
 
 Standalone questions do not inherit topics from earlier conversation turns.
 For pending bills due this month, retrieval requires explicit billing,
@@ -46,6 +39,27 @@ returns no usable answer.
 retain all accepted sources instead of silently truncating the result to five.
 
 ## PostgreSQL and pgvector setup
+
+### Separate Azure resources for chat and embeddings
+
+The backend can use one Azure OpenAI resource for chat and another for both
+query and background email embeddings. Set matching endpoint/key pairs in
+`backend/.env`:
+
+```env
+AZURE_OPENAI_ENDPOINT=https://<chat-resource>.openai.azure.com/
+AZURE_OPENAI_API_KEY=<chat-resource-key>
+AZURE_OPENAI_DEPLOYMENT=<chat-deployment-name>
+
+AZURE_OPENAI_EMBEDDING_ENDPOINT=https://<embedding-resource>.openai.azure.com/
+AZURE_OPENAI_EMBEDDING_API_KEY=<embedding-resource-key>
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=<embedding-deployment-name>
+```
+
+If the embedding endpoint and key are omitted, embeddings use the chat resource
+settings for backward compatibility. Use the same embedding deployment and model
+dimensions for indexing and query retrieval. Restart the backend after changing
+`.env`.
 
 Retrieval and indexing use the configured PostgreSQL database with pgvector.
 Set `RAG_VECTOR_BACKEND=postgres` (the application default) and ensure the

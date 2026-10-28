@@ -815,6 +815,7 @@ function Dashboard() {
 	const [expandedPreview, setExpandedPreview] = useState(false);
 	const [isRefreshing, setIsRefreshing] = useState(false);
 	const [isSyncing, setIsSyncing] = useState(false);
+	const [backgroundSync, setBackgroundSync] = useState(null);
 
 	const navigate = useNavigate();
 	const { user, logout } = useAuth();
@@ -826,7 +827,7 @@ function Dashboard() {
 			const [summaryRes, chartsRes, emailsRes] = await Promise.allSettled([
 				fetchAnalyticsSummary(targetRange),
 				fetchAnalyticsCharts(targetActivityRange),
-				fetchEmails({ per_page: 50, page: 1, range: targetRange }),
+				fetchEmails({ per_page: 50, page: 1, inbox_only: true }),
 			]);
 
 			if (summaryRes.status === 'fulfilled') {
@@ -896,7 +897,7 @@ function Dashboard() {
 	};
 
 	const handleSync = async () => {
-		if (isSyncing || isRefreshing) return;
+		if (isSyncing || isRefreshing || backgroundSync?.background_status === 'syncing') return;
 		setIsSyncing(true);
 		setToast('Syncing Gmail...');
 		try {
@@ -909,10 +910,11 @@ function Dashboard() {
 					if (data.status === 'completed') {
 						clearInterval(pollInterval);
 						setIsSyncing(false);
-						setToast('Gmail synced. Refreshing dashboard...');
+						setBackgroundSync(data);
+						setToast(data.background_status === 'syncing' ? 'Recent Inbox mail is ready. Older mail is syncing.' : 'Inbox synced. Refreshing dashboard...');
 						await loadDashboardData(range, activityRange);
-						setToast('Dashboard is up to date');
-						setTimeout(() => setToast(''), 2500);
+						if (data.background_status !== 'syncing') setToast('Dashboard is up to date');
+						setTimeout(() => setToast(''), 3500);
 					} else if (data.status === 'error') {
 						clearInterval(pollInterval);
 						setIsSyncing(false);
@@ -943,22 +945,44 @@ function Dashboard() {
 
 	useEffect(() => {
 		if (!user || user.is_demo) return undefined;
-
-		// Keep the mailbox current while the dashboard is open. The API ignores
-		// duplicate requests when a sync is already underway.
-		const autoSyncTimer = window.setInterval(() => {
-			startSync().catch(() => {});
-		}, 40000);
-
-		return () => window.clearInterval(autoSyncTimer);
-	}, [user]);
+		let mounted = true;
+		let previousStatus = null;
+		let polling = false;
+		const pollSync = async () => {
+			if (polling) return;
+			polling = true;
+			try {
+				const { data } = await getSyncStatus();
+				if (!mounted) return;
+				setBackgroundSync(data);
+				if (data.status === 'idle') {
+					// A server restart can interrupt the background worker. The next
+					// dashboard visit restarts the scan and skips stored messages.
+					await startSync();
+				} else if (data.background_status === 'syncing') {
+					const { data: inboxPage } = await fetchEmails({ per_page: 1, page: 1, inbox_only: true });
+					if (mounted) setInboxTotal(inboxPage.total || 0);
+				} else if (previousStatus?.background_status === 'syncing' && data.background_status === 'completed') {
+					loadDashboardData(range, activityRange);
+				}
+				previousStatus = data;
+			} catch {
+				// A later poll or the manual Sync action can retry.
+			} finally {
+				polling = false;
+			}
+		};
+		pollSync();
+		const timer = window.setInterval(pollSync, 15000);
+		return () => { mounted = false; window.clearInterval(timer); };
+	}, [user?.id, range, activityRange]);
 
 	const loadMoreInbox = async () => {
 		if (loadingMoreInbox || inboxEmails.length >= inboxTotal) return;
 		setLoadingMoreInbox(true);
 		try {
 			const nextPage = inboxPage + 1;
-			const { data } = await fetchEmails({ per_page: 50, page: nextPage, range });
+			const { data } = await fetchEmails({ per_page: 50, page: nextPage, inbox_only: true });
 			const mappedEmails = (data.emails || []).map((email) => {
 				const sender = email.from_email || 'Unknown sender';
 				const initials = sender.split(/[ @]/).filter(Boolean).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
@@ -1074,6 +1098,8 @@ function Dashboard() {
 				<div className="main-shell">
 					<Header search={search} setSearch={setSearch} onMenu={() => {}} onLogout={handleLogout} user={user} onNavigateSettings={() => navigate('/settings')} />
 					<main className="content">
+						{backgroundSync?.background_status === 'syncing' && <p role="status">{backgroundSync.background_scanned ? `Syncing the rest of your Inbox: ${backgroundSync.background_scanned.toLocaleString()} older messages checked.` : 'Syncing the rest of your Inbox...'}</p>}
+						{backgroundSync?.background_status === 'error' && <p role="alert">Inbox sync paused. <button type="button" onClick={handleSync} disabled={isSyncing}>Retry sync</button></p>}
 						<InboxView
 							emails={inboxEmails}
 							selectedId={selectedId}
@@ -1113,7 +1139,7 @@ function Dashboard() {
 							<span className="eyebrow">{currentDate}</span>
 							<h1>Good morning, {user?.name?.split(' ')[0] || 'there'} <span>✦</span></h1>
 							<p>{analyticsError || "Here's what's happening with your inbox today."}</p>
-							<p>{user?.is_demo ? 'Demo mode: all emails are fictional sample data.' : (import.meta.env.PROD ? 'Showcase coverage: up to your 500 most recent Gmail messages.' : '')}</p>
+							{user?.is_demo ? <p>Demo mode: all emails are fictional sample data.</p> : backgroundSync?.background_status === 'syncing' ? <p>{backgroundSync.background_scanned ? `Syncing older Inbox messages: ${backgroundSync.background_scanned.toLocaleString()} checked, ${backgroundSync.background_synced?.toLocaleString() || 0} added.` : 'Syncing older Inbox messages...'}</p> : backgroundSync?.background_status === 'error' ? <p>Inbox sync paused. Use Sync to retry.</p> : null}
 						</div>
 						<div className="welcome-actions">
 							<label className="date-button">
@@ -1135,11 +1161,11 @@ function Dashboard() {
 			{!user?.is_demo && <button
 								className="sync-button"
 								onClick={handleSync}
-								disabled={isSyncing || isRefreshing}
+								disabled={isSyncing || isRefreshing || backgroundSync?.background_status === 'syncing'}
 								aria-busy={isSyncing}
 							>
-								<Mail size={15} className={isSyncing ? 'spin' : ''} />
-								{isSyncing ? 'Syncing...' : 'Sync'}
+								<Mail size={15} className={isSyncing || backgroundSync?.background_status === 'syncing' ? 'spin' : ''} />
+								{isSyncing || backgroundSync?.background_status === 'syncing' ? 'Syncing...' : 'Sync'}
 			</button>}
 						</div>
 					</section>

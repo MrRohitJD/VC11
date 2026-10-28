@@ -16,7 +16,6 @@ Set these config vars on `ai-powered-gmail`:
 | --- | --- |
 | `ENVIRONMENT` | `production` |
 | `RAG_VECTOR_BACKEND` | `postgres` |
-| `GMAIL_SYNC_LIMIT` | `500` |
 | `DATABASE_POOL_SIZE` | `2` |
 | `DATABASE_MAX_OVERFLOW` | `3` |
 | `LANGSMITH_TRACING` | `false` |

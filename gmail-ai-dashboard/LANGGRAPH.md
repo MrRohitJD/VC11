@@ -30,17 +30,20 @@ Defaults (optional overrides in `backend/.env`):
 ```env
 GMAIL_MCP_ENABLED=true
 GMAIL_MCP_MAX_MESSAGES=1000
-GMAIL_MCP_TIMEOUT_SECONDS=120
+GMAIL_MCP_TIMEOUT_SECONDS=30
 ```
 
-Search remains Primary-only, including archived CATEGORY_PERSONAL messages and
-INBOX messages without another category. Updates, Promotions, Social, Forums,
-Spam, Trash and Drafts remain excluded, even when they contain interview details.
-Live discovery paginates Gmail, reads full messages, and refreshes matching local
-records and their labels. Local database records keep the existing source-view
-and citation endpoints working. It does not require re-embedding live messages.
+Assistant search includes all Gmail categories and archived mail. Spam, Trash and
+Drafts are excluded. The local Gmail sync supplies indexed retrieval; broad,
+date-scoped, sender-only, and freshness-sensitive queries also search live Gmail
+through MCP. The agent has separate read-only tools for MCP and direct Gmail API
+search. Live discovery paginates Gmail, reads full messages, and refreshes matching
+local records and labels. These records keep the existing source-view and citation
+endpoints working without requiring re-embedding on the current request.
 If live discovery fails or reaches its cap, the answer explicitly warns that
-coverage may be incomplete; it must not imply it searched all Gmail messages.
+coverage may be incomplete and continues with synced mail. The chat API accepts
+`use_gmail_mcp` to enable or disable MCP discovery for an individual request;
+when omitted, query-based routing applies.
 
 "All" requests enumerate eligible database records rather than ranked chunks.
 "Last N months" subtracts calendar months with day clamping in the client's

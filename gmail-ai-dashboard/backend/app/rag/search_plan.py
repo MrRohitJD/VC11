@@ -16,8 +16,10 @@ def requested_sender(query):
     match = _SENDER_CLAUSE_RE.search(query or "")
     if not match:
         return None
-    value = match[1].strip(' .\"')
+    value = match[1].strip(' ."')
     if not value or re.match(r'^(?:\d|(?:last|past|this|the|previous|today|yesterday|January|February|March|April|May|June|July|August|September|October|November|December)\b)', value, re.I):
+        return None
+    if re.match(r'^(?:gmail(?:\s+mcp)?|mcp|mailbox|inbox|my\s+inbox|my\s+email)\b', value, re.I):
         return None
     _, parsed_address = parseaddr(value)
     if parsed_address and re.fullmatch(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', parsed_address):
@@ -76,7 +78,45 @@ def date_only_request(query):
     return bool(words) and words <= allowed
 
 
-def gmail_search_query(query):
+_GMAIL_STOPWORDS = frozenset(
+    "a an the i my me you your we our find search show get list give please "
+    "all every email emails mail mails message messages related about regarding "
+    "concerning from to in on at for by of with and or is are was were be have has "
+    "had do does did what when where who how can could would should tell summarize "
+    "summarise summary brief overview incoming received sent today yesterday this "
+    "current last past previous month months week weeks day days year years upcoming "
+    "recent unread inbox mailbox gmail mcp live any some couple info information details detail".split()
+)
+
+
+def extract_gmail_search_terms(query):
+    """Extract topic keywords or quoted phrases from user query for Gmail search."""
+    if not query or date_only_request(query) or sender_only_request(query) or classification_request(query):
+        return []
+    clean = str(query).strip()
+    quoted = re.findall(r'["\']([^"\']{2,})["\']', clean)
+    sender_clause = _SENDER_CLAUSE_RE.search(clean)
+    if sender_clause:
+        clean = (clean[:sender_clause.start()] + " " + clean[sender_clause.end():]).strip()
+    clean = normalize_date_words(clean)
+    clean = re.sub(r"\b(?:last|past)\s+\d+\s+(?:days?|weeks?|months?|years?)\b", " ", clean, flags=re.I)
+    clean = re.sub(r"\b(?:last|past)\s+(?:day|week|month|year)\b", " ", clean, flags=re.I)
+    clean = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", " ", clean)
+
+    words = re.findall(r"[A-Za-z0-9_\-+]+", clean)
+    keywords = [w for w in words if w.lower() not in _GMAIL_STOPWORDS and len(w) > 1]
+
+    terms = []
+    for qp in quoted:
+        terms.append(f'"{qp.strip()}"')
+    quoted_tokens = {token.lower() for qp in quoted for token in re.findall(r"\w+", qp)}
+    for kw in keywords:
+        if kw.lower() not in quoted_tokens and kw not in terms:
+            terms.append(kw)
+    return terms
+
+
+def gmail_search_query(query, *, include_topic_terms=True):
     # Search every Gmail category, including archived mail, while excluding
     # junk and incomplete messages that should never enter RAG context.
     parts = ["-in:spam", "-in:trash", "-in:drafts"]
@@ -94,8 +134,14 @@ def gmail_search_query(query):
     # Financial requests need focused discovery; fetching the first 100 messages
     # from a busy 30-day inbox can miss bills entirely and waste the time budget.
     from app.rag.query_constraints import is_financial_query
-    if is_financial_query(query) and not classification_request(query):
+    if include_topic_terms and is_financial_query(query) and not classification_request(query):
         parts.append('{bill bills billing invoice invoices payment payments receipt receipts "amount due" "balance due"}')
+    elif include_topic_terms:
+        terms = extract_gmail_search_terms(query)
+        if terms:
+            # OR retains recall when a message uses only one of the user's
+            # topic words. The evidence validator decides final relevance.
+            parts.append("{" + " ".join(terms[:8]) + "}")
     # Topic selection happens on complete message evidence. Broad date-scoped
     # discovery also finds invitations that never contain the word "interview".
     return " ".join(parts)

@@ -125,7 +125,8 @@ def delete_user_gmail_data(db: Session, user: User) -> None:
 		# credentials and mailbox cursor data so no OAuth secret survives.
 		db.execute(update(GmailAccount).where(GmailAccount.id.in_(account_ids)).values(
 			access_token="", refresh_token=None, token_expiry=None, scope=None,
-			gmail_user_id=None, sync_status="IDLE", last_synced_at=None, history_id=None,
+			gmail_user_id=None, sync_status="IDLE", inbox_sync_page_token=None,
+			inbox_sync_heartbeat_at=None, last_synced_at=None, history_id=None,
 		))
 
 	# Clear assistant state as well, without loading message bodies.  This keeps

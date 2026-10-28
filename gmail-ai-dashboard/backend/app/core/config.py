@@ -20,7 +20,6 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./gmail_ai_dashboard.db"
     # PostgreSQL pgvector is the sole vector backend.
     vector_backend: str = Field("postgres", validation_alias=AliasChoices("RAG_VECTOR_BACKEND"))
-    gmail_sync_limit: int = Field(500, ge=1, le=5000, validation_alias=AliasChoices("GMAIL_SYNC_LIMIT"))
     database_pool_size: int = Field(5, validation_alias=AliasChoices("DATABASE_POOL_SIZE"))
     database_max_overflow: int = Field(10, validation_alias=AliasChoices("DATABASE_MAX_OVERFLOW"))
     google_client_id: str = Field("", validation_alias=AliasChoices("GOOGLE_CLIENT_ID", "OAUTH_GOOGLE_CLIENT_ID"))
@@ -35,6 +34,10 @@ class Settings(BaseSettings):
     nvidia_api_key: str = Field("", validation_alias=AliasChoices("NVIDIA_API_KEY"))
     azure_openai_api_key: str = Field("", validation_alias=AliasChoices("AZURE_OPENAI_API_KEY", "AZURE_API_KEY"))
     azure_openai_endpoint: str = Field("", validation_alias=AliasChoices("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_BASE", "AZURE_ENDPOINT"))
+    # Optional separate resource for query and background email embeddings.
+    # When unset, embeddings continue to use the chat resource above.
+    azure_openai_embedding_api_key: str = Field("", validation_alias="AZURE_OPENAI_EMBEDDING_API_KEY")
+    azure_openai_embedding_endpoint: str = Field("", validation_alias="AZURE_OPENAI_EMBEDDING_ENDPOINT")
     azure_openai_api_version: str = Field("2024-02-01", validation_alias=AliasChoices("AZURE_OPENAI_API_VERSION", "OPENAI_API_VERSION"))
     azure_openai_deployment: str = Field("gpt-4.1-mini", validation_alias=AliasChoices("AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_CHAT_DEPLOYMENT"))
     azure_openai_embedding_deployment: str = Field(

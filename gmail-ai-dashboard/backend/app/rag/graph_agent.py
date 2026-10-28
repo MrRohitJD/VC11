@@ -63,6 +63,7 @@ READ_ONLY_TOOL_NAMES = frozenset({
     "filter_emails_by_date", "filter_emails_by_sender", "filter_emails_by_label",
     "get_email_by_id", "search_email_threads", "get_email_summary",
     "classify_email", "get_email_attachments",
+    "search_gmail_mcp", "search_gmail_live",
 })
 
 
@@ -89,7 +90,8 @@ class MailboxState(TypedDict, total=False):
 
 
 def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
-                        filter_dict, use_multi_query, citations, checkpointer):
+                        filter_dict, use_multi_query, citations, checkpointer,
+                        use_gmail_mcp=None):
     # Demo mailboxes are read-only; real accounts expose approval-backed
     # delivery and scheduling tools. The tools themselves still enforce the
     # human approval state before any outbound operation.
@@ -98,6 +100,10 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
     except Exception:
         owner = None
     excluded = {"send_email", "draft_email", "schedule_email"} if db is None or (owner and getattr(owner, "is_demo", False)) else set()
+    if db is None or (owner and getattr(owner, "is_demo", False)):
+        excluded.update({"search_gmail_mcp", "search_gmail_live"})
+    elif use_gmail_mcp is False or not settings.gmail_mcp_enabled:
+        excluded.add("search_gmail_mcp")
     tools = {t.name: t for t in create_gmail_tools(db, user_id) if t.name not in excluded}
     if db is not None:
         @tool
@@ -106,6 +112,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
             result = assistant.rag_chain.answer_query(
                 db=db, query=query, user_id=user_id, top_k=top_k,
                 filter_dict=filter_dict, use_multi_query=use_multi_query,
+                use_gmail_mcp=use_gmail_mcp,
             )
             return json.dumps({"answer": result["answer"],
                                "citations": [citation.__dict__ for citation in result["citations"]],
@@ -433,7 +440,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
 
 class LangGraphMailboxAssistant(GmailAIAssistant):
     def run(self, query, db, user_id, session_id=None, top_k=5,
-            filter_dict=None, use_multi_query=None):
+            filter_dict=None, use_multi_query=None, use_gmail_mcp=None):
         enabled = bool(settings.langsmith_tracing and settings.langsmith_api_key)
         client = langsmith_client() if enabled else None
         with activity_context() as activity:
@@ -441,7 +448,7 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
                 with (trace("Mailbox assistant", run_type="chain", inputs={"query": query},
                             project_name=settings.langsmith_project, client=client,
                             metadata={"session_id": session_id, "scope": "all_categories"}) if enabled else nullcontext(None)) as run:
-                    response = self._run(query, db, user_id, session_id, top_k, filter_dict, use_multi_query)
+                    response = self._run(query, db, user_id, session_id, top_k, filter_dict, use_multi_query, use_gmail_mcp)
                     response.steps = list(activity.steps)
                     response.tracing_enabled = enabled
                     if run:
@@ -453,7 +460,7 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
                             logger.warning("LangSmith trace link unavailable: %s", type(exc).__name__)
                     return response
 
-    def _run(self, query, db, user_id, session_id, top_k, filter_dict, use_multi_query):
+    def _run(self, query, db, user_id, session_id, top_k, filter_dict, use_multi_query, use_gmail_mcp=None):
         user_id = UUID(str(user_id))
         session = get_or_create_chat_session(db, user_id, session_id=session_id)
         memory = PostgresChatMessageHistory(db, session.id)
@@ -506,6 +513,7 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
             graph = build_mailbox_graph(
                 self, db=db, user_id=user_id, history=history, top_k=top_k,
                 filter_dict=filter_dict, use_multi_query=use_multi_query,
+                use_gmail_mcp=use_gmail_mcp,
                 citations=citations, checkpointer=saver,
             )
             result = graph.invoke(

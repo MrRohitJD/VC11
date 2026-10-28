@@ -1,5 +1,4 @@
-"""Gmail sync service — builds authenticated Gmail API clients from stored OAuth
-tokens and provides full-mailbox sync with progress reporting."""
+"""Gmail sync service — authenticate users and synchronize their Inbox."""
 
 import json
 import logging
@@ -220,35 +219,18 @@ def sync_all_labels(
 
 
 # ------------------------------------------------------------------
-# List all message IDs (paginated)
+# List one bounded page of Inbox message IDs
 # ------------------------------------------------------------------
 
-def _list_all_message_ids(service, *, progress_callback=None, max_messages: int | None = None) -> list[str]:
-	"""Fetch every message ID in the user's mailbox using pagination."""
-	message_ids: list[str] = []
-	page_token = None
-
-	while True:
-		kwargs: dict = {"userId": "me", "maxResults": min(500, max_messages - len(message_ids)) if max_messages else 500}
-		if page_token:
-			kwargs["pageToken"] = page_token
-
-		response = _call_with_retry(
-			lambda kw=kwargs: service.users().messages().list(**kw).execute()
-		)
-		for msg in response.get("messages", []):
-			message_ids.append(msg["id"])
-			if max_messages and len(message_ids) >= max_messages:
-				break
-
-		if progress_callback:
-			progress_callback("listing", len(message_ids), 0)
-
-		page_token = response.get("nextPageToken")
-		if not page_token or (max_messages and len(message_ids) >= max_messages):
-			break
-
-	return message_ids
+def _list_inbox_page(service, *, page_token: str | None = None, page_size: int = 500) -> tuple[list[str], str | None]:
+	"""Return one Gmail Inbox page without accumulating the whole mailbox in RAM."""
+	kwargs: dict = {"userId": "me", "labelIds": ["INBOX"], "maxResults": page_size}
+	if page_token:
+		kwargs["pageToken"] = page_token
+	response = _call_with_retry(
+		lambda: service.users().messages().list(**kwargs).execute()
+	)
+	return [message["id"] for message in response.get("messages", [])], response.get("nextPageToken")
 
 
 # ------------------------------------------------------------------
@@ -294,7 +276,12 @@ def _batch_fetch_messages(
 				if transient_error is not None:
 					raise transient_error
 				for error in batch_errors:
-					logger.warning("Batch fetch error: %s", error)
+					# A message may be deleted between list and get. Other failures
+					# must stop the scan so the next run can retry the whole page.
+					if isinstance(error, HttpError) and error.resp.status == 404:
+						logger.info("Inbox message disappeared during sync: %s", error)
+						continue
+					raise error
 
 		_call_with_retry(execute_batch)
 		all_messages.extend(batch_results)
@@ -445,69 +432,156 @@ def _store_messages(
 
 
 # ------------------------------------------------------------------
-# Background worker for remaining emails in batches
+# Bounded Inbox batches and background pagination
 # ------------------------------------------------------------------
+
+def _sync_inbox_batch(
+	db: Session,
+	account_id: UUID,
+	service,
+	label_cache: dict[str, Label],
+	message_ids: list[str],
+	*,
+	progress_callback=None,
+) -> tuple[int, int]:
+	"""Store missing Inbox messages and restore the Inbox link on older records."""
+	if not message_ids:
+		return 0, 0
+	rows = db.execute(
+		select(Email.id, Email.gmail_message_id).where(
+			Email.gmail_account_id == account_id,
+			Email.gmail_message_id.in_(message_ids),
+		)
+	).all()
+	existing_by_message_id = {message_id: email_id for email_id, message_id in rows}
+	inbox_label = label_cache.get("INBOX")
+	if inbox_label and existing_by_message_id:
+		existing_email_ids = list(existing_by_message_id.values())
+		linked_ids = set(db.scalars(
+			select(EmailLabel.email_id).where(
+				EmailLabel.gmail_account_id == account_id,
+				EmailLabel.label_id == inbox_label.id,
+				EmailLabel.email_id.in_(existing_email_ids),
+			)
+		).all())
+		for email_id in existing_email_ids:
+			if email_id not in linked_ids:
+				db.add(EmailLabel(email_id=email_id, label_id=inbox_label.id, gmail_account_id=account_id))
+		db.commit()
+
+	new_ids = [message_id for message_id in message_ids if message_id not in existing_by_message_id]
+	if not new_ids:
+		return 0, len(existing_by_message_id)
+	raw_messages = _batch_fetch_messages(service, new_ids, progress_callback=progress_callback)
+	parsed = [_parse_message(message) for message in raw_messages]
+	stored = _store_messages(db, account_id, parsed, label_cache, progress_callback=progress_callback)
+	return stored, len(existing_by_message_id)
+
+
+def _schedule_ai_processing(account_id: UUID) -> None:
+	"""Queue classification and indexing after a committed Inbox batch."""
+	try:
+		from app.services.llm_classification_service import enqueue_classification_job, trigger_immediate_classification
+		enqueue_classification_job(account_id, job_type="INCREMENTAL")
+		trigger_immediate_classification()
+		from app.services.rag_auto_indexer import trigger_immediate_auto_indexing
+		trigger_immediate_auto_indexing()
+	except Exception as exc:
+		logger.warning("Background AI processing trigger failed: %s", exc)
+
 
 def _sync_remaining_emails_worker(
 	user_id: UUID,
 	account_id: UUID,
-	remaining_ids: list[str],
+	page_token: str,
+	*,
+	progress_callback=None,
 	batch_chunk_size: int = 100,
 ):
-	"""Sync remaining mailbox emails in the background in batches of 100."""
-	import threading
-	logger.info(
-		"Starting background sync of %d remaining emails for account %s",
-		len(remaining_ids), account_id,
-	)
-	for i in range(0, len(remaining_ids), batch_chunk_size):
-		chunk_ids = remaining_ids[i: i + batch_chunk_size]
-		worker_db = SessionLocal()
-		try:
-			worker_user = worker_db.get(User, user_id)
-			if not worker_user:
-				break
-			service = build_gmail_service_for_user(worker_db, worker_user)
-			label_cache = sync_all_labels(worker_db, account_id, service)
-			raw_messages = _batch_fetch_messages(service, chunk_ids)
-			parsed = [_parse_message(msg) for msg in raw_messages]
-			_store_messages(worker_db, account_id, parsed, label_cache)
+	"""Walk every remaining Inbox page while keeping memory use bounded."""
+	seen = 0
+	stored = 0
+	cursor_reset = False
+	try:
+		while page_token:
+			worker_db = SessionLocal()
+			try:
+				worker_user = worker_db.get(User, user_id)
+				if worker_user is None:
+					raise ValueError("User was removed during Inbox sync")
+				service = build_gmail_service_for_user(worker_db, worker_user, timeout_seconds=60)
+				try:
+					message_ids, next_page_token = _list_inbox_page(service, page_token=page_token)
+				except HttpError as exc:
+					if exc.resp.status != 400 or cursor_reset:
+						raise
+					# Gmail can invalidate a saved cursor after a process restart.
+					# Restart from page two; existing messages are skipped in batches.
+					cursor_reset = True
+					account = worker_db.get(GmailAccount, account_id)
+					if account:
+						account.inbox_sync_page_token = None
+						worker_db.commit()
+					_, page_token = _list_inbox_page(service, page_size=100)
+					continue
+				label_cache = {
+					label.label_id: label
+					for label in worker_db.scalars(
+						select(Label).where(Label.gmail_account_id == account_id)
+					).all()
+				}
+				page_new_count = 0
+				for start in range(0, len(message_ids), batch_chunk_size):
+					chunk_ids = message_ids[start:start + batch_chunk_size]
+					new_count, _ = _sync_inbox_batch(worker_db, account_id, service, label_cache, chunk_ids)
+					page_new_count += new_count
+					stored += new_count
+					seen += len(chunk_ids)
+					account = worker_db.get(GmailAccount, account_id)
+					if account:
+						account.inbox_sync_heartbeat_at = datetime.now(timezone.utc)
+						worker_db.commit()
+					if progress_callback:
+						progress_callback("syncing", seen, stored)
+				if page_new_count:
+					_schedule_ai_processing(account_id)
+				account = worker_db.get(GmailAccount, account_id)
+				if account:
+					account.inbox_sync_page_token = next_page_token
+					account.inbox_sync_heartbeat_at = datetime.now(timezone.utc)
+					worker_db.commit()
+				page_token = next_page_token
+			finally:
+				worker_db.close()
 
-			acc = worker_db.get(GmailAccount, account_id)
-			if acc:
-				acc.last_synced_at = datetime.now(timezone.utc)
+		with SessionLocal() as worker_db:
+			account = worker_db.get(GmailAccount, account_id)
+			if account:
+				account.sync_status = "IDLE"
+				account.inbox_sync_page_token = None
+				account.inbox_sync_heartbeat_at = None
+				account.last_synced_at = datetime.now(timezone.utc)
 				worker_db.commit()
-
-			# Trigger incremental AI classification as each batch is stored
-			try:
-				from app.services.llm_classification_service import (
-					enqueue_classification_job,
-					trigger_immediate_classification,
-				)
-				enqueue_classification_job(account_id, job_type="INCREMENTAL")
-				trigger_immediate_classification()
-			except Exception as e:
-				logger.warning("Background AI classification trigger failed: %s", e)
-
-			# Trigger immediate RAG auto-embedding for the new batch
-			try:
-				from app.services.rag_auto_indexer import trigger_immediate_auto_indexing
-				trigger_immediate_auto_indexing()
-			except Exception:
-				pass
-
-			logger.info(
-				"Background synced %d emails (%d/%d) for account %s",
-				len(parsed), min(i + batch_chunk_size, len(remaining_ids)), len(remaining_ids), account_id,
-			)
-		except Exception as exc:
-			logger.exception("Error syncing background email chunk: %s", exc)
-		finally:
-			worker_db.close()
+		if progress_callback:
+			progress_callback("completed", seen, stored)
+		logger.info("Finished Inbox backfill for account %s: %d scanned, %d stored", account_id, seen, stored)
+	except Exception as exc:
+		logger.exception("Inbox background sync failed for account %s", account_id)
+		try:
+			with SessionLocal() as worker_db:
+				account = worker_db.get(GmailAccount, account_id)
+				if account:
+					account.sync_status = "BACKFILL_ERROR"
+					account.inbox_sync_heartbeat_at = None
+					worker_db.commit()
+		except Exception:
+			logger.exception("Unable to save Inbox sync failure for account %s", account_id)
+		if progress_callback:
+			progress_callback("error", seen, stored, str(exc))
 
 
 # ------------------------------------------------------------------
-# Full sync orchestrator
+# Initial Inbox sync orchestrator
 # ------------------------------------------------------------------
 
 def sync_all_emails(
@@ -517,12 +591,9 @@ def sync_all_emails(
 	*,
 	initial_limit: int = 100,
 	progress_callback=None,
+	background_callback=None,
 ) -> dict:
-	"""Synchronize a mailbox: sync labels → first 100 emails → background remaining.
-
-	Fetches the 100 most recent emails first so the user can quickly log in and
-	reach the dashboard. The remaining emails are fetched in background batches of 100.
-	"""
+	"""Store the first 100 Inbox messages, then page through the rest in background."""
 	import threading
 
 	account = db.scalar(
@@ -530,6 +601,9 @@ def sync_all_emails(
 	)
 	if account is None:
 		raise ValueError("No Gmail account linked to this user")
+	account.sync_status = "INITIAL"
+	account.inbox_sync_heartbeat_at = datetime.now(timezone.utc)
+	db.commit()
 
 	# 1. Sync labels first
 	if progress_callback:
@@ -539,84 +613,51 @@ def sync_all_emails(
 	if progress_callback:
 		progress_callback("labels", labels_count, labels_count)
 
-	# 2. List all message IDs
+	# 2. List only the first Inbox page before the dashboard opens.
 	if progress_callback:
 		progress_callback("listing", 0, 0)
-	from app.core.config import settings
-	message_ids = _list_all_message_ids(service, progress_callback=progress_callback,
-	                                   max_messages=settings.gmail_sync_limit if settings.vector_backend == "postgres" else None)
-	total_found = len(message_ids)
-
-	if total_found == 0:
-		account.last_synced_at = datetime.now(timezone.utc)
-		account.sync_status = "IDLE"
-		db.commit()
-		if progress_callback:
-			progress_callback("completed", 0, 0)
-		return {"emails_found": 0, "emails_synced": 0, "labels_synced": labels_count}
-
-	# 3. Filter out already-stored message IDs for efficiency
-	existing_ids = set(
-		db.scalars(
-			select(Email.gmail_message_id).where(
-				Email.gmail_account_id == account.id,
-				Email.gmail_message_id.in_(message_ids),
-				Email.body_html.is_not(None),
-			)
-		).all()
-	)
-	new_ids = [mid for mid in message_ids if mid not in existing_ids]
-	logger.info("Found %d messages, %d new to fetch", total_found, len(new_ids))
-
-	# 4. Take the 100 most recent new messages first for the initial sync
-	initial_ids = new_ids[:initial_limit]
-	remaining_ids = new_ids[initial_limit:]
-
-	if initial_ids:
-		if progress_callback:
-			progress_callback("fetching", len(initial_ids), 0)
-		raw_messages = _batch_fetch_messages(
-			service, initial_ids, progress_callback=progress_callback,
-		)
-
-		# 5. Parse
-		parsed = [_parse_message(msg) for msg in raw_messages]
-
-		# 6. Store initial 100
-		if progress_callback:
-			progress_callback("storing", len(parsed), 0)
-		emails_stored = _store_messages(
-			db, account.id, parsed, label_cache, progress_callback=progress_callback,
-		)
-	else:
-		emails_stored = 0
-
-	account.last_synced_at = datetime.now(timezone.utc)
-	account.sync_status = "IDLE"
-	db.commit()
-
+	message_ids, next_page_token = _list_inbox_page(service, page_size=initial_limit)
+	resume_token = account.inbox_sync_page_token or next_page_token
 	if progress_callback:
-		progress_callback("completed", len(initial_ids), emails_stored)
-
-	# 7. In the background, sync all remaining emails in batches of 100
-	if remaining_ids:
-		logger.info(
-			"Launching background sync thread for %d remaining emails (account %s)",
-			len(remaining_ids), account.id,
-		)
+		progress_callback("listing", len(message_ids), 0)
+		progress_callback("fetching", len(message_ids), 0)
+	emails_stored, already_stored = _sync_inbox_batch(
+		db, account.id, service, label_cache, message_ids,
+		progress_callback=progress_callback,
+	)
+	initial_synced = emails_stored + already_stored
+	if resume_token:
+		account.sync_status = "BACKFILL"
+		account.inbox_sync_page_token = resume_token
+		account.inbox_sync_heartbeat_at = datetime.now(timezone.utc)
+		db.commit()
+		if background_callback:
+			background_callback("syncing", 0, 0)
 		bg_thread = threading.Thread(
 			target=_sync_remaining_emails_worker,
-			args=(user.id, account.id, remaining_ids),
-			name=f"bg-sync-{str(account.id)[:8]}",
+			args=(user.id, account.id, resume_token),
+			kwargs={"progress_callback": background_callback},
+			name=f"inbox-sync-{str(account.id)[:8]}",
 			daemon=True,
 		)
 		bg_thread.start()
+	else:
+		account.last_synced_at = datetime.now(timezone.utc)
+		account.sync_status = "IDLE"
+		account.inbox_sync_page_token = None
+		account.inbox_sync_heartbeat_at = None
+		db.commit()
+		if background_callback:
+			background_callback("completed", 0, 0)
+
+	if progress_callback:
+		progress_callback("completed", len(message_ids), initial_synced)
 
 	return {
-		"emails_found": len(initial_ids) if initial_ids else total_found,
-		"emails_synced": emails_stored + len(existing_ids),
+		"emails_found": len(message_ids),
+		"emails_synced": initial_synced,
 		"labels_synced": labels_count,
-		"total_in_mailbox": total_found,
+		"background_syncing": bool(resume_token),
 	}
 
 

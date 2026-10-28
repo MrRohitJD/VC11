@@ -81,6 +81,7 @@ class ChatRequest(BaseModel):
     is_read: Optional[bool] = Field(None, description="Filter by read status")
     thread_id: Optional[str] = Field(None, description="Filter by thread ID")
     use_multi_query: Optional[bool] = Field(None, description="None selects automatically; true/false overrides query expansion")
+    use_gmail_mcp: Optional[bool] = Field(None, description="Whether to include Gmail MCP live mailbox discovery")
 
 
 class CitationItem(BaseModel):
@@ -225,6 +226,7 @@ def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[s
                 top_k=body.top_k,
                 filter_dict=f_dict if f_dict else None,
                 use_multi_query=body.use_multi_query,
+                use_gmail_mcp=body.use_gmail_mcp,
             )
 
         citation_items = [

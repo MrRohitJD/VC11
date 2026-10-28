@@ -5,7 +5,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 
 from langchain_core.documents import Document
-from app.rag.search_plan import exhaustive_request, date_only_request, classification_request
+from app.rag.search_plan import exhaustive_request, date_only_request, classification_request, sender_only_request
 from app.rag.query_constraints import received_date_bounds
 
 STOPWORDS = set("a an the i my me you your we our find search show get list give please all every email emails mail mails message messages related about from to in on at for by of with and or is are was were be have has do does what when where who how can could would should summarize summarise summary brief overview incoming received today yesterday this current last past previous month months week weeks day days upcoming recent".split())
@@ -94,19 +94,17 @@ def plan_retrieval(query, filters=None, use_multi_query=None, mode="similarity",
         providers = ["vector"]
         routing_reason = "Focused requests use the indexed vector path first; lexical fallback is available on low confidence"
 
-    # Structured mailbox requests already have a complete, tenant-scoped SQL
-    # path.  Do not pay the live Gmail startup/network cost for them: the
-    # synced mailbox is authoritative for date and sender filters, and the
-    # deterministic path can return every matching message without embeddings
-    # or LLM relevance checks.  Reserve live discovery for requests where
-    # freshness cannot be inferred from a structured filter (for example,
-    # "latest unread mail" or a broad multi-topic request).
-    live_discovery_needed = mcp_enabled and (freshness or multi or diverse) and not (
-        exhaustive or date_only or exact_filter
+    # The local index may be incomplete while Gmail is still syncing. Broad,
+    # date-only, sender-only and current-state requests therefore consult live
+    # Gmail as well. Exact message/thread IDs already have a precise local path.
+    exact_identity = any((filters or {}).get(key) for key in
+                         ("email_id", "gmail_message_id", "thread_id"))
+    live_discovery_needed = mcp_enabled and not exact_identity and (
+        exhaustive or date_only or sender_only_request(query) or freshness or multi or diverse
     )
     if live_discovery_needed:
         providers.append("gmail_mcp")
-        routing_reason += "; live Gmail validates current mailbox membership"
+        routing_reason += "; live Gmail supplements the synced mailbox"
 
     return RetrievalPlan(strategy, exhaustive, date_only, multi, diverse or mode == "mmr", label,
                          bounds[0].isoformat() if bounds else None,

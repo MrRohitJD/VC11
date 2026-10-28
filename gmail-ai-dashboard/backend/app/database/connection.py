@@ -46,6 +46,9 @@ REQUIRED_TABLES = frozenset({
 })
 
 REQUIRED_COLUMNS = {
+    "gmail_accounts": frozenset({
+        "inbox_sync_page_token", "inbox_sync_heartbeat_at",
+    }),
     "email_send_approvals": frozenset({
         "cc", "bcc", "scheduled_for", "delivery_message_id",
     }),

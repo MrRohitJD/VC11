@@ -1,6 +1,7 @@
 """Account-bound MCP client for live Gmail discovery before local retrieval."""
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -8,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from app.core.config import settings
+logger = logging.getLogger(__name__)
 from app.rag.search_plan import gmail_search_query
 
 
@@ -39,7 +41,7 @@ async def _search(user_id, query, *, full_scan=False):
             async with ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=timeout_seconds)) as session:
                 await session.initialize()
                 result = await session.call_tool("search_mailbox_emails", {
-                    "query": gmail_search_query(query),
+                    "query": gmail_search_query(query, include_topic_terms=not full_scan),
                     # Startup and handshake consume the SAME deadline as Gmail
                     # I/O; leave time to return committed partial results.
                     "time_budget_seconds": max(0, timeout_seconds - (time.monotonic() - started) - 2),
@@ -59,7 +61,31 @@ async def _search(user_id, query, *, full_scan=False):
 
 
 def search_live_mailbox(user_id, query, *, full_scan=False):
-    return asyncio.run(_search(user_id, query, full_scan=full_scan))
+    timeout_seconds = (settings.gmail_mcp_timeout_seconds if full_scan else
+                       min(settings.gmail_mcp_timeout_seconds, MAX_LIVE_GMAIL_SECONDS))
+    started = time.monotonic()
+    try:
+        return asyncio.run(_search(user_id, query, full_scan=full_scan))
+    except Exception as exc:
+        logger.warning("Live Gmail MCP search via subprocess failed (%s); trying direct Gmail service search", exc)
+        remaining = timeout_seconds - (time.monotonic() - started)
+        if remaining <= 1:
+            raise
+        try:
+            from app.database.connection import SessionLocal
+            from app.services.gmail_mcp_server import search_mailbox
+            max_messages = (settings.gmail_mcp_max_messages if full_scan else
+                            min(settings.gmail_mcp_max_messages, MAX_LIVE_GMAIL_MESSAGES))
+            with SessionLocal() as db:
+                res = search_mailbox(
+                    db, user_id, gmail_search_query(query, include_topic_terms=not full_scan),
+                    max_messages, time_budget_seconds=remaining,
+                )
+                res["source"] = "gmail_direct"
+                return res
+        except Exception as direct_exc:
+            logger.warning("Direct Gmail search fallback also failed: %s", direct_exc)
+            raise exc
 
 
 # Compatibility alias for callers that still use the old function name.

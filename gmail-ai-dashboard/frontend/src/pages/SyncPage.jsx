@@ -10,7 +10,7 @@ const stages = [
 	{ key: 'listing', label: 'Fetching your emails...', icon: Mail },
 	{ key: 'fetching', label: 'Downloading email details...', icon: Mail },
 	{ key: 'storing', label: 'Saving emails to your account...', icon: Database },
-	{ key: 'completed', label: 'Sync completed!', icon: Check },
+	{ key: 'completed', label: 'Recent Inbox messages ready', icon: Check },
 ];
 
 function getStageIndex(stage) {
@@ -109,10 +109,10 @@ export default function SyncPage() {
 					{isError
 						? 'Sync Error'
 						: isCompleted
-						? 'Gmail Sync Complete'
+						? 'Inbox Ready'
 						: 'Syncing Your Gmail'}
 				</h1>
-				{syncState.coverage_limit && <p>For this showcase, we sync up to the {syncState.coverage_limit} most recent Gmail messages. Older messages are outside this search.</p>}
+				{isCompleted && syncState.background_status === 'syncing' && <p>The rest of your Inbox is syncing in the background while you use the dashboard.</p>}
 
 				{isError && (
 					<p className="sync-error-msg">{startError || syncState.error || 'An unexpected error occurred.'}</p>
@@ -167,7 +167,7 @@ export default function SyncPage() {
 							<Mail size={18} />
 							<div>
 								<strong>{syncState.emails_synced?.toLocaleString() || 0}</strong>
-								<span>emails synchronized</span>
+								<span>recent Inbox messages ready</span>
 							</div>
 						</div>
 						<div className="sync-summary-stat">

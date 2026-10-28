@@ -430,6 +430,7 @@ class GroundedRAGChain:
         chat_history: Optional[List[BaseMessage]] = None,
         use_multi_query: Optional[bool] = None,
         retrieval_mode: str = "similarity",
+        use_gmail_mcp: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Execute optimized retrieval and grounded answer generation.
 
@@ -466,7 +467,7 @@ class GroundedRAGChain:
             from app.rag.classification_query import classify_mailbox_query
             current_user = db.get(User, UUID(str(user_id)))
             live_status = None
-            if settings.gmail_mcp_enabled and not (current_user and current_user.is_demo):
+            if settings.gmail_mcp_enabled and use_gmail_mcp is not False and not (current_user and current_user.is_demo):
                 try:
                     from app.rag.gmail_mcp import search_live_mailbox
                     emit_activity("gmail_search", "Fetching messages in the requested time frame",
@@ -507,7 +508,8 @@ class GroundedRAGChain:
         # mailbox membership is valuable; focused requests stay on the fast
         # local vector/BM25 path.
         current_user = db.get(User, UUID(str(user_id)))
-        mcp_allowed = bool(settings.gmail_mcp_enabled and not (current_user and current_user.is_demo))
+        mcp_allowed = bool(settings.gmail_mcp_enabled and use_gmail_mcp is not False
+                           and not (current_user and current_user.is_demo))
         parsed_sender = requested_sender(effective_query)
         if parsed_sender and not filters.get("sender"):
             filters["sender"] = parsed_sender
@@ -519,6 +521,11 @@ class GroundedRAGChain:
         all_requested = search_plan.exhaustive
         date_only = search_plan.date_only
         envelope_only = date_only or (sender_only and bool(filters.get("sender")))
+        mcp_in_query = bool(re.search(r"\b(?:mcp|gmail|live\s+mail|live\s+gmail|from\s+mcp|from\s+gmail)\b", effective_query, re.I))
+        if mcp_allowed and (use_gmail_mcp is True or mcp_in_query):
+            if "gmail_mcp" not in search_plan.providers:
+                search_plan.providers.append("gmail_mcp")
+                search_plan.routing_reason += "; live Gmail MCP search enabled"
         use_multi_query = search_plan.multi_query
         emit_activity("plan_search", search_plan.label, plan=search_plan.public(),
                       providers=search_plan.providers, routing_reason=search_plan.routing_reason,
@@ -535,9 +542,16 @@ class GroundedRAGChain:
             emit_activity("gmail_search", "Searching all Gmail categories in parallel", status="running",
                           provider="gmail_mcp", parallel=True, lane="gmail", parallel_group="retrieval")
             try:
-                from app.rag.gmail_mcp import MAX_LIVE_GMAIL_SECONDS, search_live_mailbox
+                import app.rag.gmail_mcp as live_gmail_mcp
+                MAX_LIVE_GMAIL_SECONDS = live_gmail_mcp.MAX_LIVE_GMAIL_SECONDS
+                search_live_mailbox = live_gmail_mcp.search_live_mailbox
+                live_full_scan = bool(all_requested or envelope_only)
+                live_timeout = (settings.gmail_mcp_timeout_seconds if live_full_scan else
+                                min(settings.gmail_mcp_timeout_seconds, MAX_LIVE_GMAIL_SECONDS))
                 live_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gmail-mcp")
-                live_future = live_executor.submit(search_live_mailbox, user_id, effective_query)
+                live_future = live_executor.submit(
+                    search_live_mailbox, user_id, effective_query, full_scan=live_full_scan,
+                )
             except Exception as exc:
                 live_error = error_code(exc)
                 live_failed = True
@@ -665,14 +679,21 @@ class GroundedRAGChain:
             try:
                 # Keep the request responsive even if an overridden settings
                 # value is larger than the production live-search budget.
-                live_status = live_future.result(timeout=min(settings.gmail_mcp_timeout_seconds, MAX_LIVE_GMAIL_SECONDS))
+                live_status = live_future.result(timeout=live_timeout)
+                # The MCP worker persists its discoveries in a separate DB
+                # session. End a read-only snapshot before enumerating them.
+                if not (db.new or db.dirty or db.deleted):
+                    db.rollback()
+                    db.expire_all()
                 emit_activity("gmail_search", f"Read {len(live_status['email_ids'])} live mailbox emails",
-                              count=len(live_status["email_ids"]), provider="gmail_mcp",
+                              count=len(live_status["email_ids"]),
+                              provider=live_status.get("source", "gmail_mcp"),
                               status="completed" if live_status["complete"] else "warning",
                               duration_ms=round((perf_counter() - live_started) * 1000),
                               lane="gmail", parallel_group="retrieval")
             except FutureTimeoutError:
                 live_error = "timeout"
+
                 logger.warning("Gmail MCP discovery unavailable: %s", live_error)
                 live_failed = True
                 emit_activity("gmail_search", "Live search unavailable; using synced mailbox mail",
@@ -680,6 +701,7 @@ class GroundedRAGChain:
                               duration_ms=round((perf_counter() - live_started) * 1000), lane="gmail")
             except Exception as exc:
                 live_error = error_code(exc)
+
                 logger.warning("Gmail MCP discovery unavailable: %s", live_error)
                 live_failed = True
                 emit_activity("gmail_search", "Live search unavailable; using synced mailbox mail",
@@ -702,7 +724,7 @@ class GroundedRAGChain:
             live_ranked = bm25_rank(live_docs, effective_query, limit=candidate_k) or live_docs[:candidate_k]
             docs = fuse_rankings(docs, live_ranked, limit=candidate_k)
             emit_activity("gmail_search", f"Hydrated {len(live_ranked)} fresh live matches",
-                          count=len(live_ranked), provider="gmail_mcp", lane="gmail")
+                          count=len(live_ranked), provider=live_status.get("source", "gmail_mcp"), lane="gmail")
 
         eligible_ids = None
         if all_requested or envelope_only:
@@ -727,7 +749,10 @@ class GroundedRAGChain:
                     else scoped_mailbox_documents(db, user_id, effective_query, filters)
                 )
                 lexical_duration_ms = None
-            if live_status and live_status["complete"]:
+            # Keep both local synced documents and live Gmail MCP discoveries unless
+            # this is an envelope- or date-only query where live state strictly supersedes.
+            keep_both_sources = not (search_plan.date_only or envelope_only)
+            if live_status and live_status["complete"] and not keep_both_sources:
                 live_ids = set(live_status["email_ids"])
                 lexical_pool = [doc for doc in lexical_pool if str(doc.metadata["email_id"]) in live_ids]
             if lexical_pool:
@@ -746,13 +771,16 @@ class GroundedRAGChain:
         docs = hydrate_email_documents(docs, db, user_id, full_body=True)
         if eligible_ids is None:
             eligible_ids = set(mailbox_email_ids(db, user_id, effective_query))
+        if live_status and live_status.get("email_ids"):
+            eligible_ids = (eligible_ids or set()) | {str(eid) for eid in live_status["email_ids"]}
         docs = [doc for doc in docs if str(doc.metadata.get("email_id")) in eligible_ids]
         unique_docs = {}
         for doc in docs:
             unique_docs.setdefault(str(doc.metadata.get("email_id")), doc)
         docs = list(unique_docs.values())
-        if live_status and live_status["complete"]:
-            # Live label/date membership supersedes stale local sync evidence.
+        keep_both_sources = not (search_plan.date_only or envelope_only)
+        if live_status and live_status["complete"] and not keep_both_sources:
+            # Live label/date membership supersedes stale local sync evidence for date/envelope queries.
             live_ids = set(live_status["email_ids"])
             docs = [doc for doc in docs if str(doc.metadata["email_id"]) in live_ids]
         score_details = _score_summary(docs)
@@ -871,7 +899,7 @@ class GroundedRAGChain:
         if current_user and current_user.is_demo:
             answer_text += "\n\nDemo mode: these are fictional sample emails."
         elif settings.vector_backend == "postgres" and not settings.gmail_mcp_enabled:
-            answer_text += f"\n\nThis answer covers only the most recent {settings.gmail_sync_limit} synced Gmail messages."
+            answer_text += "\n\nThis answer covers messages synchronized so far."
 
         emit_activity("answer_ready", f"Answer ready with {len(citations)} supporting emails", count=len(citations))
         return {

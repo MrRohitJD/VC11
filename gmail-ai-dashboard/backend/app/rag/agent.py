@@ -1181,6 +1181,7 @@ class GmailAIAssistant:
         top_k: int = 5,
         filter_dict: Optional[dict[str, Any]] = None,
         use_multi_query: bool = False,
+        use_gmail_mcp: Optional[bool] = None,
     ) -> AgentResponse:
         """Run the comprehensive Gmail AI Assistant pipeline."""
         user_uuid = UUID(str(user_id))
@@ -1300,6 +1301,7 @@ class GmailAIAssistant:
                 top_k=top_k,
                 filter_dict=filter_dict,
                 use_multi_query=use_multi_query,
+                use_gmail_mcp=use_gmail_mcp,
             )
             answer = rag_res["answer"]
             citations = rag_res["citations"]
@@ -1319,6 +1321,7 @@ class GmailAIAssistant:
                 top_k=top_k,
                 filter_dict=filter_dict,
                 use_multi_query=use_multi_query,
+                use_gmail_mcp=use_gmail_mcp,
             )
             answer = rag_res["answer"]
             citations = rag_res["citations"]

@@ -84,8 +84,10 @@ class EmbeddingProvider:
         verify_on_init: bool = False,
     ):
         self.provider = "azure_openai"
-        self.endpoint = (azure_endpoint or settings.azure_openai_endpoint).strip()
-        self.api_key = (api_key or settings.azure_openai_api_key).strip()
+        self.endpoint = (azure_endpoint or settings.azure_openai_embedding_endpoint
+                         or settings.azure_openai_endpoint).strip()
+        self.api_key = (api_key or settings.azure_openai_embedding_api_key
+                        or settings.azure_openai_api_key).strip()
         self.api_version = (api_version or settings.azure_openai_api_version).strip()
         self.deployment_name = (deployment_name or settings.azure_openai_embedding_deployment).strip()
         self.model_name = (model_name or settings.azure_openai_embedding_model).strip()

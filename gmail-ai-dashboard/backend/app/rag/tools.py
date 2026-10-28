@@ -668,9 +668,65 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         db.commit()
         return f"Email successfully sent to {approval.recipient_email}."
 
+    def _live_search_result(query: str, max_messages: int, status: dict) -> str:
+        """Return authorized, hydrated citations with explicit coverage status."""
+        from app.rag.adaptive import bm25_rank
+        from app.rag.retrieval import scoped_mailbox_documents
+
+        email_ids = status.get("email_ids", [])
+        if not (db.new or db.dirty or db.deleted):
+            db.rollback()  # The live search committed in another session.
+            db.expire_all()
+        docs = scoped_mailbox_documents(db, user_uuid, query, {}, email_ids=email_ids) if email_ids else []
+        ranked = bm25_rank(docs, query, limit=max_messages) or docs[:max_messages]
+        citations = documents_to_citations(ranked)
+        return json.dumps({
+            "source": status.get("source", "gmail"),
+            "complete": bool(status.get("complete", False)),
+            "error_code": status.get("error_code", ""),
+            "emails": [citation.__dict__ for citation in citations],
+        }, ensure_ascii=False)
+
+    @tool
+    def search_gmail_mcp(query: str, max_messages: int = 20) -> str:
+        """Search current Gmail through the read-only MCP worker and return cited emails."""
+        if (owner := db.get(User, user_uuid)) is None or owner.is_demo:
+            return "Live Gmail search is unavailable for this mailbox."
+        max_messages = max(1, min(max_messages, 100))
+        logger.info("Tool chosen: search_gmail_mcp with args: %s",
+                    sanitize_tool_args({"query": query, "max_messages": max_messages}))
+        try:
+            from app.rag.gmail_mcp import search_live_mailbox
+            return _live_search_result(query, max_messages, search_live_mailbox(user_uuid, query))
+        except Exception as exc:
+            logger.warning("search_gmail_mcp tool failed: %s", type(exc).__name__)
+            return "Gmail MCP search is unavailable; use the synced mailbox search."
+
+    @tool
+    def search_gmail_live(query: str, max_messages: int = 20) -> str:
+        """Search current Gmail directly through the Gmail API and return cited emails."""
+        if (owner := db.get(User, user_uuid)) is None or owner.is_demo:
+            return "Live Gmail search is unavailable for this mailbox."
+        max_messages = max(1, min(max_messages, 100))
+        logger.info("Tool chosen: search_gmail_live with args: %s",
+                    sanitize_tool_args({"query": query, "max_messages": max_messages}))
+        try:
+            from app.database.connection import SessionLocal
+            from app.rag.search_plan import gmail_search_query
+            from app.services.gmail_mcp_server import search_mailbox
+            with SessionLocal() as live_db:
+                status = search_mailbox(live_db, user_uuid, gmail_search_query(query), 100)
+            status["source"] = "gmail_direct"
+            return _live_search_result(query, max_messages, status)
+        except Exception as exc:
+            logger.warning("search_gmail_live tool failed: %s", type(exc).__name__)
+            return "Direct Gmail search is unavailable; use the synced mailbox search."
+
     tools = [
         search_emails,
         search_emails_exact,
+        search_gmail_mcp,
+        search_gmail_live,
         search_emails_multi_query,
         get_email_by_id,
         search_email_threads,

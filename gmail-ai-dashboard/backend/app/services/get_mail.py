@@ -7,7 +7,6 @@ from html import unescape
 from bs4 import BeautifulSoup, Comment
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 
@@ -31,6 +30,7 @@ TOKEN_FILE = os.path.join(BACKEND_DIR, "token.json")
 # --------------------------------------------------
 
 def get_gmail_service():
+    from google_auth_oauthlib.flow import InstalledAppFlow
     creds = None
 
     if os.path.exists(TOKEN_FILE):

@@ -67,6 +67,8 @@ class GmailAccount(Base):
     token_expiry: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     scope: Mapped[str | None] = mapped_column(Text)
     sync_status: Mapped[str] = mapped_column(String(20), default="IDLE", server_default="IDLE", nullable=False)
+    inbox_sync_page_token: Mapped[str | None] = mapped_column(Text)
+    inbox_sync_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     history_id: Mapped[str | None] = mapped_column(String(255))
     ai_classification_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)

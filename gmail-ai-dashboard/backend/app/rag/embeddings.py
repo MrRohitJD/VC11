@@ -69,8 +69,10 @@ def get_embedding_model() -> Embeddings:
     Otherwise, returns DeterministicOfflineEmbeddings to ensure reliable local execution.
     In production environments, raises RuntimeError instead of silently falling back.
     """
-    has_key = bool(settings.azure_openai_api_key and settings.azure_openai_api_key.strip())
-    has_endpoint = bool(settings.azure_openai_endpoint and settings.azure_openai_endpoint.strip())
+    embedding_key = (settings.azure_openai_embedding_api_key or settings.azure_openai_api_key).strip()
+    embedding_endpoint = (settings.azure_openai_embedding_endpoint or settings.azure_openai_endpoint).strip()
+    has_key = bool(embedding_key)
+    has_endpoint = bool(embedding_endpoint)
     is_prod = (
         os.getenv("ENVIRONMENT", "").lower() == "production"
         or os.getenv("ENV", "").lower() == "production"
@@ -81,8 +83,8 @@ def get_embedding_model() -> Embeddings:
         try:
             logger.info("Initializing LangChain AzureOpenAIEmbeddings (deployment=%s)", settings.azure_openai_embedding_deployment)
             return AzureOpenAIEmbeddings(
-                azure_endpoint=settings.azure_openai_endpoint,
-                api_key=settings.azure_openai_api_key,
+                azure_endpoint=embedding_endpoint,
+                api_key=embedding_key,
                 api_version=settings.azure_openai_api_version,
                 azure_deployment=settings.azure_openai_embedding_deployment,
                 model=settings.azure_openai_embedding_model or AZURE_OPENAI_DEFAULT_MODEL,
@@ -97,7 +99,8 @@ def get_embedding_model() -> Embeddings:
     if is_prod:
         logger.warning(
             "Production environment missing Azure OpenAI embedding credentials or endpoint "
-            "(AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT). Falling back to DeterministicOfflineEmbeddings."
+            "(AZURE_OPENAI_EMBEDDING_API_KEY, AZURE_OPENAI_EMBEDDING_ENDPOINT, or shared Azure settings). "
+            "Falling back to DeterministicOfflineEmbeddings."
         )
 
     logger.info("Using DeterministicOfflineEmbeddings (dimensions=%d)", AZURE_OPENAI_LARGE_DIMENSIONS)
