@@ -158,22 +158,10 @@ def get_chat_model() -> Any:
     """Instantiate and return the configured LangChain chat model.
 
     Priority:
-    NVIDIA first, followed by configured Azure/OpenAI and ExperientialLabs.
+    Azure OpenAI first, followed by NVIDIA and ExperientialLabs.
     Failures use real provider fallbacks; no dummy credentials or local verdicts.
     """
     models = []
-    if settings.nvidia_api_key:
-        try:
-            from langchain_nvidia_ai_endpoints import ChatNVIDIA
-            models.append(ChatNVIDIA(
-                model="openai/gpt-oss-20b", api_key=settings.nvidia_api_key,
-                temperature=1,
-                max_completion_tokens=settings.llm_max_completion_tokens,
-                timeout=settings.llm_request_timeout_seconds,
-                model_kwargs={"reasoning_effort": "low"},
-            ))
-        except Exception as exc:
-            logger.warning("NVIDIA assistant provider unavailable: %s", type(exc).__name__)
     has_azure_key = bool(settings.azure_openai_api_key and settings.azure_openai_api_key.strip())
     has_azure_endpoint = bool(settings.azure_openai_endpoint and settings.azure_openai_endpoint.strip())
 
@@ -192,18 +180,18 @@ def get_chat_model() -> Any:
         except Exception as exc:
             logger.warning("Could not initialize AzureChatOpenAI (%s). Falling back.", exc)
 
-    if settings.openai_api_key:
+    if settings.nvidia_api_key:
         try:
-            models.append(ChatOpenAI(
-                api_key=settings.openai_api_key,
-                model="gpt-4o-mini",
+            from langchain_nvidia_ai_endpoints import ChatNVIDIA
+            models.append(ChatNVIDIA(
+                model="openai/gpt-oss-20b", api_key=settings.nvidia_api_key,
                 temperature=1,
-                max_tokens=settings.llm_max_completion_tokens,
+                max_completion_tokens=settings.llm_max_completion_tokens,
                 timeout=settings.llm_request_timeout_seconds,
-                max_retries=settings.llm_max_retries,
+                model_kwargs={"reasoning_effort": "low"},
             ))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("NVIDIA assistant provider unavailable: %s", type(exc).__name__)
 
     if settings.explabs_api_key:
         models.append(ChatOpenAI(

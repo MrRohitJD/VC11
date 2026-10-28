@@ -21,13 +21,16 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 # because that optional layer is absent.
 try:
     from langgraph.graph import StateGraph, START, END
-    from langgraph.checkpoint.sqlite import SqliteSaver
     _LANGGRAPH_AVAILABLE = True
 except ImportError:
     StateGraph = None
     START = END = None
-    SqliteSaver = None
     _LANGGRAPH_AVAILABLE = False
+
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+except ImportError:
+    SqliteSaver = None
 from langsmith import Client, trace, tracing_context
 
 from app.core.config import settings
@@ -44,6 +47,7 @@ from app.rag.memory import (
     PostgresChatMessageHistory, get_or_create_chat_session, record_retrieval_citations,
 )
 from app.rag.tools import create_gmail_tools
+from app.rag.request_interpreter import interpretation_failure_message
 from app.rag.activity import activity_context, emit_activity
 from app.rag.adaptive import plan_retrieval
 from app.rag.service_errors import error_code, error_hint
@@ -68,6 +72,8 @@ class MailboxState(TypedDict, total=False):
     plan: list[str]
     search_plan: dict[str, Any]
     evidence_validated: bool
+    interpreted_draft: dict[str, Any] | None
+    clarification_question: str | None
 
 
 def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
@@ -83,24 +89,43 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
     tools = {t.name: t for t in create_gmail_tools(db, user_id) if t.name not in excluded}
 
     def context(state):
+        interpret = getattr(assistant, "interpret_request", None)
+        if callable(interpret):
+            try:
+                request = interpret(state["query"], history)
+                intent = request.intent
+                query = request.effective_query or state["query"]
+                draft = request.draft.model_dump() if request.draft else None
+                question = request.clarification_question
+            except Exception as exc:
+                logger.warning("Structured request interpretation failed: %s", type(exc).__name__)
+                intent, draft = "CLARIFY", None
+                query = state["query"]
+                question = interpretation_failure_message(exc)
+            emit_activity("route_request", "Request interpreted" if intent != "CLARIFY" else "Request needs clarification",
+                          intent=intent, lane="planner")
+            return {"effective_query": query, "intent": intent,
+                    "interpreted_draft": draft, "clarification_question": question}
+        # Compatibility for lightweight callers without the semantic interpreter.
         try:
             query = assistant.transform_query(state["query"], history[-20:])
-        except Exception as exc:
-            logger.warning("Query transformation failed: %s. Using original query.", exc)
+        except Exception:
             query = state["query"]
         try:
             intent = assistant.route_intent(query)
-        except Exception as exc:
-            logger.warning("Intent routing failed: %s. Falling back to RAG_QUERY.", exc)
+        except Exception:
             intent = "RAG_QUERY"
         if parse_draft_request(state["query"]) and "draft_email" in tools:
-            # Explicit outbound drafts must create an approval record even if
-            # the router/model misclassifies a typo such as "mailto".
             intent = "ACTION_DRAFT"
-        emit_activity("route_request", "Mailbox request selected" if intent != "GENERAL_CHAT" else "Conversational reply selected", intent=intent, lane="planner")
-        return {"effective_query": query, "intent": intent}
+        return {"effective_query": query, "intent": intent,
+                "interpreted_draft": None, "clarification_question": None}
 
     def plan(state):
+        if state["intent"] in {"ACTION_DRAFT", "CLARIFY", "GENERAL_CHAT"}:
+            tasks = ["Create a draft for review"] if state["intent"] == "ACTION_DRAFT" else []
+            emit_activity("plan_workflow", "Prepared draft review workflow" if tasks else "Prepared response",
+                          lane="planner")
+            return {"plan": tasks, "search_plan": {}}
         retrieval = plan_retrieval(state["effective_query"], filter_dict, use_multi_query)
         tasks = [retrieval.label, "Validate matching email evidence", "Answer each part of your request"]
         if state["intent"] in {"ACTION_DRAFT", "ACTION_SCHEDULE", "PLAN_AND_EXECUTE"}:
@@ -132,12 +157,17 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         # Simple explicit drafts with a recipient address do not need model
         # tool-calling. Creating the approval record directly avoids waiting
         # for an unavailable provider and preserves the same send gate.
-        deterministic = select_deterministic_tool_fallback(state["effective_query"], tools)
+        interpreted_draft = state.get("interpreted_draft")
+        if interpreted_draft and "draft_email" not in tools:
+            answer = "Draft creation is unavailable for this mailbox. No email has been sent."
+            return {"messages": [AIMessage(content=answer)], "iterations": state["iterations"] + 1, "answer": answer}
+        deterministic = (("draft_email", interpreted_draft) if interpreted_draft else
+                         select_deterministic_tool_fallback(state["effective_query"], tools))
         if deterministic and deterministic[0] == "draft_email":
             tool_name, tool_args = deterministic
             draft_request = parse_draft_request(state["effective_query"])
             generate_draft = getattr(assistant, "generate_email_draft", None)
-            if draft_request and callable(generate_draft):
+            if not interpreted_draft and draft_request and callable(generate_draft):
                 try:
                     generated = generate_draft(draft_request)
                     tool_args = {**tool_args, **generated}
@@ -231,6 +261,9 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
             steps.append({"action": call["name"], "observation": output[:500]})
         return {"messages": messages, "steps": steps, "approval_id": approval_id}
 
+    def clarify(state):
+        return {"answer": state.get("clarification_question") or "Please clarify what you would like me to do."}
+
     def chat(state):
         try:
             response = assistant.model.invoke([
@@ -263,6 +296,8 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         return {"answer": ans}
 
     def route(state):
+        if state["intent"] == "CLARIFY":
+            return "clarify"
         if state["intent"] == "GENERAL_CHAT":
             return "chat"
         if state["intent"] in {"RAG_QUERY", "SUMMARIZE"}:
@@ -277,14 +312,14 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
     graph = StateGraph(MailboxState)
     for name, node in [("context", context), ("retrieve", retrieve),
                        ("plan", plan), ("review", review),
-                       ("agent", agent), ("tools", execute_tools), ("chat", chat), ("limit", limit)]:
+                       ("agent", agent), ("tools", execute_tools), ("chat", chat), ("clarify", clarify), ("limit", limit)]:
         graph.add_node(name, node)
     graph.add_edge(START, "context")
     graph.add_edge("context", "plan")
-    graph.add_conditional_edges("plan", route, ["chat", "retrieve", "agent"])
+    graph.add_conditional_edges("plan", route, ["chat", "clarify", "retrieve", "agent"])
     graph.add_conditional_edges("agent", continue_agent, {"tools": "tools", "limit": "limit", END: "review"})
     graph.add_edge("tools", "agent")
-    for name in ["retrieve", "chat", "limit"]:
+    for name in ["retrieve", "chat", "clarify", "limit"]:
         graph.add_edge(name, "review")
     graph.add_edge("review", END)
     return graph.compile(checkpointer=checkpointer, name="devLG Mailbox Assistant")

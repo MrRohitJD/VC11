@@ -60,6 +60,7 @@ from app.rag.retrieval import (
     route_query_retrieval_strategy,
 )
 from app.rag.tools import create_gmail_tools
+from app.rag.request_interpreter import interpretation_failure_message
 
 
 logger = logging.getLogger(__name__)
@@ -553,6 +554,8 @@ def deterministic_action_answer(
 ) -> str:
     """Return a useful action result when the model provider is unavailable."""
     if tool_name == "draft_email":
+        if not re.search(r"Approval ID: [0-9a-f-]{36}", observation):
+            return observation
         return (
             f"I created a professional draft for {tool_args.get('recipient', 'the recipient')} "
             f"with subject '{tool_args.get('subject', 'No subject')}'. It is pending your approval before sending.\n\n"
@@ -731,6 +734,10 @@ class GmailAIAssistant:
     # ------------------------------------------------------------------------
     # Pattern 3: Router Pattern
     # ------------------------------------------------------------------------
+    def interpret_request(self, query: str, history=()):
+        from app.rag.request_interpreter import interpret_request
+        return interpret_request(self.model, query, history)
+
     def route_intent(
         self,
         query: str,
@@ -984,6 +991,7 @@ class GmailAIAssistant:
         user_id: UUID | str,
         tools: List[Any],
         max_iterations: Optional[int] = None,
+        interpreted_draft: Optional[Dict[str, Any]] = None,
     ) -> tuple[str, List[RetrievedCitation], List[Dict[str, Any]]]:
         """Execute bounded tool-calling reasoning loop without LangGraph."""
         iterations_limit = max_iterations or self.max_agent_iterations
@@ -1002,11 +1010,14 @@ class GmailAIAssistant:
         # Route simple explicit drafts directly to the dedicated email-writing
         # call, avoiding tool-selection latency while still using the LLM for
         # a topic-specific subject and body.
-        deterministic = select_deterministic_tool_fallback(query, tool_map)
+        if interpreted_draft and "draft_email" not in tool_map:
+            return "Draft creation is unavailable for this mailbox. No email has been sent.", [], []
+        deterministic = (("draft_email", interpreted_draft) if interpreted_draft and "draft_email" in tool_map
+                         else select_deterministic_tool_fallback(query, tool_map))
         if deterministic and deterministic[0] == "draft_email":
             tool_name, tool_args = deterministic
             draft_request = parse_draft_request(query)
-            if draft_request:
+            if draft_request and not interpreted_draft:
                 try:
                     tool_args = {**tool_args, **self.generate_email_draft(draft_request)}
                 except Exception as exc:
@@ -1190,27 +1201,21 @@ class GmailAIAssistant:
         db.commit()
         db.refresh(user_msg)
 
-        # 2. Fast route before query transformation.  GENERAL_CHAT skips both
-        # mailbox tools and agent orchestration entirely.
-        fast_intent = self.route_intent(query, has_history=bool(existing_history))
-        if parse_draft_request(query):
-            # Explicit draft requests take precedence over a conversational
-            # route so the approval popup always receives an approval ID.
-            fast_intent = "ACTION_DRAFT"
-        if fast_intent == "GENERAL_CHAT":
-            effective_query = query
-            intent = fast_intent
-        else:
-            # Pattern 7: Query Transformation (Contextual Resolution)
-            effective_query = self.transform_query(query, existing_history)
-
-            # Pattern 3: Router Pattern.  This is deterministic for the
-            # supported mailbox/action intents, so it does not add another
-            # provider call to a retrieval request.
-            intent = self.route_intent(
-                effective_query,
-                has_history=bool(existing_history),
-            )
+        # Interpret semantics once; preserve the validated draft payload instead
+        # of reparsing the user's wording during tool dispatch.
+        interpreted_draft = None
+        clarification_question = None
+        effective_query = query
+        try:
+            request = self.interpret_request(query, existing_history)
+            intent = request.intent
+            effective_query = request.effective_query or query
+            interpreted_draft = request.draft.model_dump() if request.draft else None
+            clarification_question = request.clarification_question
+        except Exception as exc:
+            logger.warning("Structured request interpretation failed: %s", type(exc).__name__)
+            intent = "CLARIFY"
+            clarification_question = interpretation_failure_message(exc)
         logger.info("Selected intent: %s for query: '%s'", intent, effective_query)
 
         citations: List[RetrievedCitation] = []
@@ -1222,7 +1227,9 @@ class GmailAIAssistant:
         approval_preview: Optional[Dict[str, Any]] = None
 
         # 4. Dispatch based on intent
-        if intent == "PLAN_AND_EXECUTE":
+        if intent == "CLARIFY":
+            answer = clarification_question
+        elif intent == "PLAN_AND_EXECUTE":
             # Pattern 5
             tools = create_gmail_tools(db, user_uuid)
             answer, plan, steps, citations = self.execute_plan_and_execute(
@@ -1261,12 +1268,15 @@ class GmailAIAssistant:
         elif intent in {"ACTION_DRAFT", "ACTION_SCHEDULE"}:
             # Pattern 2 & 6: Tool-Calling + Human-in-the-Loop Drafting
             tools = create_gmail_tools(db, user_uuid)
-            answer, citations, steps = self.execute_react_agent(effective_query, db, user_uuid, tools)
+            answer, citations, steps = self.execute_react_agent(effective_query, db, user_uuid, tools, interpreted_draft=interpreted_draft)
             # Check if pending approval was generated
-            pending_appr = db.query(EmailSendApproval).filter(
+            created_id = next((match.group(1) for step in reversed(steps)
+                               if (match := re.search(r"Approval ID: ([0-9a-f-]{36})", step.get("observation", "")))), None)
+            pending_appr = (db.query(EmailSendApproval).filter(
+                EmailSendApproval.id == UUID(created_id),
                 EmailSendApproval.user_id == user_uuid,
                 EmailSendApproval.status == "PENDING",
-            ).order_by(EmailSendApproval.created_at.desc()).first()
+            ).first() if created_id else None)
             if pending_appr:
                 approval_required = True
                 approval_id = str(pending_appr.id)

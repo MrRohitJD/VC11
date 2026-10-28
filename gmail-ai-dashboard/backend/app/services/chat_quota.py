@@ -14,7 +14,7 @@ from app.core.config import settings
 from app.models.chat_quota import ChatQuota
 from app.models.email import User
 
-DAILY_LIMIT = 5
+DAILY_LIMIT = 100
 DEMO_VISITOR_COOKIE = "gmail_ai_demo_visitor"
 
 
@@ -79,5 +79,5 @@ def reserve_chat_request(db: Session, request: Request, user: User) -> None:
             ).rowcount
             if not changed:
                 db.rollback()
-                raise HTTPException(status_code=429, detail="Assistant daily limit reached (5 requests). Try again tomorrow UTC.")
+                raise HTTPException(status_code=429, detail="Assistant daily limit reached (100 requests). Try again tomorrow UTC.")
     db.commit()

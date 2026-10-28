@@ -1,15 +1,19 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import AiAssistant from './AiAssistant';
-import { approveRagEmail, getRagSourceEmail, getRagStatus, rejectRagEmail, sendRagChat, updateRagEmailDraft } from '../services/api';
+import { approveRagEmail, getRagSession, getRagSessions, getRagSourceEmail, getRagStatus, rejectRagEmail, sendRagChat, updateRagEmailDraft } from '../services/api';
 
 vi.mock('../context/AuthContext', () => ({ useAuth: () => ({ user: { name: 'Mailbox Owner' } }) }));
 vi.mock('../services/api', () => ({
-    getRagStatus: vi.fn(), sendRagChat: vi.fn(), getRagSourceEmail: vi.fn(),
+    getRagStatus: vi.fn(), getRagSessions: vi.fn(), getRagSession: vi.fn(), sendRagChat: vi.fn(), getRagSourceEmail: vi.fn(),
     approveRagEmail: vi.fn(), rejectRagEmail: vi.fn(), updateRagEmailDraft: vi.fn(),
 }));
 
+beforeEach(() => {
+    window.localStorage.clear();
+    getRagSessions.mockResolvedValue({ data: [] });
+});
 afterEach(() => vi.unstubAllGlobals());
 
 it('opens the complete message when View email is clicked on a citation', async () => {
@@ -27,7 +31,8 @@ it('opens the complete message when View email is clicked on a citation', async 
     } });
     render(<MemoryRouter><AiAssistant /></MemoryRouter>);
     fireEvent.click(screen.getByRole('button', { name: /Summarize pending bills/ }));
-    fireEvent.click(await screen.findByRole('button', { name: 'View email' }));
+    fireEvent.click(await screen.findByText('Related emails (1)'));
+    fireEvent.click(screen.getByRole('button', { name: 'View email' }));
     const dialog = screen.getByRole('dialog');
     expect(await within(dialog).findByText('Complete payment instructions and invoice details beyond the citation excerpt.')).toBeInTheDocument();
     expect(within(dialog).getByText('Utility Billing')).toBeInTheDocument();
@@ -42,6 +47,7 @@ it('lets the user collapse both side panels to expand the chat area', async () =
     getRagStatus.mockResolvedValue({ data: {} });
     render(<MemoryRouter><AiAssistant /></MemoryRouter>);
 
+    fireEvent.click(screen.getByRole('button', { name: 'Open key points panel' }));
     fireEvent.click(screen.getByRole('button', { name: 'Close navigation and composer panel' }));
     fireEvent.click(screen.getByRole('button', { name: 'Close key points panel' }));
 
@@ -122,4 +128,72 @@ it('opens an editable human review window and sends the reviewed draft values', 
         subject: 'Updated education loan question',
         draft_body: 'Hello,\n\nPlease confirm the education loan payout details.\n\nRegards',
     }));
+});
+
+
+it('expands chat into focus mode and restores the workspace', () => {
+    getRagStatus.mockResolvedValue({ data: {} });
+    render(<MemoryRouter><AiAssistant /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: 'Focus chat' }));
+    expect(screen.getByRole('button', { name: 'Exit focus' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('log', { name: 'Conversation' }).closest('.assistant-shell-view')).toHaveClass('chat-focused');
+    fireEvent.click(screen.getByRole('button', { name: 'Exit focus' }));
+    expect(screen.getByRole('button', { name: 'Focus chat' })).toHaveAttribute('aria-pressed', 'false');
+});
+
+it('keeps multiple exchanges and opens details for only the selected response', async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    getRagStatus.mockResolvedValue({ data: {} });
+    sendRagChat.mockResolvedValueOnce({ data: { answer: 'First answer', session_id: 'thread', citations: [], steps: [] } })
+        .mockResolvedValueOnce({ data: { answer: 'Second answer', session_id: 'thread', citations: [], steps: [] } });
+    render(<MemoryRouter><AiAssistant /></MemoryRouter>);
+    const composer = screen.getByPlaceholderText(/Ask about all your emails/);
+    fireEvent.change(composer, { target: { value: 'First question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText('First answer')).toBeInTheDocument();
+    fireEvent.change(composer, { target: { value: 'Second question' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText('Second answer')).toBeInTheDocument();
+    expect(screen.getByText('First question')).toBeInTheDocument();
+    expect(screen.getByText('First answer')).toBeInTheDocument();
+    const toggles = screen.getAllByRole('button', { name: 'Details' });
+    fireEvent.click(toggles[0]);
+    expect(toggles[0]).toHaveAttribute('aria-expanded', 'true');
+    expect(toggles[1]).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(toggles[1]);
+    expect(toggles[0]).toHaveAttribute('aria-expanded', 'false');
+    expect(toggles[1]).toHaveAttribute('aria-expanded', 'true');
+    const log = screen.getByRole('log', { name: 'Conversation' });
+    Object.defineProperties(log, { scrollHeight: { value: 1200 }, clientHeight: { value: 400 }, scrollTop: { value: 0 } });
+    fireEvent.scroll(log);
+    expect(screen.getByRole('button', { name: 'Latest messages' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Latest messages' }));
+    expect(screen.queryByRole('button', { name: 'Latest messages' })).not.toBeInTheDocument();
+});
+
+it('lists saved chats in the planner and reopens a conversation with its citations', async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    getRagStatus.mockResolvedValue({ data: {} });
+    getRagSessions.mockResolvedValue({ data: [
+        { id: 'recent-one', title: 'Invoice follow-up', updated_at: '2026-10-28T09:00:00' },
+        { id: 'recent-two', title: 'Interview dates', updated_at: '2026-10-27T09:00:00' },
+    ] });
+    getRagSession.mockResolvedValue({ data: { id: 'recent-one', messages: [
+        { id: 'user-old', role: 'user', content: 'What is due?', created_at: '2026-10-28T08:59:00' },
+        { id: 'assistant-old', role: 'assistant', content: 'The invoice is due soon.', created_at: '2026-10-28T09:00:00',
+            citations: [{ email_id: 'invoice-old', subject: 'Invoice', sender: 'billing@example.com', date: '2026-10-27T09:00:00', snippet: 'Amount due' }] },
+    ] } });
+    sendRagChat.mockResolvedValue({ data: { answer: 'Follow-up answer', session_id: 'recent-one', citations: [] } });
+
+    render(<MemoryRouter><AiAssistant /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: 'Open key points panel' }));
+    expect(await screen.findByRole('heading', { name: 'Recent chats' })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /Invoice follow-up/ }));
+    expect(await screen.findByText('The invoice is due soon.')).toBeInTheDocument();
+    expect(screen.getByText('What is due?')).toBeInTheDocument();
+    expect(screen.getByText('Related emails (1)')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Invoice follow-up/ })).toHaveAttribute('aria-current', 'true');
+    fireEvent.change(screen.getByPlaceholderText(/Ask about all your emails/), { target: { value: 'And after that?' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Send$/ }));
+    await waitFor(() => expect(sendRagChat).toHaveBeenCalledWith(expect.objectContaining({ session_id: 'recent-one' }), expect.any(Function)));
 });

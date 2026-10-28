@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-	AlertCircle, Bot, CalendarDays, Check, CircleDot, Cpu, Database, ExternalLink,
-	FileText, Inbox, LayoutDashboard, ListChecks, Mail, Menu, MoreHorizontal, PanelLeftClose,
+	AlertCircle, ArrowDown, Bot, CalendarDays, Check, CircleDot, Cpu, Database, ExternalLink,
+	FileText, History, Inbox, LayoutDashboard, ListChecks, Mail, Maximize2, Menu, Minimize2, MoreHorizontal, PanelLeftClose,
 	PanelRightClose, PanelRightOpen, PenLine, RefreshCw, Search, Send,
 	Settings, ShieldCheck, Sparkles, Star, Tag, X, Zap,
 } from 'lucide-react';
@@ -11,6 +11,8 @@ import EmailDetailsModal, { formatEmailDate } from '../components/EmailDetailsMo
 import SearchActivity from '../components/SearchActivity';
 import {
 	approveRagEmail,
+	getRagSession,
+	getRagSessions,
 	getRagStatus,
 	rejectRagEmail,
 	sendRagChat,
@@ -93,6 +95,30 @@ const normalizeKeyPointForDisplay = (value) => {
 	return `${shortened || sentence.slice(0, 97)}...`;
 };
 
+const mapCitations = (citations = []) => citations.map((citation, index) => {
+	const palette = PALETTE[index % PALETTE.length];
+	return {
+		id: citation.email_id || `cit-${index}`,
+		letter: citation.subject ? citation.subject.trim()[0].toUpperCase() : 'E',
+		avatarBg: palette.bg,
+		avatarColor: palette.color,
+		subject: citation.subject || 'Referenced Email',
+		sender: citation.sender || '',
+		senderName: citation.sender ? citation.sender.split('<')[0].trim() : 'Email Source',
+		date: formatEmailDate(citation.date),
+		label: 'EMAIL',
+		score: Number.isFinite(citation.score) ? `${Math.round(citation.score * 100)}%` : null,
+		snippet: citation.snippet || '',
+		key_points: citation.key_points || [],
+	};
+});
+
+const formatChatDate = (value, options) => {
+	if (!value) return '';
+	const date = new Date(/(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}Z`);
+	return Number.isNaN(date.getTime()) ? '' : date.toLocaleString([], options);
+};
+
 export default function AiAssistant({ user: propUser }) {
 	const navigate = useNavigate();
 	const { user: authUser } = useAuth();
@@ -104,23 +130,91 @@ export default function AiAssistant({ user: propUser }) {
 	const [activitySteps, setActivitySteps] = useState([]);
 	const [selectedEmailModal, setSelectedEmailModal] = useState(null);
 	const [sessionId, setSessionId] = useState(null);
+	const [recentChats, setRecentChats] = useState([]);
+	const [recentLimit, setRecentLimit] = useState(20);
+	const [recentChatsLoading, setRecentChatsLoading] = useState(true);
+	const [recentChatsError, setRecentChatsError] = useState('');
+	const [openingSessionId, setOpeningSessionId] = useState(null);
 	const [ragStatus, setRagStatus] = useState(null);
 	const [approvalFeedback, setApprovalFeedback] = useState({});
 	const [draftReview, setDraftReview] = useState(null);
 	const [draftReviewBusy, setDraftReviewBusy] = useState(false);
 	const [draftReviewActionError, setDraftReviewActionError] = useState('');
-	const [showExecutionDetails, setShowExecutionDetails] = useState(false);
+	const [expandedDetailsId, setExpandedDetailsId] = useState(null);
+	const [chatFocused, setChatFocused] = useState(false);
+	const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+	const followLatestRef = useRef(true);
+	const composerRef = useRef(null);
 	const [navigationOpen, setNavigationOpen] = useState(() => {
 		if (window.matchMedia?.('(max-width: 800px)').matches) return false;
 		try { return window.localStorage.getItem('gmail-ai-navigation-open') !== 'false'; } catch { return true; }
 	});
 	const [sidePanelOpen, setSidePanelOpen] = useState(() => {
 		if (window.matchMedia?.('(max-width: 800px)').matches) return false;
-		try { return window.localStorage.getItem('gmail-ai-key-points-open') !== 'false'; } catch { return true; }
+		try { return window.localStorage.getItem('gmail-ai-key-points-open') === 'true'; } catch { return false; }
 	});
 	const messagesEndRef = useRef(null);
 
 	const [messages, setMessages] = useState([]);
+
+	const refreshRecentChats = useCallback(async () => {
+		try {
+			const response = await getRagSessions(recentLimit);
+			setRecentChats(Array.isArray(response.data) ? response.data : []);
+			setRecentChatsError('');
+		} catch {
+			setRecentChatsError('Recent chats could not be loaded.');
+		} finally {
+			setRecentChatsLoading(false);
+		}
+	}, [recentLimit]);
+
+	useEffect(() => {
+		setRecentChatsLoading(true);
+		refreshRecentChats();
+	}, [refreshRecentChats]);
+
+	const startNewChat = () => {
+		if (isTyping || openingSessionId) return;
+		setMessages([]);
+		setSessionId(null);
+		setActivitySteps([]);
+		setExpandedDetailsId(null);
+		setApprovalFeedback({});
+		followLatestRef.current = true;
+		setShowJumpToLatest(false);
+	};
+
+	const openRecentChat = async (chatId) => {
+		if (isTyping || openingSessionId || chatId === sessionId) return;
+		setOpeningSessionId(chatId);
+		setRecentChatsError('');
+		try {
+			const response = await getRagSession(chatId);
+			const history = (response.data?.messages || [])
+				.filter((message) => message.role === 'user' || message.role === 'assistant')
+				.map((message) => {
+					const time = formatChatDate(message.created_at, { hour: 'numeric', minute: '2-digit' });
+					if (message.role === 'user') return { id: message.id, role: 'user', text: message.content, time };
+					const emails = mapCitations(message.citations);
+					return { id: message.id, role: 'assistant', time, response: {
+						type: 'summary', text: message.content, emails, source_count: emails.length, steps: [], entities: [],
+					} };
+				});
+			setSessionId(chatId);
+			setMessages(history);
+			setActivitySteps([]);
+			setExpandedDetailsId(null);
+			setApprovalFeedback({});
+			followLatestRef.current = true;
+			setShowJumpToLatest(false);
+			if (window.matchMedia?.('(max-width: 800px)').matches) setSidePanelOpen(false);
+		} catch {
+			setRecentChatsError('This chat could not be opened. Please try again.');
+		} finally {
+			setOpeningSessionId(null);
+		}
+	};
 
 	useEffect(() => {
 		const mobileLayout = window.matchMedia?.('(max-width: 800px)');
@@ -158,8 +252,28 @@ export default function AiAssistant({ user: propUser }) {
 	}, []);
 
 	useEffect(() => {
-		messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+		if (followLatestRef.current) messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
 	}, [messages, isTyping]);
+
+	useEffect(() => {
+		const composer = composerRef.current;
+		if (!composer) return;
+		composer.style.height = 'auto';
+		composer.style.height = `${Math.min(composer.scrollHeight, 144)}px`;
+	}, [input]);
+
+	const handleConversationScroll = (event) => {
+		const { scrollHeight, scrollTop, clientHeight } = event.currentTarget;
+		const nearBottom = scrollHeight - scrollTop - clientHeight < 100;
+		followLatestRef.current = nearBottom;
+		setShowJumpToLatest(!nearBottom);
+	};
+
+	const jumpToLatest = () => {
+		followLatestRef.current = true;
+		setShowJumpToLatest(false);
+		messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+	};
 
 	useEffect(() => {
 		if (!draftReview) return undefined;
@@ -192,7 +306,7 @@ export default function AiAssistant({ user: propUser }) {
 
 	const handleSend = async (queryText) => {
 		const text = (queryText || input).trim();
-		if (!text || isTyping) return;
+		if (!text || isTyping || openingSessionId) return;
 
 		const userMsg = {
 			id: `user-${Date.now()}`,
@@ -201,6 +315,9 @@ export default function AiAssistant({ user: propUser }) {
 			time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
 		};
 
+		followLatestRef.current = true;
+		setShowJumpToLatest(false);
+		setExpandedDetailsId(null);
 		setMessages((prev) => [...prev, userMsg]);
 		if (!queryText) setInput('');
 		setIsTyping(true);
@@ -225,24 +342,7 @@ export default function AiAssistant({ user: propUser }) {
 			}
 
 			// Format citations
-			const mappedEmails = (data.citations || []).map((c, i) => {
-				const pal = PALETTE[i % PALETTE.length];
-				const letter = c.subject ? c.subject.trim()[0].toUpperCase() : 'E';
-				return {
-					id: c.email_id || `cit-${i}`,
-					letter,
-					avatarBg: pal.bg,
-					avatarColor: pal.color,
-					subject: c.subject || 'Referenced Email',
-					sender: c.sender || '',
-					senderName: c.sender ? c.sender.split('<')[0].trim() : 'Email Source',
-					date: formatEmailDate(c.date),
-					label: 'EMAIL',
-					score: Number.isFinite(c.score) ? `${Math.round(c.score * 100)}%` : null,
-					snippet: c.snippet || '',
-					key_points: c.key_points || [],
-				};
-			});
+			const mappedEmails = mapCitations(data.citations);
 
 			const collectedKeyPoints = (data.key_points && data.key_points.length > 0)
 				? data.key_points
@@ -277,6 +377,7 @@ export default function AiAssistant({ user: propUser }) {
 
 			setIsTyping(false);
 			setMessages((prev) => [...prev, assistantMsg]);
+			refreshRecentChats();
 			if (data.approval_required && data.approval_id) {
 				openDraftReview(data.approval_preview, data.approval_id);
 			}
@@ -422,7 +523,7 @@ export default function AiAssistant({ user: propUser }) {
 		return user?.email?.[0]?.toUpperCase() || '?';
 	}, [user]);
 	return (
-		<div className={`app-shell assistant-shell-view ${navigationOpen ? '' : 'navigation-collapsed'} ${sidePanelOpen ? '' : 'side-panel-collapsed'}`}>
+		<div className={`app-shell assistant-shell-view ${navigationOpen ? '' : 'navigation-collapsed'} ${sidePanelOpen ? '' : 'side-panel-collapsed'} ${chatFocused ? 'chat-focused' : ''}`}>
 			{/* Shared Universal Sidebar */}
 			<aside className="sidebar" id="assistant-navigation" inert={!navigationOpen ? true : undefined}>
 				<div className="brand">
@@ -532,10 +633,13 @@ export default function AiAssistant({ user: propUser }) {
 									</div>
 									<div>
 										<h2>Mailbox Assistant</h2>
-										<p>{isDemo ? 'Search and summarize the fictional mailbox. Outbound email is disabled.' : 'Answers search all non-junk Gmail categories.'}</p>
+										<p>{isDemo ? 'Explore a sample inbox. Sending email is unavailable in demo mode.' : 'Find answers, deadlines, and messages across your inbox.'}</p>
 									</div>
 								</div>
 								<div className="assistant-header-controls">
+									<button type="button" className="assistant-btn-clear assistant-focus-toggle" aria-pressed={chatFocused} onClick={() => setChatFocused((focused) => !focused)}>
+										{chatFocused ? <Minimize2 size={14} /> : <Maximize2 size={14} />}{chatFocused ? 'Exit focus' : 'Focus chat'}
+									</button>
 									<div className="rag-status-chip" title="Assistant connection">
 										<Database size={13} />
 										<span>{ragStatus ? 'Connected' : 'Connection unavailable'}</span>
@@ -543,7 +647,8 @@ export default function AiAssistant({ user: propUser }) {
 
 									<button
 										className="assistant-btn-clear"
-										onClick={() => { setMessages([]); setSessionId(null); setActivitySteps([]); }}
+										disabled={isTyping || Boolean(openingSessionId)}
+										onClick={startNewChat}
 										title="Clear conversation history"
 									>
 										<RefreshCw size={14} /> Clear
@@ -563,8 +668,15 @@ export default function AiAssistant({ user: propUser }) {
 							</div>
 
 							{/* Messages Scroll Area */}
-							<div className="assistant-messages-scroll">
-								{messages.length === 0 && <p className="key-points-empty">How can I help? Find an email, catch up on your inbox, check deadlines, or draft a reply. Choose a suggestion below or type your question.</p>}
+							<div className="assistant-messages-scroll" role="log" aria-label="Conversation" aria-live="polite" onScroll={handleConversationScroll}>
+								{messages.length === 0 && <div className="assistant-welcome">
+									<div className="assistant-welcome-icon"><Sparkles size={25} /></div>
+									<h1>What would you like to know about your inbox?</h1>
+									<p>Ask in your own words. I can find messages, summarize what matters, and help you prepare a reply.</p>
+									<div className="assistant-welcome-actions">
+										{SUGGESTED_PROMPTS.slice(0, 4).map((prompt) => <button key={prompt.label} type="button" onClick={() => handleSend(prompt.query)}>{prompt.label}<span aria-hidden="true">→</span></button>)}
+									</div>
+								</div>}
 								{messages.map((message) =>
 									message.role === 'user' ? (
 										<div className="assistant-msg-row user-row" key={message.id}>
@@ -584,13 +696,13 @@ export default function AiAssistant({ user: propUser }) {
 									<button
 										className="pipeline-trace-toggle"
 										type="button"
-										onClick={() => setShowExecutionDetails((visible) => !visible)}
-										aria-expanded={showExecutionDetails}
+										onClick={() => setExpandedDetailsId((id) => id === message.id ? null : message.id)}
+										aria-expanded={expandedDetailsId === message.id}
 									>
 										<Sparkles size={14} />
 										<span>Details</span>
 									</button>
-									{showExecutionDetails && (
+									{expandedDetailsId === message.id && (
 										<div className="execution-details-card">
 											<SearchActivity
 												steps={message.response.steps}
@@ -643,10 +755,10 @@ export default function AiAssistant({ user: propUser }) {
 
 													{/* Detailed Emails with Links */}
 													{message.response.emails?.length > 0 && (
-														<div className="assistant-sources-section">
-															<p className="sources-section-title">
-																{message.response.sourcesTitle || 'Related emails'}
-															</p>
+														<details className="assistant-sources-section">
+															<summary className="sources-section-title">
+																{message.response.sourcesTitle || 'Related emails'} ({message.response.emails.length})
+															</summary>
 															<div className="detailed-emails-list">
 																{message.response.emails.map((email) => {
 																	const letter = email.letter || (email.subject ? email.subject.trim()[0].toUpperCase() : 'E');
@@ -681,7 +793,7 @@ export default function AiAssistant({ user: propUser }) {
 																	);
 																})}
 															</div>
-														</div>
+														</details>
 													)}
 
 													{/* Human-in-the-Loop Email Draft Approval Card */}
@@ -727,13 +839,13 @@ export default function AiAssistant({ user: propUser }) {
 											<button
 												className="pipeline-trace-toggle"
 												type="button"
-												onClick={() => setShowExecutionDetails((visible) => !visible)}
-												aria-expanded={showExecutionDetails}
+												onClick={() => setExpandedDetailsId((id) => id === 'pending' ? null : 'pending')}
+												aria-expanded={expandedDetailsId === 'pending'}
 											>
 												<Sparkles size={14} />
 												<span>Details</span>
 											</button>
-											{showExecutionDetails && (
+											{expandedDetailsId === 'pending' && (
 												<div className="execution-details-card">
 													<SearchActivity
 														steps={activitySteps}
@@ -748,23 +860,15 @@ export default function AiAssistant({ user: propUser }) {
 								<div ref={messagesEndRef} />
 							</div>
 
-							{/* Suggested Prompt Pills */}
-							<div className="assistant-prompt-pills">
-								{SUGGESTED_PROMPTS.map((p, idx) => (
-									<button
-										className="prompt-pill-btn"
-										key={idx}
-										onClick={() => handleSend(p.query)}
-									>
-										{p.label}
-									</button>
-								))}
-							</div>
+							{showJumpToLatest && <div className="assistant-jump-wrap">
+								<button type="button" className="assistant-jump-latest" onClick={jumpToLatest}><ArrowDown size={14} /> Latest messages</button>
+							</div>}
 
 							{/* Composer Box */}
 							<div className="assistant-composer-wrap">
 								<textarea
-									rows={2}
+									ref={composerRef}
+									rows={1}
 								placeholder="Ask about all your emails (e.g. interview schedules or action items)..."
 									value={input}
 									onChange={(e) => setInput(e.target.value)}
@@ -793,7 +897,7 @@ export default function AiAssistant({ user: propUser }) {
 									<button
 										className="composer-send-btn"
 										onClick={() => handleSend()}
-										disabled={!input.trim()}
+										disabled={!input.trim() || isTyping}
 									>
 										<span>Send</span>
 										<Send size={15} />
@@ -869,6 +973,32 @@ export default function AiAssistant({ user: propUser }) {
 									))}
 								</div>
 							</section>
+
+							<section className="panel side-info-card recent-chats-card" aria-label="Recent chats">
+								<div className="side-card-header">
+									<h3><History size={16} /> Recent chats</h3>
+									<button className="recent-chat-new" type="button" onClick={startNewChat} disabled={isTyping || Boolean(openingSessionId)}>New chat</button>
+								</div>
+								{recentChatsLoading && <p className="key-points-empty">Loading chats…</p>}
+								{recentChatsError && <p className="recent-chat-error" role="alert">{recentChatsError} <button type="button" onClick={refreshRecentChats}>Retry</button></p>}
+								{!recentChatsLoading && !recentChatsError && recentChats.length === 0 && <p className="key-points-empty">Your conversations will appear here after you send a message.</p>}
+								<div className="recent-chat-list">
+									{recentChats.map((chat) => (
+										<button
+											className={`recent-chat-item ${sessionId === chat.id ? 'is-active' : ''}`}
+											key={chat.id}
+											type="button"
+											aria-current={sessionId === chat.id ? 'true' : undefined}
+											disabled={isTyping || Boolean(openingSessionId)}
+											onClick={() => openRecentChat(chat.id)}
+										>
+											<span className="recent-chat-title">{chat.title || 'Untitled conversation'}</span>
+											<span className="recent-chat-date">{openingSessionId === chat.id ? 'Opening…' : formatChatDate(chat.updated_at, { month: 'short', day: 'numeric' })}</span>
+										</button>
+									))}
+								</div>
+								{!recentChatsLoading && recentChats.length >= recentLimit && <button className="recent-chat-more" type="button" onClick={() => setRecentLimit((limit) => limit + 20)}>Show older chats</button>}
+							</section>
 						</aside>}
 					</div>
 				</main>
@@ -911,6 +1041,7 @@ export default function AiAssistant({ user: propUser }) {
 							</button>
 						</header>
 
+						<div className="draft-review-content">
 						{draftReview.error ? (
 							<div className="draft-review-error" role="alert">
 								<AlertCircle size={18} />
@@ -927,28 +1058,6 @@ export default function AiAssistant({ user: propUser }) {
 										value={draftReview.recipient_email || ''}
 										onChange={(event) => setDraftReview((current) => ({ ...current, recipient_email: event.target.value }))}
 										aria-label="Draft recipient"
-										disabled={draftReviewBusy}
-									/>
-								</label>
-								<label className="draft-review-field">
-									<span>Cc</span>
-									<input
-										type="text"
-										value={draftReview.cc || ''}
-										onChange={(event) => setDraftReview((current) => ({ ...current, cc: event.target.value }))}
-										aria-label="Draft cc recipients"
-										placeholder="Optional, comma-separated email addresses"
-										disabled={draftReviewBusy}
-									/>
-								</label>
-								<label className="draft-review-field">
-									<span>Bcc</span>
-									<input
-										type="text"
-										value={draftReview.bcc || ''}
-										onChange={(event) => setDraftReview((current) => ({ ...current, bcc: event.target.value }))}
-										aria-label="Draft bcc recipients"
-										placeholder="Optional, comma-separated email addresses"
 										disabled={draftReviewBusy}
 									/>
 								</label>
@@ -970,6 +1079,16 @@ export default function AiAssistant({ user: propUser }) {
 										disabled={draftReviewBusy}
 									/>
 								</label>
+								<div className="draft-review-optional-recipients">
+									<label className="draft-review-field">
+										<span>Cc</span>
+										<input type="text" value={draftReview.cc || ''} onChange={(event) => setDraftReview((current) => ({ ...current, cc: event.target.value }))} aria-label="Draft cc recipients" placeholder="Optional email addresses" disabled={draftReviewBusy} />
+									</label>
+									<label className="draft-review-field">
+										<span>Bcc</span>
+										<input type="text" value={draftReview.bcc || ''} onChange={(event) => setDraftReview((current) => ({ ...current, bcc: event.target.value }))} aria-label="Draft bcc recipients" placeholder="Optional email addresses" disabled={draftReviewBusy} />
+									</label>
+								</div>
 								<div className="draft-review-notice">
 									<ShieldCheck size={17} />
 									<span>Review complete? Approving below authorizes Gmail delivery.</span>
@@ -982,6 +1101,8 @@ export default function AiAssistant({ user: propUser }) {
 								)}
 							</>
 						)}
+
+						</div>
 
 						<footer className="draft-review-footer">
 							<button className="draft-review-secondary" type="button" onClick={() => setDraftReview(null)} disabled={draftReviewBusy}>
