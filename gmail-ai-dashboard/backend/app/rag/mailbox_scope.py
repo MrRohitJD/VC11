@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.email import Email, EmailLabel, GmailAccount, Label
 from app.rag.query_constraints import billing_email_matches, is_financial_query, received_date_bounds
 from app.rag.preprocessing import clean_email_text
-from app.rag.search_plan import requested_sender, sender_matches
+from app.rag.search_plan import classification_request, requested_sender, sender_matches
 
 
 EXCLUDED_MAILBOX_LABELS = ("SPAM", "TRASH", "DRAFT")
@@ -49,7 +49,7 @@ def _email_ids(db: Session, user_id: UUID | str, query: str, condition) -> list[
         sender_ids = [e.id for e in db.scalars(select(Email).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(*scope))
                       if sender_matches(sender, e.from_email, e.sender_name)]
         scope.append(Email.id.in_(sender_ids))
-    if is_financial_query(query):
+    if is_financial_query(query) and not classification_request(query):
         return [str(email.id) for email in db.scalars(
             select(Email)
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)

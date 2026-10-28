@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableLambda
 
-from app.rag.query_constraints import mailbox_now
+from app.rag.query_constraints import DateRangeError, mailbox_now, received_date_bounds
 from app.rag.service_errors import error_code, error_hint
 
 logger = logging.getLogger(__name__)
@@ -125,18 +125,51 @@ def fallback_read_request(query: str) -> InterpretedRequest | None:
     """
     if re.search(r"\b(?:send|forward|reply|draft|compose|write|schedule|delete|remove|archive|mark|label|unsubscribe|approve|create|update)\b", query, re.I):
         return None
-    if re.search(r"\b(?:those|these|it|them|his|her|their|above|previous|same)\b", query, re.I):
+    for reference in re.finditer(r"\b(?:those|these|it|them|his|her|their|above|previous|same)\b", query, re.I):
+        # "classify my emails and explain them" is self-contained; "classify
+        # those emails" depends on unseen conversation state.
+        if reference.group().lower() in {"those", "these", "it", "them", "their"} and re.search(
+            r"\b(?:emails?|e-mails?|mails?|messages?|threads?)\b", query[:reference.start()], re.I
+        ):
+            continue
         return None
     if not re.search(r"\b(?:emails?|e-mails?|mails?|inbox|mailbox|messages?|threads?)\b", query, re.I):
         return None
-    if re.match(r"\s*(?:please\s+)?(?:summarize|summarise|give\s+me\s+a\s+summary\s+of)\b", query, re.I):
+    lead = re.sub(r"^\s*(?:(?:can|could|would)\s+you|i(?:'d| would)\s+like\s+you\s+to)\s+",
+                  "", query, flags=re.I)
+    if re.match(r"\s*(?:please\s+)?(?:summarize|summarise|give\s+me\s+a\s+summary\s+of)\b", lead, re.I):
         return InterpretedRequest(intent="SUMMARIZE", effective_query=query)
-    if re.match(r"\s*(?:please\s+)?(?:find|search|show|list|retrieve)\b", query, re.I):
+    if re.match(r"\s*(?:please\s+)?(?:find|search|show|list|retrieve|analyze|analyse|classify|categorize|categorise|group)\b", lead, re.I):
         return InterpretedRequest(intent="RAG_QUERY", effective_query=query)
     return None
 
 
 def interpret_request(model, query, history=()):
+    try:
+        bounds = received_date_bounds(query)
+        from app.rag.search_plan import classification_request
+        if classification_request(query) and re.search(
+            r"\b(?:latest|newest|most\s+recent|last|first)\s+0+\s+(?:emails?|e-mails?|mails?|messages?)\b",
+            query, re.I,
+        ):
+            raise DateRangeError("The number of emails must be greater than zero.")
+        if classification_request(query) and bounds is None and re.search(
+            r"\b(?:between|since|after|before|today|yesterday|recent|"
+            r"(?:last|past|this|next|previous|current)\s+\d*\s*(?:business\s+)?(?:minutes?|hours?|days?|weeks?|months?|quarters?|years?))\b",
+            query, re.I,
+        ):
+            raise DateRangeError("Please specify the email time frame using dates or a standard range such as 'last 7 days'.")
+        if classification_request(query) and bounds is None and re.search(
+            r"\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b|\b\d{4}[/]\d{1,2}[/]\d{1,2}\b",
+            query,
+        ):
+            raise DateRangeError("Please use unambiguous dates such as 2026-10-28.")
+    except DateRangeError as exc:
+        return InterpretedRequest(intent="CLARIFY", clarification_question=str(exc))
+    if classification_request(query) and (read_request := fallback_read_request(query)):
+        # A standalone, read-only categorization needs no provider call just
+        # to identify its intent. This also avoids an interpreter timeout.
+        return read_request
     messages = [
         SystemMessage(content=INTERPRETER_PROMPT + "\nCurrent datetime: " + mailbox_now().isoformat()),
         *list(history)[-20:],

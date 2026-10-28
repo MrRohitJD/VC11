@@ -224,6 +224,26 @@ def test_summary_interpretation_failure_still_reaches_grounded_retrieval(failure
     assert not state.get("approval_id")
 
 
+def test_analysis_classification_avoids_interpreter_timeout_and_reaches_mailbox_read(monkeypatch):
+    from app.rag import graph_agent
+    monkeypatch.setattr(graph_agent, "create_gmail_tools", lambda *_: [])
+    query = "Analyze my recent emails and categorize them as Work, Job Opportunities, Education, Promotions, Social, or Important. Explain each classification briefly."
+    calls = []
+    assistant = GmailAIAssistant.__new__(GmailAIAssistant)
+    assistant.model = Provider(TimeoutError("Provider timed out"))
+    assistant.rag_chain = SimpleNamespace(answer_query=lambda **kwargs: (
+        calls.append(kwargs) or {"answer": "Classified mailbox emails", "citations": []}))
+    assistant.max_agent_iterations = 3
+    graph = build_mailbox_graph(assistant, db=None, user_id=str(uuid4()), history=[],
+        top_k=5, filter_dict=None, use_multi_query=False, citations=[], checkpointer=InMemorySaver())
+    state = graph.invoke({"query": query, "messages": [], "steps": [], "iterations": 0},
+                         {"configurable": {"thread_id": str(uuid4())}})
+    assert state["intent"] == "RAG_QUERY"
+    assert state["answer"] == "Classified mailbox emails"
+    assert calls[0]["query"] == query
+    assert assistant.model.calls == []
+
+
 @pytest.mark.parametrize("query", [
     "Summarize lab mails and send the result to xyz@gmail.com",
     "Find lab emails then delete them",

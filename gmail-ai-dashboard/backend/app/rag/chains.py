@@ -408,6 +408,50 @@ class GroundedRAGChain:
             )
             logger.info("Rewrote ambiguous query '%s' -> '%s'", query, effective_query)
 
+        # Classification asks for a decision on each message, not the five
+        # highest-ranked search hits. Keep it read-only and batch the model
+        # calls so a broad time window never becomes one oversized prompt.
+        from app.rag.search_plan import classification_request
+        if classification_request(effective_query):
+            from app.rag.classification_query import classify_mailbox_query
+            current_user = db.get(User, UUID(str(user_id)))
+            live_status = None
+            if settings.gmail_mcp_enabled and not (current_user and current_user.is_demo):
+                try:
+                    from app.rag.gmail_mcp import search_live_mailbox
+                    emit_activity("gmail_search", "Fetching messages in the requested time frame",
+                                  status="running", lane="gmail")
+                    live_status = search_live_mailbox(user_id, effective_query, full_scan=True)
+                    # The MCP worker commits in another session. End our read
+                    # transaction so SQLite and PostgreSQL see those rows.
+                    db.rollback()
+                    db.expire_all()
+                    emit_activity("gmail_search", f"Fetched {len(live_status['email_ids'])} Gmail messages",
+                                  status="completed" if live_status["complete"] else "warning", lane="gmail")
+                except Exception as exc:
+                    live_status = {"complete": False, "error_code": error_code(exc), "email_ids": []}
+                    logger.warning("Classification live Gmail discovery unavailable: %s", live_status["error_code"])
+            answer, citations, coverage = classify_mailbox_query(db, user_id, effective_query, self.model)
+            if current_user and current_user.is_demo:
+                answer += "\n\nDemo mode: these are fictional sample emails."
+            elif live_status and live_status["complete"]:
+                answer += "\n\nCoverage: Gmail completed the search for the requested time frame."
+            elif live_status:
+                detail = (error_hint(live_status["error_code"], "Gmail") if live_status.get("error_code")
+                          else "The configured Gmail message limit was reached.")
+                answer += "\n\nCoverage: live Gmail search was incomplete; additional matching emails may be missing. " + detail
+            else:
+                answer += "\n\nCoverage: this analysis uses synced Gmail messages; emails not yet synced may be missing."
+            return {
+                "answer": answer, "citations": citations,
+                "context_count": len(citations), "rewritten_query": effective_query,
+                "retrieval_strategy": "exhaustive_mailbox_classification",
+                "relevance_validated": coverage["complete"] and (live_status is None or live_status["complete"]),
+                "candidates_evaluated": len(citations),
+                "validation_error": coverage["error"],
+                "search_plan": plan_retrieval(effective_query, filters, mcp_enabled=False).public(),
+            }
+
         # 2. Step 2: Determine retrieval strategy and provider fan-out.
         # Live discovery is only routed for requests where freshness or broad
         # mailbox membership is valuable; focused requests stay on the fast

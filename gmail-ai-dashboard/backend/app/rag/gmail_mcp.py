@@ -14,7 +14,7 @@ MAX_LIVE_GMAIL_SECONDS = 15
 MAX_LIVE_GMAIL_MESSAGES = 100
 
 
-async def _search(user_id, query):
+async def _search(user_id, query, *, full_scan=False):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
     from sqlalchemy.engine import make_url
@@ -23,7 +23,8 @@ async def _search(user_id, query):
     if database_url.drivername.startswith('sqlite') and database_url.database not in (None, '', ':memory:'):
         database_url = database_url.set(database=str(Path(database_url.database).resolve()))
 
-    timeout_seconds = min(settings.gmail_mcp_timeout_seconds, MAX_LIVE_GMAIL_SECONDS)
+    timeout_seconds = (settings.gmail_mcp_timeout_seconds if full_scan else
+                       min(settings.gmail_mcp_timeout_seconds, MAX_LIVE_GMAIL_SECONDS))
     params = StdioServerParameters(
         command=sys.executable, args=["-m", "app.services.gmail_mcp_server"],
         cwd=str(Path(__file__).resolve().parents[2]),
@@ -37,10 +38,10 @@ async def _search(user_id, query):
                 await session.initialize()
                 result = await session.call_tool("search_mailbox_emails", {
                     "query": gmail_search_query(query),
-                    # Live discovery is for fresh candidate membership, not a
-                    # full mailbox export.  The synced index handles broad
-                    # historical/date-scoped requests.
-                    "max_messages": min(settings.gmail_mcp_max_messages, MAX_LIVE_GMAIL_MESSAGES),
+                    # Broad categorization uses a larger, still bounded scan.
+                    # Search status reports when the configured cap is reached.
+                    "max_messages": (settings.gmail_mcp_max_messages if full_scan else
+                                     min(settings.gmail_mcp_max_messages, MAX_LIVE_GMAIL_MESSAGES)),
                 })
                 if result.isError:
                     raise RuntimeError("Live Gmail MCP search failed")
@@ -52,8 +53,8 @@ async def _search(user_id, query):
                 return payload
 
 
-def search_live_mailbox(user_id, query):
-    return asyncio.run(_search(user_id, query))
+def search_live_mailbox(user_id, query, *, full_scan=False):
+    return asyncio.run(_search(user_id, query, full_scan=full_scan))
 
 
 # Compatibility alias for callers that still use the old function name.

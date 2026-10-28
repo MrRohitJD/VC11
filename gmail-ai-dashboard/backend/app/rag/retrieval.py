@@ -41,7 +41,7 @@ except ImportError:
 
 from app.models.email import AiCategory, Email, EmailClassification, EmailLabel, GmailAccount, Label
 from app.rag.mailbox_scope import mailbox_email_condition, mailbox_email_ids, primary_email_condition, restrict_to_email_ids
-from app.rag.query_constraints import is_financial_query
+from app.rag.query_constraints import is_financial_query, received_date_bounds
 from app.rag.preprocessing import clean_email_text
 from app.rag.vectorstore import default_vectorstore
 from app.rag.pgvector_store import PostgresVectorStoreManager
@@ -102,11 +102,23 @@ def scoped_mailbox_documents(db, user_id, query, filters, email_ids=None):
     were just synchronized by MCP but have not been embedded yet.  Keeping
     this as an optional fast path avoids a second full mailbox scope scan.
     """
-    ids = [UUID(str(eid)) for eid in (email_ids if email_ids is not None else mailbox_email_ids(db, user_id, query))]
-    if not ids:
-        return []
-    stmt = select(Email).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(
-        GmailAccount.user_id == UUID(str(user_id)), Email.id.in_(ids))
+    from app.rag.search_plan import classification_request, requested_sender
+    # Broad categorization can involve thousands of messages. Let SQL apply
+    # account, mailbox and date scope directly instead of materializing every
+    # UUID and sending a very large IN clause back to the database.
+    direct_scope = (email_ids is None and classification_request(query)
+                    and not requested_sender(query) and not filters.get("custom_filter"))
+    if direct_scope:
+        stmt = select(Email).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(
+            GmailAccount.user_id == UUID(str(user_id)), mailbox_email_condition())
+        if bounds := received_date_bounds(query):
+            stmt = stmt.where(Email.received_at >= bounds[0], Email.received_at < bounds[1])
+    else:
+        ids = [UUID(str(eid)) for eid in (email_ids if email_ids is not None else mailbox_email_ids(db, user_id, query))]
+        if not ids:
+            return []
+        stmt = select(Email).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(
+            GmailAccount.user_id == UUID(str(user_id)), Email.id.in_(ids))
     for name, column in [("gmail_message_id", Email.gmail_message_id), ("thread_id", Email.thread_id),
                          ("is_read", Email.is_read), ("email_id", Email.id)]:
         if filters.get(name) is not None:

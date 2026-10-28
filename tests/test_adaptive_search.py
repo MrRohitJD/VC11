@@ -6,7 +6,7 @@ from app.rag.adaptive import bm25_rank, fuse_rankings, plan_retrieval
 
 def test_planner_uses_exhaustive_lookup_for_all_without_losing_date_scope():
     plan = plan_retrieval("Find all interview emails from last 3 months and summarize upcoming interviews", use_multi_query=True)
-    assert plan.strategy == "exhaustive_primary"
+    assert plan.strategy == "exhaustive_mailbox"
     assert plan.date_start and plan.date_end
     assert not plan.multi_query
 

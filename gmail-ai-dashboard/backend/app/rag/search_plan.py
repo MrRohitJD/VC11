@@ -57,6 +57,13 @@ def exhaustive_request(query):
     return bool(re.search(r"\ball\b|\bevery\b", query, re.I))
 
 
+def classification_request(query):
+    """A read-only request to categorize mailbox messages in the answer."""
+    return bool(re.search(r"\b(?:classify|categorize|categorise)\b", query or "", re.I)
+                and re.search(r"\b(?:emails?|e-mails?|mails?|messages?|inbox|mailbox)\b", query or "", re.I)
+                and not re.search(r"\b(?:label|apply|mark|move|delete|archive|send|forward)\b", query or "", re.I))
+
+
 def date_only_request(query):
     """True only for unconstrained receipt-date listings/summaries."""
     query = normalize_date_words(query)

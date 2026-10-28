@@ -5,7 +5,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 
 from langchain_core.documents import Document
-from app.rag.search_plan import exhaustive_request, date_only_request
+from app.rag.search_plan import exhaustive_request, date_only_request, classification_request
 from app.rag.query_constraints import received_date_bounds
 
 STOPWORDS = set("a an the i my me you your we our find search show get list give please all every email emails mail mails message messages related about from to in on at for by of with and or is are was were be have has do does what when where who how can could would should summarize summarise summary brief overview incoming received today yesterday this current last past previous month months week weeks day days upcoming recent".split())
@@ -56,7 +56,7 @@ def plan_retrieval(query, filters=None, use_multi_query=None, mode="similarity",
             mcp_enabled = False
 
     query = query or ""
-    exhaustive, date_only = exhaustive_request(query), date_only_request(query)
+    exhaustive, date_only = exhaustive_request(query) or classification_request(query), date_only_request(query)
     bounds = received_date_bounds(query)
     diverse = bool(re.search(r"\b(?:overview|different topics|across|variety|themes)\b", query, re.I))
     complex_query = bool(re.search(r"\b(?:compare|versus|both|across)\b|\band\b.+\b(?:bills?|interviews?|meetings?|payments?)\b", query, re.I))
