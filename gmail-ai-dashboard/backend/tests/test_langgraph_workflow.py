@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from app.rag import graph_agent
+from app.rag.retrieval import RetrievedCitation
 
 
 def test_retrieval_graph_and_persistent_checkpoint(tmp_path, monkeypatch):
@@ -13,7 +14,9 @@ def test_retrieval_graph_and_persistent_checkpoint(tmp_path, monkeypatch):
 
     def answer_query(**kwargs):
         calls.append(kwargs)
-        return {"answer": "A verified mailbox answer", "citations": []}
+        return {"answer": "A verified mailbox answer", "citations": [RetrievedCitation(
+            email_id="source-1", subject="Invoice", sender="alice", date="", snippet="evidence", score=1.0,
+        )]}
 
     assistant = SimpleNamespace(
         transform_query=lambda query, history: query,

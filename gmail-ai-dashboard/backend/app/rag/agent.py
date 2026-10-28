@@ -226,6 +226,9 @@ def extract_citations_from_tool_observation(obs: str) -> List[RetrievedCitation]
                 eid = it.get("email_id") or it.get("id")
                 if not eid:
                     continue
+                score = it.get("score")
+                if score is None:
+                    score = it.get("relevance_score")
                 citations.append(
                     RetrievedCitation(
                         email_id=str(eid),
@@ -233,7 +236,11 @@ def extract_citations_from_tool_observation(obs: str) -> List[RetrievedCitation]
                         sender=it.get("sender") or it.get("from") or it.get("from_email") or "Unknown",
                         date=it.get("date") or it.get("received_at") or "",
                         snippet=(it.get("snippet") or it.get("body") or "")[:300],
-                        score=float(it.get("score") or it.get("relevance_score") or 1.0),
+                        score=float(score) if score is not None else 0.0,
+                        thread_id=str(it.get("thread_id") or ""),
+                        label=str(it.get("label") or "EMAIL"),
+                        key_points=it.get("key_points") or [],
+                        chunk_index=int(it.get("chunk_index") or 0),
                     )
                 )
     except Exception:

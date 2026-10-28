@@ -19,6 +19,7 @@ from sqlalchemy import and_, false, func, or_, select
 from app.database.connection import SessionLocal
 from app.models.email import Email, GmailAccount
 from app.models.rag import EmailChunk, EmailEmbedding
+from app.rag.mailbox_scope import mailbox_email_condition
 from app.rag.embeddings import get_embedding_model
 from app.core.config import settings
 
@@ -117,6 +118,7 @@ class PostgresVectorStoreManager:
             )
         combined = self.build_filter(user_id, custom_filter=filter_dict)
         filters = (GmailAccount.user_id == UUID(str(user_id)),
+                   mailbox_email_condition(),
                    EmailEmbedding.status == "INDEXED", EmailEmbedding.embedding.is_not(None),
                    EmailEmbedding.embedding_dimensions == expected_dimensions,
                    self._condition(combined))

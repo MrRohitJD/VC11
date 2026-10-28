@@ -143,7 +143,8 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
 
     @tool
     def search_emails(query: str, top_k: int = 5) -> str:
-        """Search emails semantically using PostgreSQL pgvector retrieval."""
+        """Find conceptually related emails, including wording with few shared words. Use for meaning-based questions; results are candidate evidence, so read a message when exact detail matters."""
+        top_k = max(1, min(top_k, 20))
         sanitized = sanitize_tool_args({"query": query, "top_k": top_k})
         logger.info("Tool chosen: search_emails with args: %s", sanitized)
 
@@ -169,8 +170,20 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
                 "date": c.date,
                 "snippet": c.snippet,
                 "relevance_score": c.score,
+                "thread_id": c.thread_id,
             })
         return json.dumps(results, indent=2)
+
+    @tool
+    def search_emails_exact(phrase: str, limit: int = 10) -> str:
+        """Find an exact phrase, name, address, or identifier in synced email subject, snippet, or body. Supply only the literal text to match, without question wording. Use semantic search separately for paraphrases."""
+        phrase = (phrase or "").strip()
+        if not phrase:
+            return "An exact phrase is required."
+        citations = default_retriever.retrieve_structured_sql(
+            db=db, user_id=user_uuid, keyword=phrase, limit=max(1, min(limit, 20)),
+        )
+        return json.dumps([c.__dict__ for c in citations], ensure_ascii=False)
 
     @tool
     def get_email_by_id(email_id: str) -> str:
@@ -238,7 +251,8 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
 
     @tool
     def retrieve_email_context(query: str, top_k: int = 5) -> str:
-        """Perform hybrid retrieval (dense pgvector + PostgreSQL text) for RAG context."""
+        """Find mailbox context using both semantic vectors and lexical text, then merge distinct emails. Use when either paraphrases or exact words may matter, or one search method has missed evidence."""
+        top_k = max(1, min(top_k, 20))
         sanitized = sanitize_tool_args({"query": query, "top_k": top_k})
         logger.info("Tool chosen: retrieve_email_context with args: %s", sanitized)
 
@@ -268,13 +282,15 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
                 "date": c.date,
                 "snippet": c.snippet,
                 "score": c.score,
+                "thread_id": c.thread_id,
             }
             for c in citations
         ], indent=2)
 
     @tool
     def search_emails_multi_query(query: str, top_k: int = 5) -> str:
-        """Generate alternative search perspectives, execute multi-query retrieval, and fuse results via RRF."""
+        """Explore multiple semantic perspectives for a complex question spanning several topics or emails. Slower than a single search; use when the first search cannot cover the request."""
+        top_k = max(1, min(top_k, 20))
         sanitized = sanitize_tool_args({"query": query, "top_k": top_k})
         logger.info("Tool chosen: search_emails_multi_query with args: %s", sanitized)
 
@@ -303,6 +319,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
                 "date": c.date,
                 "snippet": c.snippet,
                 "score": c.score,
+                "thread_id": c.thread_id,
             }
             for c in citations
         ], indent=2)
@@ -423,7 +440,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
 
     @tool
     def get_email_summary(email_id: str) -> str:
-        """Generate a concise summary of an email by ID."""
+        """Read a short authorized email preview by ID for a concise summary."""
         try:
             eid = UUID(str(email_id).strip())
         except Exception:
@@ -438,8 +455,13 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         if not email:
             return f"Email {email_id} not found."
 
-        snippet = email.snippet or email.body or "Empty body"
-        return f"Summary of '{email.subject}': {snippet[:250]}..."
+        return json.dumps({
+            "email_id": str(email.id), "subject": email.subject or "No Subject",
+            "sender": email.from_email or "Unknown",
+            "date": email.received_at.isoformat() if email.received_at else "",
+            "snippet": (email.snippet or email.body or "")[:500],
+            "thread_id": email.thread_id or "",
+        })
 
     @tool
     def classify_email(email_id: str) -> str:
@@ -449,6 +471,12 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         except Exception:
             return f"Invalid email UUID: {email_id}"
 
+        email = db.scalar(
+            select(Email).join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
+            .where(Email.id == eid, GmailAccount.user_id == user_uuid, mailbox_email_condition())
+        )
+        if email is None:
+            return "Email not found or unauthorized."
         classification = db.scalar(
             select(AiCategory.name)
             .join(EmailClassification, EmailClassification.category_id == AiCategory.id)
@@ -457,7 +485,13 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             .where(EmailClassification.email_id == eid, EmailClassification.is_current.is_(True))
             .where(GmailAccount.user_id == user_uuid, mailbox_email_condition())
         )
-        return classification or "Uncategorized"
+        return json.dumps({
+            "email_id": str(email.id), "subject": email.subject or "No Subject",
+            "sender": email.from_email or "Unknown",
+            "date": email.received_at.isoformat() if email.received_at else "",
+            "snippet": email.snippet or "", "thread_id": email.thread_id or "",
+            "classification": classification or "Uncategorized",
+        })
 
     @tool
     def get_email_attachments(email_id: str) -> str:
@@ -467,15 +501,19 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         except Exception:
             return f"Invalid email UUID: {email_id}"
 
+        email = db.scalar(
+            select(Email).join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
+            .where(Email.id == eid, GmailAccount.user_id == user_uuid, mailbox_email_condition())
+        )
+        if email is None:
+            return "No attachments found or email unavailable."
+
         attachments = db.scalars(
             select(Attachment)
             .join(Email, Email.id == Attachment.email_id)
             .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
             .where(Attachment.email_id == eid, GmailAccount.user_id == user_uuid, mailbox_email_condition())
         ).all()
-        if not attachments:
-            return "No attachments registered for this email."
-
         res = []
         for a in attachments:
             res.append({
@@ -485,7 +523,12 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
                 "status": a.extraction_status,
                 "extracted_snippet": (a.extracted_text or "")[:200],
             })
-        return json.dumps(res, indent=2)
+        return json.dumps({
+            "email_id": str(email.id), "subject": email.subject or "No Subject",
+            "sender": email.from_email or "Unknown",
+            "date": email.received_at.isoformat() if email.received_at else "",
+            "thread_id": email.thread_id or "", "attachments": res,
+        }, indent=2)
 
     @tool
     def draft_email(recipient: str, subject: str, body: str, cc: str = "", bcc: str = "") -> str:
@@ -627,6 +670,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
 
     tools = [
         search_emails,
+        search_emails_exact,
         search_emails_multi_query,
         get_email_by_id,
         search_email_threads,

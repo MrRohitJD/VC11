@@ -75,6 +75,9 @@ class Settings(BaseSettings):
         le=8,
         validation_alias=AliasChoices("RAG_RELEVANCE_PARALLELISM"),
     )
+    rag_vector_candidate_multiplier: int = Field(
+        4, ge=1, le=10, validation_alias=AliasChoices("RAG_VECTOR_CANDIDATE_MULTIPLIER"),
+    )
 
     embedding_provider: str = Field("azure_openai", validation_alias=AliasChoices("RAG_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"))
     embedding_model_name: str = Field("text-embedding-3-large", validation_alias=AliasChoices("RAG_EMBEDDING_MODEL", "EMBEDDING_MODEL"))

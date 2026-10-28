@@ -40,9 +40,11 @@ except ImportError:
 
 
 from app.models.email import AiCategory, Email, EmailClassification, EmailLabel, GmailAccount, Label
+from app.core.config import settings
 from app.rag.mailbox_scope import mailbox_email_condition, mailbox_email_ids, primary_email_condition, restrict_to_email_ids
-from app.rag.query_constraints import is_financial_query, received_date_bounds
+from app.rag.query_constraints import received_date_bounds
 from app.rag.preprocessing import clean_email_text
+from app.rag.search_plan import requested_sender
 from app.rag.vectorstore import default_vectorstore
 from app.rag.pgvector_store import PostgresVectorStoreManager
 from app.rag.activity import emit_activity
@@ -275,6 +277,8 @@ class PostgresSemanticRetriever(BaseRetriever):
     lambda_mult: float = Field(0.7, description="Diversity tradeoff for MMR (0.0=max diversity, 1.0=max relevance)")
     filter_dict: Optional[Dict[str, Any]] = Field(None, description="Optional raw metadata filters for the configured vector backend")
     score_threshold: Optional[float] = Field(None, description="Minimum similarity threshold")
+    candidate_multiplier: int = Field(default_factory=lambda: settings.rag_vector_candidate_multiplier,
+                                      ge=1, le=10, description="Chunks fetched per requested distinct email")
 
     # Structured metadata filters
     sender: Optional[str] = Field(None, description="Filter by sender address or sender name")
@@ -303,8 +307,14 @@ class PostgresSemanticRetriever(BaseRetriever):
 
         custom_filter = self.filter_dict
         allowed_ids = None
-        if self.db_session is not None:
-            allowed_ids = mailbox_email_ids(self.db_session, self.user_id, self.scope_query or query)
+        scope_query = self.scope_query or query
+        # PostgreSQL enforces tenant and current Gmail label membership in SQL.
+        # Materialize IDs only when a natural-language date or sender scope
+        # must be resolved before vector ranking.
+        needs_id_scope = (not isinstance(self.vector_manager, PostgresVectorStoreManager)
+                          or bool(received_date_bounds(scope_query) or requested_sender(scope_query)))
+        if self.db_session is not None and needs_id_scope:
+            allowed_ids = mailbox_email_ids(self.db_session, self.user_id, scope_query)
             if not allowed_ids:
                 return []
             custom_filter = restrict_to_email_ids(custom_filter, allowed_ids)
@@ -334,8 +344,8 @@ class PostgresSemanticRetriever(BaseRetriever):
             results = vector_manager.search_mmr_with_scores(
                 query=query.strip(),
                 user_id=self.user_id,
-                top_k=self.top_k,
-                fetch_k=self.fetch_k,
+                top_k=self.top_k * self.candidate_multiplier,
+                fetch_k=max(self.fetch_k, self.top_k * self.candidate_multiplier),
                 lambda_mult=self.lambda_mult,
                 filter_dict=combined_filter,
             )
@@ -344,13 +354,17 @@ class PostgresSemanticRetriever(BaseRetriever):
             results = vector_manager.search_with_scores(
                 query=query.strip(),
                 user_id=self.user_id,
-                top_k=self.top_k,
+                top_k=self.top_k * self.candidate_multiplier,
                 filter_dict=combined_filter,
             )
 
         docs: List[Document] = []
+        seen_emails: Set[str] = set()
         for doc, score in results:
-            if allowed_ids is not None and str(doc.metadata.get("email_id", "")) not in allowed_ids:
+            email_id = str(doc.metadata.get("email_id", ""))
+            if allowed_ids is not None and email_id not in allowed_ids:
+                continue
+            if not email_id or email_id in seen_emails:
                 continue
             if self.score_threshold is not None and score is not None:
                 if score < self.score_threshold:
@@ -363,6 +377,9 @@ class PostgresSemanticRetriever(BaseRetriever):
             meta["retrieval_mode"] = self.search_type
             meta["search_type"] = self.search_type
             docs.append(Document(page_content=doc.page_content, metadata=meta))
+            seen_emails.add(email_id)
+            if len(docs) >= self.top_k:
+                break
 
         if self.db_session is not None:
             docs = hydrate_email_documents(docs, self.db_session, self.user_id)
@@ -521,6 +538,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
 
         user_uuid = UUID(str(self.user_id))
         semantic_docs: List[Document] = []
+        seen_semantic_emails: Set[str] = set()
         sql_docs: List[Document] = []
         vector_manager = self.vector_manager
         if self.db_session is not None and isinstance(vector_manager, PostgresVectorStoreManager):
@@ -532,8 +550,11 @@ class GmailCustomHybridRetriever(BaseRetriever):
             vector_manager.collection_name = collection_name
 
         allowed_ids = None
-        if self.db_session is not None:
-            allowed_ids = mailbox_email_ids(self.db_session, self.user_id, self.scope_query or query)
+        scope_query = self.scope_query or query
+        needs_id_scope = (not isinstance(self.vector_manager, PostgresVectorStoreManager)
+                          or bool(received_date_bounds(scope_query) or requested_sender(scope_query)))
+        if self.db_session is not None and needs_id_scope:
+            allowed_ids = mailbox_email_ids(self.db_session, self.user_id, scope_query)
             if not allowed_ids:
                 return []
 
@@ -563,8 +584,8 @@ class GmailCustomHybridRetriever(BaseRetriever):
                 raw_semantic = vector_manager.search_mmr_with_scores(
                     query=query,
                     user_id=self.user_id,
-                    top_k=self.top_k * 2,
-                    fetch_k=self.fetch_k,
+                    top_k=self.top_k * settings.rag_vector_candidate_multiplier,
+                    fetch_k=max(self.fetch_k, self.top_k * settings.rag_vector_candidate_multiplier),
                     lambda_mult=self.lambda_mult,
                     filter_dict=combined_chroma_filter,
                 )
@@ -572,18 +593,24 @@ class GmailCustomHybridRetriever(BaseRetriever):
                 raw_semantic = vector_manager.search_with_scores(
                     query=query,
                     user_id=self.user_id,
-                    top_k=self.top_k * 2,
+                    top_k=self.top_k * settings.rag_vector_candidate_multiplier,
                     filter_dict=combined_chroma_filter,
                 )
 
             for doc, score in raw_semantic:
-                if allowed_ids is not None and str(doc.metadata.get("email_id", "")) not in allowed_ids:
+                email_id = str(doc.metadata.get("email_id", ""))
+                if allowed_ids is not None and email_id not in allowed_ids:
+                    continue
+                if not email_id or email_id in seen_semantic_emails:
                     continue
                 meta = dict(doc.metadata or {})
                 meta["score"] = round(float(score), 4) if score is not None else 0.0
                 meta.setdefault("score_source", "vector_similarity" if score is not None else "unscored")
                 meta.setdefault("source", "postgresql")
                 semantic_docs.append(Document(page_content=doc.page_content, metadata=meta))
+                seen_semantic_emails.add(email_id)
+                if len(semantic_docs) >= self.top_k:
+                    break
         except Exception as exc:
             logger.debug("PostgreSQL vector search error: %s", exc)
 
@@ -602,8 +629,8 @@ class GmailCustomHybridRetriever(BaseRetriever):
                 if self.email_id:
                     try:
                         db_query = db_query.where(Email.id == UUID(str(self.email_id).strip()))
-                    except Exception:
-                        pass
+                    except (TypeError, ValueError):
+                        return []
                 if self.gmail_message_id:
                     db_query = db_query.where(Email.gmail_message_id == self.gmail_message_id.strip())
                 if self.thread_id:
@@ -611,10 +638,11 @@ class GmailCustomHybridRetriever(BaseRetriever):
                 if self.sender:
                     s_clean = self.sender.strip()
                     if s_clean:
+                        s_clean = s_clean.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                         db_query = db_query.where(
                             or_(
-                                Email.from_email.ilike(f"%{s_clean}%"),
-                                Email.sender_name.ilike(f"%{s_clean}%"),
+                                Email.from_email.ilike(f"%{s_clean}%", escape="\\"),
+                                Email.sender_name.ilike(f"%{s_clean}%", escape="\\"),
                             )
                         )
                 if self.start_date:
@@ -644,7 +672,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
                     clean_query,
                     flags=re.IGNORECASE,
                 ).strip()
-                if cleaned_kw and len(cleaned_kw) > 1 and not (self.email_id or self.thread_id or self.gmail_message_id) and not is_financial_query(query):
+                if cleaned_kw and len(cleaned_kw) > 1 and not (self.email_id or self.thread_id or self.gmail_message_id):
                     search_pat = f"%{cleaned_kw}%"
                     phrase_cond = or_(
                         Email.subject.ilike(search_pat),
@@ -793,17 +821,18 @@ class GmailCustomHybridRetriever(BaseRetriever):
         if email_id:
             try:
                 stmt = stmt.where(Email.id == UUID(str(email_id).strip()))
-            except Exception:
-                pass
+            except (TypeError, ValueError):
+                return []
         if thread_id:
             stmt = stmt.where(Email.thread_id == str(thread_id).strip())
         if sender:
             s_clean = sender.strip()
             if s_clean:
+                s_clean = s_clean.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 stmt = stmt.where(
                     or_(
-                        Email.from_email.ilike(f"%{s_clean}%"),
-                        Email.sender_name.ilike(f"%{s_clean}%"),
+                        Email.from_email.ilike(f"%{s_clean}%", escape="\\"),
+                        Email.sender_name.ilike(f"%{s_clean}%", escape="\\"),
                     )
                 )
         if start_date:
@@ -816,24 +845,33 @@ class GmailCustomHybridRetriever(BaseRetriever):
             lbl = label.strip()
             if lbl:
                 stmt = stmt.where(email_label_condition(lbl))
-        if keyword and not is_financial_query(keyword):
+        if keyword:
             kw_clean = keyword.strip()
             if kw_clean:
+                escaped = kw_clean.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 stmt = stmt.where(
                     or_(
-                        Email.subject.ilike(f"%{kw_clean}%"),
-                        Email.snippet.ilike(f"%{kw_clean}%"),
-                        Email.body.ilike(f"%{kw_clean}%"),
+                        Email.subject.ilike(f"%{escaped}%", escape="\\"),
+                        Email.snippet.ilike(f"%{escaped}%", escape="\\"),
+                        Email.body.ilike(f"%{escaped}%", escape="\\"),
+                        Email.body_html.ilike(f"%{escaped}%", escape="\\"),
                     )
                 )
 
         emails = db.scalars(
-            stmt.order_by(Email.received_at.desc().nullslast()).limit(limit)
+            stmt.order_by(Email.received_at.desc().nullslast()).limit(max(1, min(limit, 100)))
         ).all()
 
         citations: List[RetrievedCitation] = []
         for e in emails:
-            content = (e.snippet or e.body or "")[:300].strip()
+            content = e.snippet or e.body or ""
+            if keyword:
+                for field in (e.subject or "", e.snippet or "", e.body or "", e.body_html or ""):
+                    match_at = field.casefold().find(keyword.casefold())
+                    if match_at >= 0:
+                        content = field[max(0, match_at - 100):match_at + len(keyword) + 200]
+                        break
+            content = content[:300].strip()
             citations.append(
                 RetrievedCitation(
                     email_id=str(e.id),
