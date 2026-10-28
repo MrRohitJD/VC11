@@ -183,6 +183,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
             logger.warning("Mailbox retrieval error: %s", exc)
             return {
                 "answer": f"I encountered an issue searching your mailbox: {error_hint(error_code(exc))}",
+                "search_plan": {"strategy": "grounded_chain_error", "providers": []},
                 "evidence_validated": False,
                 "steps": [{"action": "retrieve_mailbox", "observation": f"Retrieval failed: {type(exc).__name__}"}],
             }
@@ -366,6 +367,19 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         return {"answer": "I reached the workflow step limit. Please narrow your request. Any created drafts still require review."}
 
     def review(state):
+        recovery = {}
+        if (state.get("intent") in {"RAG_QUERY", "SUMMARIZE"}
+                and state.get("search_plan", {}).get("strategy") == "llm_selected"
+                and not citations
+                and not any(step.get("action") == "answer_mailbox_question"
+                            for step in state.get("steps", []))):
+            # A model-selected narrow tool may legitimately miss a relevant
+            # email. One grounded pass over the original request prevents an
+            # empty candidate set from becoming a false mailbox-wide claim.
+            emit_activity("corrective_search", "Checking the full mailbox request", lane="semantic")
+            recovery = retrieve(state)
+            recovery["steps"] = [*state.get("steps", []), *recovery["steps"]]
+            state = {**state, **recovery}
         valid = state.get("evidence_validated", True)
         emit_activity("review_answer", "Checked source coverage and answer status" if valid else "Answer reports the unavailable evidence check", status="completed" if valid else "warning", source_count=len(citations), lane="validator")
         ans = (state.get("answer") or "").strip()
@@ -382,7 +396,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
             ans = assistant._generate_dynamic_fallback(state.get("effective_query", state.get("query", "")), citations)
         if not ans:
             ans = "I could not produce an answer for your mailbox request. Please refine or retry your request."
-        return {"answer": ans}
+        return {**recovery, "answer": ans}
 
     def route(state):
         if state["intent"] == "CLARIFY":

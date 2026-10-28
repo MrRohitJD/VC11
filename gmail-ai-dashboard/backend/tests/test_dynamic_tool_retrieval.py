@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from sqlalchemy import create_engine
@@ -17,10 +18,13 @@ from app.rag import graph_agent
 from app.rag.retrieval import PostgresSemanticRetriever, RetrievedCitation, default_retriever
 from app.rag.tools import create_gmail_tools
 from app.rag.pgvector_store import PostgresVectorStoreManager
+from app.rag.chains import GroundedRAGChain
+from app.rag.relevance import RelevanceResult
 from scripts.evaluate_retrieval import ranking_metrics
 
 
-def _graph_with_model(monkeypatch, responses, search_tool, *, effective_query=None, history=None):
+def _graph_with_model(monkeypatch, responses, search_tool, *, effective_query=None,
+                      history=None, chain_answer=None):
     calls = []
     search_tools = search_tool if isinstance(search_tool, list) else [search_tool]
 
@@ -38,8 +42,10 @@ def _graph_with_model(monkeypatch, responses, search_tool, *, effective_query=No
         model=Model(), max_agent_iterations=4,
         transform_query=lambda query, history: query,
         route_intent=lambda query: "RAG_QUERY",
-        rag_chain=SimpleNamespace(answer_query=lambda **_: (_ for _ in ()).throw(
-            AssertionError("Read request should use model-selected tool"))),
+        rag_chain=SimpleNamespace(answer_query=chain_answer or (lambda **_: {
+            "answer": "I could not verify any matching emails after the broader search.",
+            "citations": [], "search_plan": {"strategy": "grounded_chain"},
+        })),
     )
     if effective_query:
         assistant.interpret_request = lambda query, messages: SimpleNamespace(
@@ -108,7 +114,7 @@ def test_read_answer_without_email_evidence_is_rejected(monkeypatch):
     result = graph.invoke({"query": "When is the deadline?", "messages": [],
                            "steps": [], "iterations": 0},
                           {"configurable": {"thread_id": "user:no-evidence"}})
-    assert "couldn't verify" in result["answer"]
+    assert result["answer"] == "I could not verify any matching emails after the broader search."
 
 
 def test_empty_search_cannot_be_reported_as_a_found_email(monkeypatch):
@@ -124,7 +130,38 @@ def test_empty_search_cannot_be_reported_as_a_found_email(monkeypatch):
     ], search_emails_exact)
     result = graph.invoke({"query": "Find missing", "messages": [], "steps": [], "iterations": 0},
                           {"configurable": {"thread_id": "user:empty-search"}})
-    assert result["answer"] == "I couldn't find a matching email in the searched mailbox."
+    assert result["answer"] == "I could not verify any matching emails after the broader search."
+
+
+def test_empty_narrow_search_recovers_full_parcel_request(monkeypatch):
+    @tool
+    def search_emails_exact(phrase: str) -> str:
+        """Find a literal phrase in authorized email records."""
+        return "[]"
+
+    question = ("Find all my parcel delivery emails and summarize which packages "
+                "have been shipped, delivered, delayed, or are still on the way.")
+    recovered_queries = []
+
+    def grounded_answer(**kwargs):
+        recovered_queries.append(kwargs["query"])
+        return {"answer": "The sample package is out for delivery.",
+                "citations": [RetrievedCitation(
+                    email_id="parcel-1", subject="Package is out for delivery",
+                    sender="tracking@parcel.example", date="", snippet="Out for delivery today.",
+                    score=1.0,
+                )], "search_plan": {"strategy": "exhaustive_mailbox"}}
+
+    graph, _ = _graph_with_model(monkeypatch, [
+        AIMessage(content="", tool_calls=[{"name": "search_emails_exact",
+                                            "args": {"phrase": "parcel delivery"}, "id": "call-1"}]),
+        AIMessage(content="No parcel messages exist."),
+    ], search_emails_exact, chain_answer=grounded_answer)
+    result = graph.invoke({"query": question, "messages": [], "steps": [], "iterations": 0},
+                          {"configurable": {"thread_id": "user:parcel-recovery"}})
+    assert recovered_queries == [question]
+    assert result["answer"] == "The sample package is out for delivery."
+    assert result["search_plan"]["strategy"] == "exhaustive_mailbox"
 
 
 def test_model_can_combine_semantic_and_exact_results(monkeypatch):
@@ -322,4 +359,48 @@ def test_vector_scope_stays_in_sql_for_plain_queries(monkeypatch):
         docs = PostgresSemanticRetriever(user_id=str(user_id), db_session=db,
                                          vector_manager=manager, top_k=5).invoke("Project plan")
         assert [doc.metadata["email_id"] for doc in docs] == [str(allowed)]
+    engine.dispose()
+
+
+def test_exhaustive_grounded_search_finds_unindexed_parcel_email(monkeypatch):
+    from app.rag import chains
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user_id, other_user = uuid4(), uuid4()
+        account_id, other_account = uuid4(), uuid4()
+        db.add_all([
+            User(id=user_id, google_id="parcel-owner", email="parcel-owner@example.com", is_demo=True),
+            User(id=other_user, google_id="parcel-other", email="parcel-other@example.com", is_demo=True),
+            GmailAccount(id=account_id, user_id=user_id, email="parcel-owner@example.com", access_token="x"),
+            GmailAccount(id=other_account, user_id=other_user, email="parcel-other@example.com", access_token="x"),
+        ])
+        parcel_id = uuid4()
+        db.add_all([
+            Email(id=parcel_id, gmail_account_id=account_id, gmail_message_id="parcel-owner-1",
+                  subject="Package is out for delivery", body="Your order is out for delivery today."),
+            Email(id=uuid4(), gmail_account_id=other_account, gmail_message_id="parcel-other-1",
+                  subject="Another package", body="Your other order was delivered."),
+        ])
+        updates_label = uuid4()
+        db.add(Label(id=updates_label, gmail_account_id=account_id,
+                     label_id="CATEGORY_UPDATES", name="Updates"))
+        db.add(EmailLabel(email_id=parcel_id, gmail_account_id=account_id, label_id=updates_label))
+        db.commit()
+
+        def validate(documents, query, model, **kwargs):
+            matching = [doc for doc in documents if doc.metadata["email_id"] == str(parcel_id)]
+            return RelevanceResult(documents=matching, evaluated=len(documents))
+
+        monkeypatch.setattr(chains, "validate_email_relevance", validate)
+        monkeypatch.setattr(chains, "generate_grounded_answer", lambda *args: "The package is out for delivery.")
+        question = ("Find all my parcel delivery emails and summarize which packages "
+                    "have been shipped, delivered, delayed, or are still on the way.")
+        result = GroundedRAGChain(model=FakeListChatModel(responses=["unused"])).answer_query(
+            db=db, query=question, user_id=user_id,
+        )
+        assert result["retrieval_strategy"] == "exhaustive_mailbox"
+        assert [citation.email_id for citation in result["citations"]] == [str(parcel_id)]
+        assert "out for delivery" in result["answer"]
     engine.dispose()
