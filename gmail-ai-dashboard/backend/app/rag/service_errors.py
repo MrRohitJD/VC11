@@ -15,8 +15,10 @@ def error_code(exc):
         return 'timeout'
     if 'programmingerror' in name or 'operationalerror' in name:
         return 'database'
-    if isinstance(exc, (ValueError, KeyError, TypeError)):
+    if name in {'validationerror', 'outputparserexception', 'interpretationresponseerror'}:
         return 'invalid_response'
+    if isinstance(exc, (ValueError, KeyError, TypeError)):
+        return 'internal_error'
     if 'connection' in name or isinstance(exc, OSError):
         return 'connection'
     return 'unavailable'
@@ -29,6 +31,7 @@ def error_hint(code, service='AI'):
         'rate_limit': f'{service} reached its request limit. Try again later.',
         'timeout': f'{service} did not respond within the time limit.',
         'invalid_response': f'{service} returned a response that could not be validated.',
+        'internal_error': 'An internal request-processing error occurred.',
         'connection': f'Could not connect to {service}.',
         'database': 'The mailbox database needs attention before live search can finish.',
     }.get(code, f'{service} is currently unavailable.')

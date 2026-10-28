@@ -1,12 +1,14 @@
 """Semantic request interpretation; execution and approval remain application-owned."""
+import json
 import logging
 import re
 from datetime import timedelta
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from langchain_core.exceptions import OutputParserException
+from langchain_openai.chat_models.base import BaseChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.runnables import RunnableLambda
 
 from app.rag.query_constraints import DateRangeError, mailbox_now, received_date_bounds
 from app.rag.service_errors import error_code, error_hint
@@ -115,7 +117,51 @@ def fallback_leave_request(query: str) -> InterpretedRequest | None:
 
 
 def interpretation_failure_message(exc):
-    return f"I could not interpret your request. {error_hint(error_code(exc))} Please try again shortly."
+    code = error_code(exc)
+    return f"I could not interpret your request. {error_hint(code)} Error code: {code}. Please try again shortly."
+
+
+class InterpretationResponseError(ValueError):
+    """A known invalid model output, distinct from application programming errors."""
+
+
+def _response_diagnostics(exc):
+    # Parser exception text can contain complete emails: log only fields/types.
+    if isinstance(exc, ValidationError):
+        return [{"field": ".".join(map(str, item["loc"])), "type": item["type"]}
+                for item in exc.errors(include_input=False, include_context=False, include_url=False)]
+    return [{"type": type(exc).__name__}]
+
+
+def _validated_interpretation(response):
+    if isinstance(response, dict) and "raw" in response and "parsed" in response:
+        raw = response["raw"]
+        metadata = getattr(raw, "response_metadata", {}) or {}
+        if metadata.get("finish_reason") in {"length", "content_filter"}:
+            raise InterpretationResponseError("Incomplete or filtered model response")
+        if (getattr(raw, "additional_kwargs", {}) or {}).get("refusal"):
+            raise InterpretationResponseError("Model declined interpretation")
+        parsing_error = response.get("parsing_error")
+        if isinstance(parsing_error, (ValidationError, OutputParserException)):
+            raise parsing_error
+        if response["parsed"] is not None:
+            response = response["parsed"]
+        else:
+            # Compatible endpoints sometimes return JSON content instead of a
+            # tool call. Apply exactly the same schema and action validation.
+            if getattr(raw, "tool_calls", None) or getattr(raw, "invalid_tool_calls", None):
+                raise InterpretationResponseError("Invalid structured tool output")
+            content = getattr(raw, "content", None)
+            if not isinstance(content, str) or not content.strip():
+                raise InterpretationResponseError("Missing structured output")
+            content = content.strip()
+            if content.startswith("```json") and content.endswith("```"):
+                content = content[7:-3].strip()
+            try:
+                response = json.loads(content)
+            except json.JSONDecodeError as exc:
+                raise InterpretationResponseError("Invalid JSON output") from exc
+    return InterpretedRequest.model_validate(response)
 
 
 def fallback_read_request(query: str) -> InterpretedRequest | None:
@@ -178,24 +224,54 @@ def interpret_request(model, query, history=()):
     # Bind schemas per provider before composing fallbacks. A fallback runnable
     # itself need not implement with_structured_output.
     providers = [getattr(model, "runnable", model), *getattr(model, "fallbacks", [])]
-    structured = []
+    repair_candidate = None
+    last_exc = RuntimeError("No configured provider supports structured interpretation")
     try:
         for provider in providers:
+            provider_name = type(provider).__name__
             try:
-                provider_runnable = provider.with_structured_output(InterpretedRequest)
-                # Validate inside each attempt so malformed/empty responses also
-                # activate the next configured provider.
-                def validated(messages, runnable=provider_runnable):
-                    return InterpretedRequest.model_validate(runnable.invoke(messages))
-                structured.append(RunnableLambda(validated))
+                # Explicit tool calling works with the configured Azure
+                # 2024-02-01 API and OpenAI-compatible endpoints. Their default
+                # json_schema mode requires newer API/provider capabilities.
+                if isinstance(provider, BaseChatOpenAI):
+                    runnable = provider.with_structured_output(
+                        InterpretedRequest, method="function_calling", include_raw=True,
+                    )
+                else:
+                    runnable = provider.with_structured_output(InterpretedRequest)
+                try:
+                    return _validated_interpretation(runnable.invoke(messages))
+                except (ValidationError, OutputParserException, InterpretationResponseError) as exc:
+                    repair_candidate = (runnable, provider_name, _response_diagnostics(exc))
+                    raise
             except Exception as exc:
-                logger.warning("Provider cannot bind structured interpretation: %s", type(exc).__name__)
-        if not structured:
-            raise RuntimeError("No configured provider supports structured interpretation")
-        runnable = structured[0].with_fallbacks(structured[1:]) if len(structured) > 1 else structured[0]
-        result = runnable.invoke(messages)
-        # Some integrations return dicts rather than validated models.
-        return InterpretedRequest.model_validate(result)
+                last_exc = exc
+                logger.warning(
+                    "Interpretation attempt failed provider=%s category=%s diagnostics=%s",
+                    provider_name, error_code(exc), _response_diagnostics(exc),
+                )
+        # At most one repair call, after trying alternate configured providers.
+        # Do not retry authentication, throttling, timeouts or programming bugs.
+        if repair_candidate is not None:
+            runnable, provider_name, diagnostics = repair_candidate
+            repair_instruction = (
+                "The previous response did not validate. Return a complete structured request "
+                "matching the schema and intent rules. ACTION_DRAFT requires recipient, "
+                "subject and body; CLARIFY requires a question. Never infer approval to send. "
+                "Do not include a draft for any other intent. Validation fields/types: "
+                + json.dumps(diagnostics)
+            )
+            repair_messages = [SystemMessage(content=messages[0].content + "\n" + repair_instruction),
+                               *messages[1:]]
+            try:
+                return _validated_interpretation(runnable.invoke(repair_messages))
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Interpretation repair failed provider=%s category=%s diagnostics=%s",
+                    provider_name, error_code(exc), _response_diagnostics(exc),
+                )
+        raise last_exc
     except Exception as exc:
         logger.warning("Request interpretation failed (%s, category=%s)", type(exc).__name__, error_code(exc))
         fallback = fallback_read_request(query)
