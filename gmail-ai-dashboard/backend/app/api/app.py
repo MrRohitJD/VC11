@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes.auth import google_callback, router as auth_router
@@ -38,7 +38,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Gmail AI Dashboard API", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_url], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+OLD_HEROKU_HOST = "ai-powered-gmail-0007703734bc.herokuapp.com"
+allowed_origins = [settings.frontend_url]
+if OLD_HEROKU_HOST not in settings.frontend_url:
+    allowed_origins.append(f"https://{OLD_HEROKU_HOST}")
+
+app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def redirect_old_domain(request: Request, call_next):
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(":")[0].lower()
+    if host == OLD_HEROKU_HOST and request.url.path != "/health":
+        target = f"{settings.frontend_url.rstrip('/')}{request.url.path}"
+        if request.url.query:
+            target += f"?{request.url.query}"
+        return RedirectResponse(target, status_code=301)
+    return await call_next(request)
 
 
 @app.middleware("http")
