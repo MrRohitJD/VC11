@@ -142,6 +142,7 @@ GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
 BACKEND_URL=http://127.0.0.1:8000
 FRONTEND_URL=http://localhost:5173
+OAUTH_GOOGLE_REDIRECT_URI=http://127.0.0.1:8000/api/auth/callback
 SESSION_SECRET=replace-with-a-long-random-secret
 SECURE_COOKIES=false
 ```

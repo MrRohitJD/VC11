@@ -20,9 +20,9 @@ Set these config vars on `ai-powered-gmail`:
 | `DATABASE_POOL_SIZE` | `2` |
 | `DATABASE_MAX_OVERFLOW` | `3` |
 | `LANGSMITH_TRACING` | `false` |
-| `FRONTEND_URL` | `https://ai-powered-gmail-0007703734bc.herokuapp.com` |
-| `BACKEND_URL` | `https://ai-powered-gmail-0007703734bc.herokuapp.com` |
-| `OAUTH_GOOGLE_REDIRECT_URI` | `https://ai-powered-gmail-0007703734bc.herokuapp.com/api/auth/callback` |
+| `FRONTEND_URL` | `https://mail-assistant.rohit-jadhav.dev` |
+| `BACKEND_URL` | `https://mail-assistant.rohit-jadhav.dev` |
+| `OAUTH_GOOGLE_REDIRECT_URI` | `https://mail-assistant.rohit-jadhav.dev/api/auth/callback` |
 | `SECURE_COOKIES` | `true` |
 | `AZURE_OPENAI_ENDPOINT` | `https://rg-openai-sea.cognitiveservices.azure.com/` |
 | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | `text-embedding-3-large`|
@@ -32,7 +32,7 @@ Keep `SESSION_SECRET`, `AZURE_OPENAI_API_KEY`, `OAUTH_GOOGLE_CLIENT_ID`, and `OA
 
 Ensure `AZURE_OPENAI_ENDPOINT` is set in Heroku config vars and that `AZURE_OPENAI_API_KEY` has no trailing quotes or whitespace.
 
-In Google Cloud Console, add `https://ai-powered-gmail-0007703734bc.herokuapp.com/api/auth/callback` to the OAuth web client's **Authorized redirect URIs**.
+In Google Cloud Console, remove the old Heroku callback URI and add `https://mail-assistant.rohit-jadhav.dev/api/auth/callback` to the OAuth web client's **Authorized redirect URIs**. The value in `OAUTH_GOOGLE_REDIRECT_URI` must match this URI exactly.
 
 ## Build and Release
 
@@ -53,13 +53,13 @@ heroku git:remote -a ai-powered-gmail
 git push heroku heroku_deploy_dev_lg:main --force
 ```
 
-After release, open `https://ai-powered-gmail-0007703734bc.herokuapp.com/health` to confirm the service is healthy.
+After release, open `https://mail-assistant.rohit-jadhav.dev/health` to confirm the service is healthy.
 
 ## Google OAuth production verification
 
-Try verifying the exact Heroku URL as a **URL-prefix property** in Google Search Console: `https://ai-powered-gmail-0007703734bc.herokuapp.com/`. Use a Google account that is an Owner or Editor of the OAuth Cloud project. Choose HTML file verification, download the unique file supplied by Search Console, and place it unchanged in `gmail-ai-dashboard/frontend/public/`. Deploy it and confirm that `https://ai-powered-gmail-0007703734bc.herokuapp.com/<verification-file-name>` serves the exact file publicly, then click Verify. Keep the file deployed so verification remains valid. A Domain property requires DNS ownership and is not appropriate for `herokuapp.com`.
+Verify `mail-assistant.rohit-jadhav.dev` in Google Search Console before submitting the OAuth app for verification. Use a Google account that is an Owner or Editor of the OAuth Cloud project. Keep the verification file or DNS record deployed.
 
-Deploy and confirm the public homepage (`/`), privacy policy (`/privacy`), and Terms of Service (`/terms`) are readable in a private browser window. In Google Auth Platform, set the consent screen app name to **Gmail AI Dashboard** to match the homepage. Use `https://ai-powered-gmail-0007703734bc.herokuapp.com/` as the homepage URL, `https://ai-powered-gmail-0007703734bc.herokuapp.com/privacy` as the privacy policy URL, and `https://ai-powered-gmail-0007703734bc.herokuapp.com/terms` as the Terms of Service URL. The redirect URI can remain `https://ai-powered-gmail-0007703734bc.herokuapp.com/api/auth/callback`.
+Deploy and confirm the public homepage (`/`), privacy policy (`/privacy`), and Terms of Service (`/terms`) are readable in a private browser window. In Google Auth Platform, set the consent screen app name to **Gmail AI Dashboard** to match the homepage. Use `https://mail-assistant.rohit-jadhav.dev/` as the homepage URL, `https://mail-assistant.rohit-jadhav.dev/privacy` as the privacy policy URL, and `https://mail-assistant.rohit-jadhav.dev/terms` as the Terms of Service URL. The redirect URI must be `https://mail-assistant.rohit-jadhav.dev/api/auth/callback`.
 
 After Search Console says the URL-prefix property is verified, wait the 24 hours requested in Google's rejection notice before resubmitting. Google may still require a custom domain if it does not accept ownership verification for this hosted subdomain; in that case attach a domain you control to Heroku, verify it, and update the homepage, privacy policy, environment origins, and OAuth redirect URI together.
 
