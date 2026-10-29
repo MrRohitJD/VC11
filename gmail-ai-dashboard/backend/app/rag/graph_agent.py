@@ -67,6 +67,18 @@ READ_ONLY_TOOL_NAMES = frozenset({
 })
 
 
+def allowed_tool_names(intent: str, available: set[str]) -> set[str]:
+    """Authorize tool categories from the authenticated request's routed intent."""
+    allowed = set(READ_ONLY_TOOL_NAMES)
+    if intent in {"ACTION_DRAFT", "PLAN_AND_EXECUTE"}:
+        allowed.add("draft_email")
+    if intent in {"ACTION_SCHEDULE", "PLAN_AND_EXECUTE"}:
+        allowed.add("schedule_email")
+    if intent == "ACTION_SEND":
+        allowed.add("send_email")
+    return allowed & available
+
+
 @lru_cache(maxsize=1)
 def langsmith_client():
     return Client(api_key=settings.langsmith_api_key, api_url=settings.langsmith_endpoint, timeout_ms=3000)
@@ -187,7 +199,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                 "action": "retrieve_mailbox", "observation": f"Retrieved {len(citations)} sources."
             }]}
         except Exception as exc:
-            logger.warning("Mailbox retrieval error: %s", exc)
+            logger.warning("Mailbox retrieval error: %s", type(exc).__name__)
             return {
                 "answer": f"I encountered an issue searching your mailbox: {error_hint(error_code(exc))}",
                 "search_plan": {"strategy": "grounded_chain_error", "providers": []},
@@ -240,10 +252,8 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
             }
 
         try:
-            available_tools = (list(tool_obj for tool_obj in tools.values()
-                                    if tool_obj.name in READ_ONLY_TOOL_NAMES)
-                               if state["intent"] in {"RAG_QUERY", "SUMMARIZE"}
-                               else list(tools.values()))
+            allowed = allowed_tool_names(state["intent"], set(tools))
+            available_tools = [tool_obj for tool_obj in tools.values() if tool_obj.name in allowed]
             model = answer_runnable(assistant.model, available_tools)
         except Exception:
             if state["intent"] in {"RAG_QUERY", "SUMMARIZE"}:
@@ -273,7 +283,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                     "iterations": state["iterations"] + 1,
                     "answer": str(response.content) if not response.tool_calls else ""}
         except Exception as exc:
-            logger.warning("Tool agent model invocation failed (%s). Attempting fallback.", exc)
+            logger.warning("Tool agent model invocation failed (%s). Attempting fallback.", type(exc).__name__)
             if state["intent"] in {"RAG_QUERY", "SUMMARIZE"}:
                 fallback = retrieve(state)
                 return {**fallback, "messages": [AIMessage(content=fallback["answer"])],
@@ -287,7 +297,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                         obs = str(tool.invoke(tool_args))
                         citations.extend(extract_citations_from_tool_observation(obs))
                     except Exception as tool_err:
-                        logger.warning("Fallback tool invocation failed: %s", tool_err)
+                        logger.warning("Fallback tool invocation failed: %s", type(tool_err).__name__)
             fallback_answer = assistant._generate_dynamic_fallback(state["effective_query"], citations)
             return {"messages": messages, "iterations": state["iterations"] + 1, "answer": fallback_answer}
 
@@ -302,7 +312,8 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         # Read-only results are memoized for this graph invocation so a model
         # retry cannot repeat the same embedding or database search.
         for call in messages[-1].tool_calls:
-            tool = tools.get(call["name"])
+            allowed = allowed_tool_names(state["intent"], set(tools))
+            tool = tools.get(call["name"]) if call["name"] in allowed else None
             tool_args = ({"query": state["effective_query"]} if call["name"] == "answer_mailbox_question"
                          else call.get("args", {}))
             cache_key = (call["name"], json.dumps(tool_args, sort_keys=True, default=str))
@@ -311,7 +322,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                 if call["name"] in READ_ONLY_TOOL_NAMES and cache_key in tool_cache:
                     output = tool_cache[cache_key]
                 else:
-                    output = str(tool.invoke(tool_args)) if tool else "Tool is unavailable."
+                    output = str(tool.invoke(tool_args)) if tool else "Tool is unavailable for this request."
                     if call["name"] in READ_ONLY_TOOL_NAMES and tool:
                         tool_cache[cache_key] = output
                 emit_activity("mailbox_tool", f"Completed {call['name'].replace('_', ' ')}", status="completed" if tool else "warning", lane="tool")
@@ -355,12 +366,12 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
     def chat(state):
         try:
             response = answer_runnable(assistant.model).invoke([
-                SystemMessage(content="You help the user search all non-junk Gmail categories, prepare drafts, and schedule approved email delivery. Never claim a message was sent without delivery confirmation."),
+                SystemMessage(content=AGENT_SYSTEM_PROMPT),
                 *history[-20:], HumanMessage(content=state["query"]),
             ])
             answer = str(response.content)
         except Exception as exc:
-            logger.warning("Chat model invocation failed: %s", exc)
+            logger.warning("Chat model invocation failed: %s", type(exc).__name__)
             q = state.get("query", "").strip().lower()
             if any(w in q for w in ["hello", "hi", "hey", "greetings", "good morning", "good afternoon", "good evening"]):
                 answer = "Hello! I am your mailbox assistant. How can I help you search, summarize, or manage your emails today?"
@@ -481,7 +492,7 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
                 if hasattr(saver, "setup"):
                     saver.setup()
             except Exception as exc:
-                logger.warning("PostgresSaver setup failed (%s). Falling back.", exc)
+                logger.warning("PostgresSaver setup failed (%s). Falling back.", type(exc).__name__)
                 if checkpoint_cm:
                     try:
                         checkpoint_cm.__exit__(None, None, None)
@@ -499,7 +510,7 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
                 if hasattr(saver, "setup"):
                     saver.setup()
             except Exception as exc:
-                logger.warning("SqliteSaver setup failed (%s). Falling back to MemorySaver.", exc)
+                logger.warning("SqliteSaver setup failed (%s). Falling back to MemorySaver.", type(exc).__name__)
                 if checkpoint_cm:
                     try:
                         checkpoint_cm.__exit__(None, None, None)

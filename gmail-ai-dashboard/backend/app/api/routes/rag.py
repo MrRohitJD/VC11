@@ -288,10 +288,10 @@ def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[s
             duration_ms=round((perf_counter() - started) * 1000),
         )
     except Exception as exc:
-        logger.exception("RAG assistant execution error: %s", exc)
+        logger.error("RAG assistant execution error: %s", type(exc).__name__)
         raise HTTPException(
             status_code=500,
-            detail=f"An error occurred while processing your request: {str(exc)}",
+            detail="An error occurred while processing your request. Please try again.",
         )
 
 
@@ -390,8 +390,8 @@ def trigger_rag_indexing(
             ),
         }
     except Exception as exc:
-        logger.exception("Indexing error: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Indexing failed: {str(exc)}")
+        logger.error("Indexing error: %s", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Indexing failed. Please try again.")
 
 
 @router.get("/status")
@@ -650,7 +650,7 @@ def approve_email_send(
         approval.status = "PENDING"
         db.commit()
         logger.warning("Approved Gmail delivery failed for %s: %s", approval.id, type(exc).__name__)
-        raise HTTPException(status_code=502, detail=f"Email was approved but could not be delivered: {exc}") from exc
+        raise HTTPException(status_code=502, detail="Email was approved but could not be delivered. Please retry.") from exc
 
     approval.status = "SENT"
     approval.sent_at = datetime.now(timezone.utc)

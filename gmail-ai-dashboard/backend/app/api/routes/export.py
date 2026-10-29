@@ -158,5 +158,5 @@ async def import_emails_file(
 			**result,
 		}
 	except Exception as exc:
-		logger.exception("Failed to import email file: %s", exc)
-		raise HTTPException(status_code=400, detail=f"Failed to parse and store email file: {str(exc)}")
+		logger.error("Failed to import email file: %s", type(exc).__name__)
+		raise HTTPException(status_code=400, detail="Failed to parse and store email file.") from exc

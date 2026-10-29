@@ -84,10 +84,8 @@ def google_callback(request: Request, db: Session = Depends(get_db)):
 		credentials = flow.credentials
 		claims = id_token.verify_oauth2_token(credentials.id_token, google_requests.Request(), settings.google_client_id)
 	except Exception as exc:
-		import traceback
-		traceback.print_exc()
-		print(f"OAUTH ERROR: {type(exc).__name__}: {exc}")
-		raise HTTPException(status_code=400, detail=f"Google authentication failed: {type(exc).__name__}: {exc}") from exc
+		logger.error("Google authentication failed: %s", type(exc).__name__)
+		raise HTTPException(status_code=400, detail="Google authentication failed. Please try again.") from exc
 
 	if not claims.get("email_verified") or not claims.get("sub") or not claims.get("email"):
 		raise HTTPException(status_code=400, detail="A verified Gmail account is required")

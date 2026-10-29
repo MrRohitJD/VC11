@@ -553,9 +553,9 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         db.add(approval)
         try:
             db.commit()
-        except SQLAlchemyError:
+        except SQLAlchemyError as exc:
             db.rollback()
-            logger.exception("Could not persist drafted email approval")
+            logger.error("Could not persist drafted email approval: %s", type(exc).__name__)
             return (
                 "I couldn't save the draft because the email database schema is out of date. "
                 "Please run `alembic upgrade head` from the backend directory and try again."
@@ -660,7 +660,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
             )
         except Exception as exc:
             logger.warning("Approved Gmail delivery failed: %s", type(exc).__name__)
-            return f"Email could not be sent: {exc}"
+            return "Email could not be sent. Please retry from the approval screen."
 
         approval.status = "SENT"
         approval.sent_at = datetime.now(timezone.utc)
@@ -743,7 +743,7 @@ def create_gmail_tools(db: Session, user_id: UUID | str) -> List[Any]:
         send_email,
     ]
     owner = db.get(User, user_uuid)
-    if owner is not None and owner.is_demo:
+    if owner is None or owner.is_demo:
         # The public demo can use the assistant for mailbox search and
         # summaries, but it must never create or deliver outbound mail.
         outbound_tools = {"draft_email", "schedule_email", "send_email"}

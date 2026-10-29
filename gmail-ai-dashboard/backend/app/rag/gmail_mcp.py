@@ -67,7 +67,7 @@ def search_live_mailbox(user_id, query, *, full_scan=False):
     try:
         return asyncio.run(_search(user_id, query, full_scan=full_scan))
     except Exception as exc:
-        logger.warning("Live Gmail MCP search via subprocess failed (%s); trying direct Gmail service search", exc)
+        logger.warning("Live Gmail MCP search via subprocess failed (%s); trying direct Gmail service search", type(exc).__name__)
         remaining = timeout_seconds - (time.monotonic() - started)
         if remaining <= 1:
             raise
@@ -84,7 +84,7 @@ def search_live_mailbox(user_id, query, *, full_scan=False):
                 res["source"] = "gmail_direct"
                 return res
         except Exception as direct_exc:
-            logger.warning("Direct Gmail search fallback also failed: %s", direct_exc)
+            logger.warning("Direct Gmail search fallback also failed: %s", type(direct_exc).__name__)
             raise exc
 
 
