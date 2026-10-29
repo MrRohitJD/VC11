@@ -50,7 +50,9 @@ from app.rag.memory import (
     PostgresChatMessageHistory, get_or_create_chat_session, record_retrieval_citations,
 )
 from app.rag.tools import create_gmail_tools
-from app.rag.request_interpreter import interpretation_failure_message
+from app.rag.request_interpreter import (
+    MAIL_REQUEST_SIGNAL, interpretation_failure_message, mailbox_chat_reply,
+)
 from app.rag.activity import activity_context, emit_activity
 from app.rag.adaptive import plan_retrieval
 from app.rag.retrieval import RetrievedCitation
@@ -142,6 +144,19 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                 query = request.effective_query or state["query"]
                 draft = request.draft.model_dump() if request.draft else None
                 question = request.clarification_question
+                if intent == "CLARIFY" and not MAIL_REQUEST_SIGNAL.search(state["query"]):
+                    intent, question = "OUT_OF_SCOPE", None
+                if draft and not any(
+                    draft["recipient"].casefold() in str(message.content).casefold()
+                    for message in [HumanMessage(content=state["query"]), *history[-20:]]
+                    if isinstance(message, HumanMessage)
+                ):
+                    draft = None
+                    if MAIL_REQUEST_SIGNAL.search(state["query"]):
+                        intent = "CLARIFY"
+                        question = "Please provide the recipient's email address so I can prepare the draft for review."
+                    else:
+                        intent, question = "OUT_OF_SCOPE", None
             except Exception as exc:
                 logger.warning("Structured request interpretation failed: %s", type(exc).__name__)
                 intent, draft = "CLARIFY", None
@@ -166,7 +181,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                 "interpreted_draft": None, "clarification_question": None}
 
     def plan(state):
-        if state["intent"] in {"ACTION_DRAFT", "CLARIFY", "GENERAL_CHAT"}:
+        if state["intent"] in {"ACTION_DRAFT", "CLARIFY", "GENERAL_CHAT", "OUT_OF_SCOPE"}:
             tasks = ["Create a draft for review"] if state["intent"] == "ACTION_DRAFT" else []
             emit_activity("plan_workflow", "Prepared draft review workflow" if tasks else "Prepared response",
                           lane="planner")
@@ -364,22 +379,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         return {"answer": state.get("clarification_question") or "Please clarify what you would like me to do."}
 
     def chat(state):
-        try:
-            response = answer_runnable(assistant.model).invoke([
-                SystemMessage(content=AGENT_SYSTEM_PROMPT),
-                *history[-20:], HumanMessage(content=state["query"]),
-            ])
-            answer = str(response.content)
-        except Exception as exc:
-            logger.warning("Chat model invocation failed: %s", type(exc).__name__)
-            q = state.get("query", "").strip().lower()
-            if any(w in q for w in ["hello", "hi", "hey", "greetings", "good morning", "good afternoon", "good evening"]):
-                answer = "Hello! I am your mailbox assistant. How can I help you search, summarize, or manage your emails today?"
-            else:
-                code = error_code(exc)
-                hint = error_hint(code)
-                answer = f"I could not connect to the AI model ({hint}). Please try again shortly."
-        return {"answer": answer}
+        return {"answer": mailbox_chat_reply(state["query"])}
 
     def limit(state):
         return {"answer": "I reached the workflow step limit. Please narrow your request. Any created drafts still require review."}
@@ -419,7 +419,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
     def route(state):
         if state["intent"] == "CLARIFY":
             return "clarify"
-        if state["intent"] == "GENERAL_CHAT":
+        if state["intent"] in {"GENERAL_CHAT", "OUT_OF_SCOPE"}:
             return "chat"
         if state["intent"] in {"RAG_QUERY", "SUMMARIZE"} and filter_dict:
             return "retrieve"

@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.models.chat_quota import ChatConcurrencyLock, ChatQuota, ChatRequestLeaseRecord
-from app.services.chat_quota import reserve_chat_request, set_demo_visitor_cookie
+from app.services.chat_quota import DEMO_DAILY_LIMIT, reserve_chat_request, set_demo_visitor_cookie
 
 
 def _request(ip="203.0.113.1", agent="test-browser", cookie=""):
@@ -59,21 +59,23 @@ def test_signed_in_limit_is_50_per_account_and_survives_session_changes(db):
     _reserve_and_release(db, _request(), other_user)
 
 
-def test_demo_limit_is_10_per_cookie_and_shared_ip_does_not_share_quota(db):
+def test_demo_limit_is_per_cookie_and_shared_ip_does_not_share_quota(db):
     user = SimpleNamespace(id=uuid4(), is_demo=True)
     original = _demo_cookie(_request())
-    for _ in range(10):
+    for _ in range(DEMO_DAILY_LIMIT):
         _reserve_and_release(db, _request(cookie=original), user)
 
     with pytest.raises(HTTPException) as error:
         reserve_chat_request(db, _request(cookie=original), user)
     assert error.value.status_code == 429
-    assert "10 requests" in error.value.detail
+    assert f"{DEMO_DAILY_LIMIT} requests" in error.value.detail
 
     # A new visitor cookie gets its own quota even from the same network.
     replacement = _demo_cookie(_request())
     assert replacement != original
     _reserve_and_release(db, _request(cookie=replacement), user)
+    counts = db.scalars(select(ChatQuota.count).where(ChatQuota.identity.like("demo:%"))).all()
+    assert sorted(counts) == [1, DEMO_DAILY_LIMIT]
 
 
 def test_demo_cookie_is_reused_on_reentry():

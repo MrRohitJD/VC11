@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 DEMO_DAILY_LIMIT = 100
 USER_DAILY_LIMIT = 50
-DEMO_CONCURRENT_LIMIT = 2
-USER_CONCURRENT_LIMIT = 4
+DEMO_CONCURRENT_LIMIT = 4
+USER_CONCURRENT_LIMIT = 5
 DEMO_VISITOR_COOKIE = "gmail_ai_demo_visitor"
 
 # Leases are refreshed while a request runs and expire automatically if a
