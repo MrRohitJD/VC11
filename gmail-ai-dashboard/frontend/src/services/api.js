@@ -1,6 +1,6 @@
 	import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8000' : window.location.origin);
+const API_BASE = import.meta.env.VITE_API_BASE_URL || window.location.origin;
 
 const api = axios.create({ baseURL: API_BASE, withCredentials: true, headers: { 'Content-Type': 'application/json' } });
 

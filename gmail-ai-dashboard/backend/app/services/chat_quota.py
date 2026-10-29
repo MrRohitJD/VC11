@@ -20,7 +20,7 @@ from app.models.email import User
 
 logger = logging.getLogger(__name__)
 
-DEMO_DAILY_LIMIT = 100
+DEMO_DAILY_LIMIT = 10
 USER_DAILY_LIMIT = 50
 DEMO_CONCURRENT_LIMIT = 4
 USER_CONCURRENT_LIMIT = 5
