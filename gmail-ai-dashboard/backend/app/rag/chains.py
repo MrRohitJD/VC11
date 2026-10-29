@@ -809,7 +809,7 @@ class GroundedRAGChain:
             and not validation.documents
             and docs
             and validation.error_type in {
-                "authentication", "unavailable", "connection", "timeout", "rate_limit",
+                "authentication", "permission", "unavailable", "connection", "timeout", "rate_limit",
             }
         ):
             # A provider outage must not erase already retrieved mailbox

@@ -101,7 +101,7 @@ bounded tool loop, and a final source/status review. Retrieval selects:
 
 - Relational enumeration for exhaustive and date-only requests (no top-k loss).
 - Structured lookup for explicit message/thread IDs.
-- Chroma semantic similarity plus BM25 keywords, combined with reciprocal rank
+- pgvector semantic similarity plus BM25 keywords, combined with reciprocal rank
   fusion for ordinary questions. BM25 boosts subjects and expands common mailbox
   topic terms, and works even when an email lacks a vector embedding.
 - MMR for diverse-topic/overview requests.

@@ -1,4 +1,4 @@
-"""CLI script to migrate existing PostgreSQL email chunks to ChromaDB gmail_email_chunks_v2 using OpenAI text-embedding-3-large."""
+"""CLI script to migrate existing PostgreSQL email chunks to PostgreSQL pgvector using OpenAI text-embedding-3-large."""
 
 import argparse
 import os
@@ -13,7 +13,7 @@ from app.services.rag_migration_service import RAGMigrationService
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Migrate email chunks to ChromaDB v2 collection with Azure OpenAI text-embedding-3-large")
+    parser = argparse.ArgumentParser(description="Migrate email chunks to PostgreSQL pgvector with Azure OpenAI text-embedding-3-large")
     parser.add_argument("--batch-size", type=int, default=50, help="Batch size for Azure OpenAI embedding requests")
     args = parser.parse_args()
 

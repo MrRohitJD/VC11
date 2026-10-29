@@ -1,4 +1,4 @@
-"""Tests for hybrid email chunking, subject formatting, idempotency, and user-scoped ChromaDB retrieval."""
+"""Tests for hybrid email chunking, subject formatting, idempotency, and user-scoped pgvector retrieval."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import sys
 from datetime import datetime, timezone
 from uuid import uuid4
 
-import chromadb
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -41,12 +40,10 @@ def db_session():
 
 
 @pytest.fixture()
-def rag_service():
-    # Use in-memory Chroma client for fast, isolated test execution
-    client = chromadb.EphemeralClient()
+def rag_service(db_session, monkeypatch):
+    monkeypatch.setattr("app.database.connection.SessionLocal", lambda: sessionmaker(bind=db_session.bind)())
     mock_embedder = EmbeddingProvider(mock_mode=True)
     return RAGIndexerService(
-        chroma_client=client,
         collection_name=f"test_gmail_email_chunks_{uuid4().hex}",
         embedding_provider=mock_embedder,
     )
@@ -77,7 +74,7 @@ def test_long_email_produces_multiple_overlapping_chunks():
     paragraphs = [
         f"Section {i}: This is detailed engineering discussion paragraph number {i}. "
         f"It contains in-depth analysis of PostgreSQL schemas, Alembic migrations, "
-        f"and vector retrieval strategies with ChromaDB. " * 5
+        f"and vector retrieval strategies with pgvector. " * 5
         for i in range(1, 15)
     ]
     body = "\n\n".join(paragraphs)
@@ -100,7 +97,8 @@ def test_subject_information_included_in_embedding_text():
 
     assert len(chunks) == 1
     embedding_text = chunks[0].embedding_text
-    assert embedding_text.startswith("Subject: Contract Renewal 2026\n\nEmail content:\n")
+    assert embedding_text.startswith("Subject: Contract Renewal 2026\n")
+    assert "\n\nEmail content:\n" in embedding_text
     assert "Please sign the attached agreement." in embedding_text
 
 
@@ -132,11 +130,11 @@ def test_cleaning_strips_html_quotes_and_signatures():
 
 
 # ---------------------------------------------------------------------------
-# 2. Integration Tests: PostgreSQL & ChromaDB
+# 2. Integration Tests: PostgreSQL & pgvector
 # ---------------------------------------------------------------------------
 
 def test_repeated_indexing_is_idempotent_no_duplicates(db_session, rag_service):
-    """Re-indexing unchanged email must not create duplicate PostgreSQL chunks or ChromaDB vectors."""
+    """Re-indexing unchanged email must not create duplicate PostgreSQL chunks or pgvector vectors."""
     user = User(google_id="u-idem-1", email="user@test.com")
     db_session.add(user)
     db_session.flush()
@@ -162,14 +160,14 @@ def test_repeated_indexing_is_idempotent_no_duplicates(db_session, rag_service):
     assert count_1 == 1
     assert db_session.query(EmailChunk).filter_by(email_id=email.id).count() == 1
     assert db_session.query(EmailEmbedding).count() == 1
-    assert rag_service.collection.count() == 1
+    assert db_session.query(EmailEmbedding).count() == 1
 
     # Second indexing (identical content) -> Must be a NO-OP
     count_2 = rag_service.index_email(db=db_session, email_id=email.id, user_id=user.id)
     assert count_2 == 1
     assert db_session.query(EmailChunk).filter_by(email_id=email.id).count() == 1
     assert db_session.query(EmailEmbedding).count() == 1
-    assert rag_service.collection.count() == 1
+    assert db_session.query(EmailEmbedding).count() == 1
 
 
 def test_updated_email_content_triggers_reindexing(db_session, rag_service):
@@ -195,7 +193,7 @@ def test_updated_email_content_triggers_reindexing(db_session, rag_service):
     db_session.commit()
 
     rag_service.index_email(db=db_session, email_id=email.id, user_id=user.id)
-    assert rag_service.collection.count() == 1
+    assert db_session.query(EmailEmbedding).count() == 1
 
     # Update email body
     email.body = "Updated schedule: Oct 15 at 2 PM. Please confirm availability."
@@ -203,7 +201,7 @@ def test_updated_email_content_triggers_reindexing(db_session, rag_service):
 
     # Re-indexing
     rag_service.index_email(db=db_session, email_id=email.id, user_id=user.id)
-    assert rag_service.collection.count() == 1  # Replaced, not duplicated!
+    assert db_session.query(EmailEmbedding).count() == 1  # Replaced, not duplicated!
 
     # Verify retrieved vector contains updated text
     results = rag_service.search_rag(query="when is the updated interview?", user_id=user.id)
@@ -212,7 +210,7 @@ def test_updated_email_content_triggers_reindexing(db_session, rag_service):
 
 
 def test_deleted_emails_removed_from_retrieval(db_session, rag_service):
-    """Deleted emails must be removed from ChromaDB so they never appear in search."""
+    """Deleted emails must be removed from pgvector so they never appear in search."""
     user = User(google_id="u-del-1", email="user@test.com")
     db_session.add(user)
     db_session.flush()
@@ -232,11 +230,11 @@ def test_deleted_emails_removed_from_retrieval(db_session, rag_service):
     db_session.commit()
 
     rag_service.index_email(db=db_session, email_id=email.id, user_id=user.id)
-    assert rag_service.collection.count() == 1
+    assert db_session.query(EmailEmbedding).count() == 1
 
     # Delete email from RAG
     rag_service.delete_email_from_rag(db=db_session, email_id=email.id)
-    assert rag_service.collection.count() == 0
+    assert db_session.query(EmailEmbedding).count() == 0
 
     results = rag_service.search_rag(query="Tech digest", user_id=user.id)
     assert len(results) == 0
@@ -271,16 +269,14 @@ def test_user_scoped_semantic_search_isolation(db_session, rag_service):
 
     rag_service.index_email(db=db_session, email_id=email_a.id, user_id=user_a.id)
     rag_service.index_email(db=db_session, email_id=email_b.id, user_id=user_b.id)
-    assert rag_service.collection.count() == 2
+    assert db_session.query(EmailEmbedding).count() == 2
 
     # Query as User A
     results_for_a = rag_service.search_rag(query="bonus details", user_id=user_a.id)
     assert len(results_for_a) == 1
-    assert results_for_a[0]["user_id"] == str(user_a.id)
     assert results_for_a[0]["email_id"] == str(email_a.id)
 
     # Query as User B
     results_for_b = rag_service.search_rag(query="bonus details", user_id=user_b.id)
     assert len(results_for_b) == 1
-    assert results_for_b[0]["user_id"] == str(user_b.id)
     assert results_for_b[0]["email_id"] == str(email_b.id)

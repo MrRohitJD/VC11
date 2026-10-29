@@ -8,12 +8,12 @@ _EXPORTS = {
     'RAGIndexingPipeline': 'indexing', 'default_pipeline': 'indexing',
     'GmailDocumentAdapter': 'loaders',
     'PostgresChatMessageHistory': 'memory', 'get_or_create_chat_session': 'memory',
-    'PostgresSemanticRetriever': 'retrieval', 'ChromaSemanticRetriever': 'retrieval', 'GmailCustomHybridRetriever': 'retrieval',
+    'PostgresSemanticRetriever': 'retrieval', 'GmailCustomHybridRetriever': 'retrieval',
     'GmailHybridRetriever': 'retrieval', 'HistoryAwareRetriever': 'retrieval',
     'MultiQueryRetriever': 'retrieval', 'RetrievedCitation': 'retrieval',
     'default_retriever': 'retrieval', 'documents_to_citations': 'retrieval',
     'create_gmail_tools': 'tools',
-    'PostgresVectorStoreManager': 'pgvector_store', 'ChromaVectorStoreManager': 'vectorstore', 'default_vectorstore': 'vectorstore',
+    'PostgresVectorStoreManager': 'pgvector_store', 'default_vectorstore': 'vectorstore',
 }
 __all__ = list(_EXPORTS)
 

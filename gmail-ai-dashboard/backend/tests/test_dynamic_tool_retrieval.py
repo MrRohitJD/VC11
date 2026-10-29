@@ -345,7 +345,7 @@ def test_vector_scope_stays_in_sql_for_plain_queries(monkeypatch):
                               chunk_text="Project details", content_hash=str(email_id)))
             db.add(EmailEmbedding(id=uuid4(), chunk_id=chunk_id, email_id=email_id,
                                   embedding=[1.0] * 3072, embedding_dimensions=3072,
-                                  chroma_record_id=str(chunk_id), content_hash=str(email_id),
+                                  vector_record_id=str(chunk_id), content_hash=str(email_id),
                                   status="INDEXED"))
         label_id = uuid4()
         db.add(Label(id=label_id, gmail_account_id=account, label_id="SPAM", name="SPAM"))

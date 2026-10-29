@@ -103,7 +103,7 @@ def _invoke_decisions(model, messages, candidates, disabled=None):
             code = error_code(exc)
             if code == 'invalid_response':
                 schema_error = exc
-            if code == 'authentication' and disabled is not None:
+            if code in {'authentication', 'permission'} and disabled is not None:
                 disabled.add(id(provider))
             logger.warning("Relevance provider %s failed: %s", type(provider).__name__, code)
     raise schema_error or last_error or RuntimeError('No available relevance provider')

@@ -33,20 +33,13 @@ def _recipient_list(email: Email) -> list[str]:
 class RAGIndexingPipeline:
     """Generate and persist 3072-dimensional vectors in PostgreSQL."""
 
-    def __init__(self, vector_store_manager=None, chunker=default_chunker, chroma_manager=None):
-        # ``chroma_manager`` is a compatibility keyword only. The supplied
-        # manager must expose an embedding_function; no Chroma API is called.
-        self.vector_store = vector_store_manager or chroma_manager
+    def __init__(self, vector_store_manager=None, chunker=default_chunker):
+        self.vector_store = vector_store_manager
         if self.vector_store is None:
             from app.rag.pgvector_store import PostgresVectorStoreManager
             self.vector_store = PostgresVectorStoreManager()
         self.chunker = chunker
         self.embedding_function = getattr(self.vector_store, "embedding_function", None) or get_embedding_model()
-
-    @property
-    def chroma(self):
-        """Deprecated alias retained for integrations that only read the manager."""
-        return self.vector_store
 
     def index_email(
         self,
@@ -130,10 +123,8 @@ class RAGIndexingPipeline:
                 email_sent_at=email.received_at,
                 embedding_text=record.embedding_text,
                 embedding_type="email",
-                # These two legacy-named columns are retained for schema
-                # compatibility; their values identify PostgreSQL records.
-                chroma_collection=self.vector_store.collection_name,
-                chroma_record_id=f"pgvector_{chunk.id}",
+                vector_collection=self.vector_store.collection_name,
+                vector_record_id=f"pgvector_{chunk.id}",
                 embedding_provider=str(provider),
                 embedding_model=str(model),
                 embedding_dimensions=settings.embedding_dimensions,

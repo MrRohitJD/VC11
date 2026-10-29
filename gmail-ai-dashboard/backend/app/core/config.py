@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent  # backend/
@@ -90,14 +90,10 @@ class Settings(BaseSettings):
     @classmethod
     def postgres_only_vector_backend(cls, value: str) -> str:
         normalized = (value or "postgres").strip().lower()
-        # Older deployments may still carry RAG_VECTOR_BACKEND=chroma in
-        # their environment. Chroma is no longer used, but that stale value
-        # should not prevent the API from starting after the pgvector
-        # migration.
-        if normalized in {"", "chroma", "chromadb", "pgvector"}:
+        if normalized in {"", "pgvector"}:
             return "postgres"
         if normalized != "postgres":
-            raise ValueError("Only PostgreSQL pgvector is supported; local ChromaDB storage has been removed")
+            raise ValueError("Only PostgreSQL pgvector is supported")
         return normalized
 
     @field_validator("database_url")
@@ -108,13 +104,6 @@ class Settings(BaseSettings):
         if value.startswith("postgresql://"):
             return "postgresql+psycopg://" + value[len("postgresql://"):]
         return value
-
-    @model_validator(mode="after")
-    def align_local_vector_backend(self):
-        """Use the local vector store when the configured database is SQLite."""
-        if self.database_url.startswith("sqlite") and self.vector_backend == "postgres":
-            self.vector_backend = "chroma"
-        return self
 
     model_config = SettingsConfigDict(
         env_file=str(_BACKEND_DIR / ".env"),

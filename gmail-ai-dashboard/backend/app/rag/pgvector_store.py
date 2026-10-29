@@ -26,9 +26,8 @@ from app.core.config import settings
 
 class PostgresVectorStoreManager:
     collection_name = "postgres_halfvec_3072"
-    persist_directory = None
 
-    def __init__(self, embedding_function=None, db_session=None, **_legacy_kwargs):
+    def __init__(self, embedding_function=None, db_session=None):
         self.embedding_function = embedding_function or get_embedding_model()
         self.db_session = db_session
 
@@ -67,8 +66,7 @@ class PostgresVectorStoreManager:
             "subject": EmailEmbedding.email_subject,
             "embedding_text": EmailEmbedding.embedding_text,
             "embedding_type": EmailEmbedding.embedding_type,
-            "chroma_collection": EmailEmbedding.chroma_collection,
-            "vector_collection": EmailEmbedding.chroma_collection,
+            "vector_collection": EmailEmbedding.vector_collection,
             "email_sent_at": EmailEmbedding.email_sent_at,
             "received_timestamp": func.extract("epoch", Email.received_at),
             "received_date": Email.received_at,

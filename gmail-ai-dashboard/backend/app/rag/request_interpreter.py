@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from langchain_core.exceptions import OutputParserException
 from langchain_openai.chat_models.base import BaseChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from app.rag.query_constraints import DateRangeError, mailbox_now, received_date_bounds
 from app.rag.service_errors import error_code, error_hint
@@ -147,8 +147,7 @@ def interpretation_failure_message(exc):
     if failures:
         details = "; ".join(f"{name}: {code}" for name, code in failures)
         return ("I could not interpret your request because the AI services failed. "
-                + details + ". Timeouts may be temporary; authentication failures require checking "
-                "the named provider's credentials or access permissions.")
+                + details + ". " + " ".join(dict.fromkeys(error_hint(code) for _, code in failures)))
     code = error_code(exc)
     return f"I could not interpret your request. {error_hint(code)} Error code: {code}. Please try again shortly."
 
@@ -162,10 +161,16 @@ def _response_diagnostics(exc):
     if isinstance(exc, ValidationError):
         return [{"field": ".".join(map(str, item["loc"])), "type": item["type"]}
                 for item in exc.errors(include_input=False, include_context=False, include_url=False)]
-    return [{"type": type(exc).__name__}]
+    status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    diagnostic = {"type": type(exc).__name__}
+    if isinstance(status, int):
+        diagnostic["http_status"] = status
+    return [diagnostic]
 
 
 def _validated_interpretation(response):
+    if isinstance(response, BaseMessage):
+        response = {"raw": response, "parsed": None}
     if isinstance(response, dict) and "raw" in response and "parsed" in response:
         raw = response["raw"]
         metadata = getattr(raw, "response_metadata", {}) or {}
@@ -181,9 +186,17 @@ def _validated_interpretation(response):
         else:
             # Compatible endpoints sometimes return JSON content instead of a
             # tool call. Apply exactly the same schema and action validation.
-            if getattr(raw, "tool_calls", None) or getattr(raw, "invalid_tool_calls", None):
+            if getattr(raw, "invalid_tool_calls", None):
                 raise InterpretationResponseError("Invalid structured tool output")
+            calls = getattr(raw, "tool_calls", None) or []
+            if calls:
+                if len(calls) != 1 or calls[0].get("name") != "InterpretedRequest":
+                    raise InterpretationResponseError("Unexpected interpretation tool call")
+                return InterpretedRequest.model_validate(calls[0].get("args"))
             content = getattr(raw, "content", None)
+            if isinstance(content, list):
+                content = "".join(part.get("text", "") for part in content
+                                  if isinstance(part, dict) and part.get("type") == "text")
             if not isinstance(content, str) or not content.strip():
                 raise InterpretationResponseError("Missing structured output")
             content = content.strip()
@@ -278,11 +291,11 @@ def interpret_request(model, query, history=()):
                 try:
                     return _validated_interpretation(runnable.invoke(messages))
                 except (ValidationError, OutputParserException, InterpretationResponseError) as exc:
-                    repair_candidate = (runnable, provider_name, _response_diagnostics(exc))
+                    repair_candidate = (provider, provider_name, _response_diagnostics(exc))
                     raise
             except Exception as exc:
                 last_exc = exc
-                provider_label = {"AzureChatOpenAI": "Azure OpenAI", "ChatOpenAI": "OpenAI-compatible provider",
+                provider_label = {"AzureChatOpenAI": "Azure OpenAI", "ChatOpenAI": "ExperientialLabs",
                                   "ChatNVIDIA": "NVIDIA"}.get(provider_name, provider_name)
                 failures.append((provider_label, error_code(exc)))
                 logger.warning(
@@ -292,8 +305,10 @@ def interpret_request(model, query, history=()):
         # At most one repair call, after trying alternate configured providers.
         # Do not retry authentication, throttling, timeouts or programming bugs.
         if repair_candidate is not None:
-            runnable, provider_name, diagnostics = repair_candidate
+            provider, provider_name, diagnostics = repair_candidate
             repair_instruction = (
+                "Return only a JSON object, without markdown, matching this JSON schema: "
+                + json.dumps(InterpretedRequest.model_json_schema()) + "\n"
                 "The previous response did not validate. Return a complete structured request "
                 "matching the schema and intent rules. ACTION_DRAFT requires recipient, "
                 "subject and body; CLARIFY requires a question. Never infer approval to send. "
@@ -303,7 +318,10 @@ def interpret_request(model, query, history=()):
             repair_messages = [SystemMessage(content=messages[0].content + "\n" + repair_instruction),
                                *messages[1:]]
             try:
-                return _validated_interpretation(runnable.invoke(repair_messages))
+                # A healthy chat endpoint may not support the SDK's structured
+                # output mode. Recover with one plain completion, then apply
+                # the same schema/action checks locally. Never retry auth errors.
+                return _validated_interpretation(provider.invoke(repair_messages))
             except Exception as exc:
                 last_exc = exc
                 logger.warning(

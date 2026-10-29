@@ -1,9 +1,4 @@
-"""Backward-compatible PostgreSQL RAG indexing service.
-
-The former implementation wrote vectors to ChromaDB and kept only an audit
-row in PostgreSQL. This service now delegates to the single pgvector
-pipeline, so the compatibility API cannot create a local vector store.
-"""
+"""PostgreSQL RAG indexing service."""
 
 from __future__ import annotations
 
@@ -33,9 +28,7 @@ class _PostgresCollectionFacade:
 class RAGIndexerService:
     """Compatibility API backed entirely by ``email_embeddings``."""
 
-    def __init__(self, chroma_client=None, collection_name=None, embedding_provider=None):
-        # chroma_client is accepted so old callers fail neither at import nor
-        # construction, but is deliberately never inspected or used.
+    def __init__(self, collection_name=None, embedding_provider=None):
         self.collection_name = collection_name or "postgres_halfvec_3072"
         self.embedding_provider = embedding_provider
         self.vector_store = PostgresVectorStoreManager(embedding_function=embedding_provider)

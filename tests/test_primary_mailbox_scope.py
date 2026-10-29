@@ -19,9 +19,9 @@ from app.rag.agent import GmailAIAssistant
 from app.rag.chains import GroundedRAGChain
 from app.rag.embeddings import DeterministicOfflineEmbeddings
 from app.rag.mailbox_scope import NON_PRIMARY_LABELS, primary_email_ids
-from app.rag.retrieval import ChromaSemanticRetriever, GmailCustomHybridRetriever
+from app.rag.retrieval import PostgresSemanticRetriever, GmailCustomHybridRetriever
 from app.rag.tools import create_gmail_tools
-from app.rag.vectorstore import ChromaVectorStoreManager
+from app.rag.pgvector_store import PostgresVectorStoreManager
 
 
 def test_all_date_summary_uses_every_primary_record_without_embedding_or_relevance(mailbox, monkeypatch):
@@ -31,7 +31,7 @@ def test_all_date_summary_uses_every_primary_record_without_embedding_or_relevan
     db, user_id, *rest = mailbox
     monkeypatch.setattr(settings, "gmail_mcp_enabled", False)
     monkeypatch.setattr(chains, "validate_email_relevance", lambda *a, **k: pytest.fail("Date-only requests need no semantic validator"))
-    monkeypatch.setattr(ChromaSemanticRetriever, "_get_relevant_documents", lambda *a, **k: pytest.fail("Exhaustive search must not depend on embeddings"))
+    monkeypatch.setattr(PostgresSemanticRetriever, "_get_relevant_documents", lambda *a, **k: pytest.fail("Exhaustive search must not depend on embeddings"))
     chain = GroundedRAGChain(model=FakeListChatModel(responses=["Summary."]))
     with mailbox_time_context("Asia/Kolkata"):
         result = chain.answer_query(db, "Summarize all incoming emails this month", user_id, top_k=1)
@@ -104,18 +104,14 @@ def mailbox(tmp_path, monkeypatch):
     add_email("other-user", ["CATEGORY_PERSONAL"], accounts[1])
     db.commit()
 
-    vstore = ChromaVectorStoreManager(
-        persist_directory=str(tmp_path), collection_name=f"primary_{uuid4().hex}",
-        embedding_model=DeterministicOfflineEmbeddings(),
+    from app.rag.indexing import RAGIndexingPipeline
+    vstore = PostgresVectorStoreManager(
+        embedding_function=DeterministicOfflineEmbeddings(), db_session=db,
     )
-    vstore.add_documents([
-        Document(page_content=e.body, metadata={
-            "user_id": str(accounts[1].user_id if name == "other-user" else users[0].id),
-            "email_id": str(e.id), "subject": e.subject, "thread_id": e.thread_id,
-            # Deliberately no category metadata: existing vectors must work.
-        }) for name, e in emails.items()
-    ])
-    monkeypatch.setattr("app.rag.retrieval.default_chroma_manager", vstore)
+    pipeline = RAGIndexingPipeline(vector_store_manager=vstore)
+    for email in emails.values():
+        pipeline.index_email(db, email.id)
+    monkeypatch.setattr("app.rag.retrieval.default_vectorstore", vstore)
     yield db, users[0].id, emails, vstore
     db.close()
     engine.dispose()
@@ -129,8 +125,8 @@ def test_scope_uses_gmail_labels_and_user_isolation(mailbox):
 @pytest.mark.parametrize("search_type", ["similarity", "mmr"])
 def test_vector_search_filters_before_ranking_and_honors_relabeling(mailbox, search_type):
     db, user_id, emails, vstore = mailbox
-    retriever = ChromaSemanticRetriever(
-        user_id=str(user_id), db_session=db, primary_only=True, chroma_manager=vstore,
+    retriever = PostgresSemanticRetriever(
+        user_id=str(user_id), db_session=db, primary_only=True, vector_manager=vstore,
         top_k=1, search_type=search_type,
     )
     docs = retriever.invoke("Planning details for CATEGORY_PROMOTIONS.")
@@ -153,7 +149,7 @@ def test_hybrid_and_sql_fallback_remain_primary_only(mailbox, monkeypatch, vecto
             raise RuntimeError("Vector search unavailable")
         monkeypatch.setattr(vstore, "search_with_scores", unavailable)
     retriever = GmailCustomHybridRetriever(
-        user_id=str(user_id), db_session=db, primary_only=True, chroma_manager=vstore, top_k=20,
+        user_id=str(user_id), db_session=db, primary_only=True, vector_manager=vstore, top_k=20,
     )
     docs = retriever.invoke("Planning")
     assert {d.metadata["email_id"] for d in docs} == {str(emails[n].id) for n in ("personal", "inbox")}
@@ -220,7 +216,7 @@ def test_tools_cannot_read_non_primary_content(mailbox):
 
 
 def test_primary_scope_requires_authoritative_labels():
-    retriever = ChromaSemanticRetriever(user_id=str(uuid4()), primary_only=True)
+    retriever = PostgresSemanticRetriever(user_id=str(uuid4()), primary_only=True)
     with pytest.raises(ValueError, match="database session"):
         retriever.invoke("Planning")
 
@@ -263,7 +259,7 @@ def test_bills_use_due_month_not_received_month(mailbox, monkeypatch, vector_ava
         monkeypatch.setattr(vstore, "search_with_scores", unavailable)
     query = "What are my pending bills and invoices due this month?"
     retriever = GmailCustomHybridRetriever(
-        user_id=str(user_id), db_session=db, primary_only=True, chroma_manager=vstore,
+        user_id=str(user_id), db_session=db, primary_only=True, vector_manager=vstore,
     )
     docs = retriever.invoke(query)
     assert {doc.metadata["email_id"] for doc in docs} == {str(bill.id)}

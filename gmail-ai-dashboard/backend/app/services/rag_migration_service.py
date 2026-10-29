@@ -1,6 +1,6 @@
 """Batch migration utility for PostgreSQL pgvector embeddings.
 
-This replaces the old Chroma v1/v2 migration. Existing ``email_chunks`` are
+Existing ``email_chunks`` are
 re-embedded into ``email_embeddings`` and all metadata is written in the same
 PostgreSQL row as the vector.
 """
@@ -56,7 +56,7 @@ def _recipients(email: Email) -> list[str]:
 class RAGMigrationService:
     """Re-embed chunks into PostgreSQL, with resumable batch progress."""
 
-    def __init__(self, chroma_client=None, embedding_provider: Optional[EmbeddingProvider] = None,
+    def __init__(self, embedding_provider: Optional[EmbeddingProvider] = None,
                  target_collection_name: Optional[str] = None):
         self.target_collection = target_collection_name or "postgres_halfvec_3072"
         self.embedder = embedding_provider or default_embedding_provider
@@ -67,7 +67,7 @@ class RAGMigrationService:
         chunks = db.scalars(select(EmailChunk).order_by(EmailChunk.created_at)).all()
         total = len(chunks)
         indexed_ids = set(db.scalars(select(EmailEmbedding.chunk_id).where(
-            EmailEmbedding.chroma_collection == self.target_collection,
+            EmailEmbedding.vector_collection == self.target_collection,
             EmailEmbedding.status == "INDEXED",
             EmailEmbedding.embedding.is_not(None),
             EmailEmbedding.embedding_dimensions == settings.embedding_dimensions,
@@ -103,13 +103,13 @@ class RAGMigrationService:
                     email = emails.get(chunk.email_id)
                     embedding = db.scalar(select(EmailEmbedding).where(
                         EmailEmbedding.chunk_id == chunk.id,
-                        EmailEmbedding.chroma_collection == self.target_collection,
+                        EmailEmbedding.vector_collection == self.target_collection,
                     ))
                     if embedding is None:
                         embedding = EmailEmbedding(
                             chunk_id=chunk.id,
-                            chroma_collection=self.target_collection,
-                            chroma_record_id=f"pgvector_{chunk.id}",
+                            vector_collection=self.target_collection,
+                            vector_record_id=f"pgvector_{chunk.id}",
                         )
                         db.add(embedding)
                     embedding.email_id = chunk.email_id
@@ -160,7 +160,7 @@ class RAGMigrationService:
             manager = PostgresVectorStoreManager(embedding_function=self.embedder, db_session=db)
             manager.collection_name = collection
             docs = manager.search_with_scores(query, user_id, top_k=top_k,
-                                              filter_dict={"chroma_collection": collection})
+                                              filter_dict={"vector_collection": collection})
             return [{"email_id": doc.metadata.get("email_id"), "subject": doc.metadata.get("subject"),
                      "document": doc.page_content, "score": score} for doc, score in docs], (time.perf_counter() - started) * 1000
 

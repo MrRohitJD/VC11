@@ -63,12 +63,12 @@ dimensions for indexing and query retrieval. Restart the backend after changing
 
 Retrieval and indexing use the configured PostgreSQL database with pgvector.
 Set `RAG_VECTOR_BACKEND=postgres` (the application default) and ensure the
-database has the `vector` extension. Local ChromaDB storage is no longer
-supported; all vectors and searchable email metadata live in
+database has the `vector` extension. All vectors and searchable email metadata live in
 `email_embeddings`.
 
 Apply the migrations, including the pgvector embedding metadata and HNSW index,
-before indexing mail:
+before starting the updated backend or indexing mail. The identifier migration
+renames the existing vector columns without deleting stored embeddings:
 
 ```bash
 alembic upgrade head

@@ -288,7 +288,7 @@ class PostgresSemanticRetriever(BaseRetriever):
     start_timestamp: Optional[Union[float, int]] = Field(None, description="Filter emails on or after POSIX timestamp")
     end_timestamp: Optional[Union[float, int]] = Field(None, description="Filter emails before POSIX timestamp")
 
-    vector_manager: Any = Field(default_factory=lambda: default_vectorstore, alias="chroma_manager")
+    vector_manager: Any = Field(default_factory=lambda: default_vectorstore)
 
     @traceable(name="vector_retrieval", run_type="retriever")
     def _get_relevant_documents(
@@ -390,8 +390,6 @@ class PostgresSemanticRetriever(BaseRetriever):
         return documents_to_citations(self.invoke(query))
 
 
-# Compatibility import name for integrations that still use the old class.
-ChromaSemanticRetriever = PostgresSemanticRetriever
 
 
 # ============================================================================
@@ -523,7 +521,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
     lambda_mult: float = Field(0.7, description="MMR diversity parameter")
     semantic_weight: float = Field(0.6, description="Weight for semantic vector scores in RRF")
     keyword_weight: float = Field(0.4, description="Weight for structured SQL matches in RRF")
-    vector_manager: Any = Field(default_factory=lambda: default_vectorstore, alias="chroma_manager")
+    vector_manager: Any = Field(default_factory=lambda: default_vectorstore)
 
     @traceable(name="hybrid_retrieval", run_type="retriever")
     def _get_relevant_documents(
@@ -569,7 +567,7 @@ class GmailCustomHybridRetriever(BaseRetriever):
                 custom_f = restrict_to_email_ids(custom_f, allowed_ids)
                 allowed_ids = set(allowed_ids)
 
-            combined_chroma_filter = vector_manager.build_filter(
+            combined_vector_filter = vector_manager.build_filter(
                 user_id=self.user_id,
                 sender=self.sender,
                 gmail_message_id=self.gmail_message_id,
@@ -587,14 +585,14 @@ class GmailCustomHybridRetriever(BaseRetriever):
                     top_k=self.top_k * settings.rag_vector_candidate_multiplier,
                     fetch_k=max(self.fetch_k, self.top_k * settings.rag_vector_candidate_multiplier),
                     lambda_mult=self.lambda_mult,
-                    filter_dict=combined_chroma_filter,
+                    filter_dict=combined_vector_filter,
                 )
             else:
                 raw_semantic = vector_manager.search_with_scores(
                     query=query,
                     user_id=self.user_id,
                     top_k=self.top_k * settings.rag_vector_candidate_multiplier,
-                    filter_dict=combined_chroma_filter,
+                    filter_dict=combined_vector_filter,
                 )
 
             for doc, score in raw_semantic:

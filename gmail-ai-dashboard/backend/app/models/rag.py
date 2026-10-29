@@ -68,8 +68,8 @@ class EmailEmbedding(Base):
 
     __tablename__ = "email_embeddings"
     __table_args__ = (
-        UniqueConstraint("chroma_collection", "chroma_record_id", name="uq_email_embeddings_collection_record"),
-        UniqueConstraint("chunk_id", "chroma_collection", name="uq_email_embeddings_chunk_collection"),
+        UniqueConstraint("vector_collection", "vector_record_id", name="uq_email_embeddings_collection_record"),
+        UniqueConstraint("chunk_id", "vector_collection", name="uq_email_embeddings_chunk_collection"),
         CheckConstraint("status IN ('PENDING', 'INDEXED', 'FAILED', 'OUTDATED')", name="ck_email_embeddings_status"),
         Index("ix_email_embeddings_chunk_id", "chunk_id"),
         Index("ix_email_embeddings_status", "status"),
@@ -86,10 +86,10 @@ class EmailEmbedding(Base):
     email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     embedding_text: Mapped[str | None] = mapped_column(Text)
     embedding_type: Mapped[str | None] = mapped_column(String(30), default="email", server_default="email")
-    chroma_collection: Mapped[str] = mapped_column(
+    vector_collection: Mapped[str] = mapped_column(
         String(100), default="postgres_halfvec_3072", server_default="postgres_halfvec_3072", nullable=False
     )
-    chroma_record_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    vector_record_id: Mapped[str] = mapped_column(String(255), nullable=False)
     embedding_provider: Mapped[str] = mapped_column(
         String(50), default="azure_openai", server_default="azure_openai", nullable=False
     )

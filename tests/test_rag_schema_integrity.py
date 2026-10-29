@@ -101,8 +101,8 @@ def test_email_chunk_and_embedding_lifecycle(db):
 
     embedding_0 = EmailEmbedding(
         chunk_id=chunk_0.id,
-        chroma_collection="gmail_email_chunks",
-        chroma_record_id=f"rec-{chunk_0.id}",
+        vector_collection="gmail_email_chunks",
+        vector_record_id=f"rec-{chunk_0.id}",
         embedding_provider="sentence-transformers",
         embedding_model="all-MiniLM-L6-v2",
         embedding_dimensions=384,
