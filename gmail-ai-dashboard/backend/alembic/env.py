@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.models.email import Base
 import app.models.llm  # Register the job table with Base.metadata.
 import app.models.rag  # Register RAG and chat tables with Base.metadata.
-import app.models.chat_quota  # Register the daily assistant quota table.
+import app.models.chat_quota  # Register assistant quota and concurrency lease tables.
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

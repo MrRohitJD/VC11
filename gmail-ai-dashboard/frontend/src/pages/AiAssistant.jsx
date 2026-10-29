@@ -384,9 +384,11 @@ export default function AiAssistant({ user: propUser }) {
 		} catch (error) {
 			console.warn('Backend RAG call failed:', error);
 			const rateLimited = error.status === 429 || error.response?.status === 429;
+			const rateLimitMessage = error.response?.data?.detail || error.message ||
+				'Assistant limit reached. Wait for a running request to finish or try again after the daily reset.';
 			const responseData = {
 				text: rateLimited
-					? 'You have used your 10 assistant requests for today. Your quota resets at midnight UTC.'
+					? rateLimitMessage
 					: (error.message || 'I could not answer your question right now. Please try again in a moment.'),
 				steps: requestSteps,
 				elapsed_ms: Math.round((typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()) - requestStartedAt),

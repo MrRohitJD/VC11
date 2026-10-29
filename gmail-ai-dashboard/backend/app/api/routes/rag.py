@@ -200,8 +200,11 @@ def chat_with_assistant(
     """Execute grounded question answering or agent execution for the user's emails."""
     if not body.query or not body.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
-    reserve_chat_request(db, request, user)
-    return _run_chat(body, user, db, x_timezone)
+    lease = reserve_chat_request(db, request, user)
+    try:
+        return _run_chat(body, user, db, x_timezone)
+    finally:
+        lease.release()
 
 
 def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[str]) -> ChatResponse:
@@ -303,7 +306,7 @@ def stream_chat(
     """Stream observable progress and one final response; never stream reasoning."""
     if not body.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
-    reserve_chat_request(db, request, user)
+    lease = reserve_chat_request(db, request, user)
     user_id = user.id
     events = Queue()
     disconnected = Event()
@@ -332,10 +335,10 @@ def stream_chat(
             if not disconnected.is_set():
                 events.put(("error", {"message": "The mailbox request could not finish. Please try again."}))
         finally:
+            lease.release()
             events.put(None)
 
     def generate():
-        Thread(target=work, daemon=True).start()
         try:
             while True:
                 try:
@@ -349,6 +352,14 @@ def stream_chat(
                 yield f"event: {kind}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
         finally:
             disconnected.set()
+
+    # Start work when the request is accepted so a disconnect before the first
+    # stream event cannot strand the concurrency lease.
+    try:
+        Thread(target=work, daemon=True).start()
+    except Exception:
+        lease.release()
+        raise
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
