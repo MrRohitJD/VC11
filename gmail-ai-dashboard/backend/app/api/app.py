@@ -70,7 +70,9 @@ async def route_developer_connections(request: Request, call_next):
                 ensure_personal_identity(owner, url)
             except Exception as exc:
                 logger.error("Personal database identity could not be updated for user %s: %s", user_id, type(exc).__name__)
-                return JSONResponse({"detail": "Your personal database is unavailable. Open Settings to reconnect or disconnect it."}, status_code=503)
+                # Keep mailbox access on the app database while the optional
+                # personal connection is unavailable.
+                url = None
     db_token = database_url_context.set(url)
     key_token = llm_key_context.set(provider_key)
     try:
