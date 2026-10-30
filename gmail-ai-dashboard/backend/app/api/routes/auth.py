@@ -103,11 +103,10 @@ def google_callback(request: Request, db: Session = Depends(get_db)):
 			# The central account and OAuth grant are already committed. Keep the
 			# session usable so the owner can repair or disconnect the database.
 			personal_url = None
-	# Automatically trigger RAG auto-embedding for any unindexed emails in background
+	# Automatically trigger RAG auto-embedding for user emails in background upon signup / login
 	try:
 		from app.services.rag_auto_indexer import ensure_user_emails_embedded
-		if not personal_url:
-			ensure_user_emails_embedded(user.id)
+		ensure_user_emails_embedded(user.id)
 	except Exception as auto_emb_exc:
 		logger.warning("Failed to launch background auto-indexer for user %s: %s", user.id, auto_emb_exc)
 
@@ -121,14 +120,10 @@ def google_callback(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/me")
 def current_user(user: User = Depends(get_current_user)):
-	if not user.is_demo and not user.developer_database_url:
+	if not user.is_demo:
 		try:
 			from app.services.rag_auto_indexer import ensure_user_emails_embedded
-			token = database_url_context.set(decrypt(user.developer_database_url))
-			try:
-				ensure_user_emails_embedded(user.id)
-			finally:
-				database_url_context.reset(token)
+			ensure_user_emails_embedded(user.id)
 		except Exception:
 			pass
 	return serialize_user(user)

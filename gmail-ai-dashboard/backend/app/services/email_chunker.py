@@ -196,19 +196,24 @@ def create_email_chunks(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
     separators: Optional[List[str]] = None,
+    snippet: Optional[str] = None,
 ) -> List[ChunkRecord]:
     """Split an email into structured chunks according to the hybrid strategy.
 
     Rules:
-    1. Empty/whitespace-only bodies produce an empty list.
+    1. Empty/whitespace-only bodies fall back to snippet or subject so all emails are embedded.
     2. Short emails (length <= chunk_size) remain one intact chunk.
     3. Long emails are split using LangChain's RecursiveCharacterTextSplitter.
     4. Each chunk has start/end character offsets, strategy label, and SHA-256 hash.
     5. Each chunk formats embedding text containing all five core fields.
     """
     clean_body = clean_email_body(body, body_html)
+    if not clean_body and snippet:
+        clean_body = clean_email_body(snippet)
+    if not clean_body and subject:
+        clean_body = (subject or "").strip()
     if not clean_body:
-        return []
+        clean_body = "(No content)" 
 
     # Rule 2: Short email preservation — exactly one chunk
     if len(clean_body) <= chunk_size:

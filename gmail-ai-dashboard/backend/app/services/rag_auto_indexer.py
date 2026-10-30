@@ -60,28 +60,57 @@ def ensure_user_emails_embedded(user_id: UUID, session_factory=None) -> None:
 
     def _worker():
         try:
-            factory = session_factory or SessionLocal
-            db = factory()
+            from sqlalchemy import select
+            from app.models.email import GmailAccount, User
+            # Resolve personal database URL if configured
+            personal_url = None
             try:
-                unindexed_ids = default_rag_service.get_unindexed_email_ids(db, user_id=user_id)
-                if not unindexed_ids:
-                    logger.debug("No unindexed emails found for user %s", user_id_str)
-                    return
+                with CentralSessionLocal() as central_db:
+                    u = central_db.get(User, user_id)
+                    personal_url = decrypt(u.developer_database_url) if u and u.developer_database_url else None
+            except Exception:
+                pass
 
-                logger.info(
-                    "User %s signed in / synced with %d unindexed emails. Starting automatic embedding...",
-                    user_id_str,
-                    len(unindexed_ids),
-                )
-                res = default_rag_service.index_unindexed_emails(db, user_id=user_id)
-                logger.info(
-                    "Completed auto-embedding for user %s: %d emails indexed, %d chunks stored",
-                    user_id_str,
-                    res.get("emails_indexed", 0),
-                    res.get("chunks_created", 0),
-                )
+            token = database_url_context.set(personal_url)
+            try:
+                factory = session_factory or SessionLocal
+                with factory() as db:
+                    total_indexed = 0
+                    total_chunks = 0
+                    idle_retries = 0
+                    while True:
+                        unindexed_ids = default_rag_service.get_unindexed_email_ids(db, user_id=user_id, limit=100)
+                        if unindexed_ids:
+                            idle_retries = 0
+                            logger.info(
+                                "User %s signed in / synced. Auto-embedding %d unindexed emails...",
+                                user_id_str,
+                                len(unindexed_ids),
+                            )
+                            res = default_rag_service.index_unindexed_emails(db, user_id=user_id, batch_size=100)
+                            total_indexed += res.get("emails_indexed", 0)
+                            total_chunks += res.get("chunks_created", 0)
+                            continue
+
+                        # Check if inbox sync is still actively pulling emails
+                        account = db.scalar(select(GmailAccount).where(GmailAccount.user_id == user_id))
+                        if account and account.sync_status in ("INITIAL", "BACKFILL") and idle_retries < 10:
+                            idle_retries += 1
+                            time.sleep(2)
+                            continue
+                        break
+
+                    # Purge any emails that could not be embedded so none remain
+                    purged = default_rag_service.purge_unembedded_emails(db, user_id=user_id)
+                    logger.info(
+                        "Auto-embedding completed for user %s: %d emails indexed, %d chunks stored, %d unembedded purged",
+                        user_id_str,
+                        total_indexed,
+                        total_chunks,
+                        purged,
+                    )
             finally:
-                db.close()
+                database_url_context.reset(token)
         except Exception as exc:
             logger.exception("Error in auto-embedding worker for user %s: %s", user_id_str, exc)
         finally:
@@ -97,26 +126,32 @@ def ensure_user_emails_embedded(user_id: UUID, session_factory=None) -> None:
     worker_thread.start()
 
 
-def _run_global_rag_indexing_cycle(batch_size: int = 50, session_factory=None) -> Dict[str, int]:
+def _run_global_rag_indexing_cycle(batch_size: int = 100, session_factory=None) -> Dict[str, int]:
     """Execute one sweep across all mailboxes to embed unindexed emails."""
     factory = session_factory or SessionLocal
     db = factory()
     try:
-        unindexed_ids = default_rag_service.get_unindexed_email_ids(db, limit=batch_size)
-        if not unindexed_ids:
-            return {"total_unindexed": 0, "emails_indexed": 0, "chunks_created": 0}
+        total_indexed = 0
+        total_chunks = 0
+        while True:
+            unindexed_ids = default_rag_service.get_unindexed_email_ids(db, limit=batch_size)
+            if not unindexed_ids:
+                break
+            logger.info("Global RAG daemon detected %d unindexed emails. Embedding batch...", len(unindexed_ids))
+            results = default_rag_service.index_unindexed_emails(db, batch_size=batch_size)
+            total_indexed += results.get("emails_indexed", 0)
+            total_chunks += results.get("chunks_created", 0)
 
-        logger.info(
-            "Periodic RAG daemon detected %d unindexed emails. Starting batch embedding...",
-            len(unindexed_ids),
-        )
-        results = default_rag_service.index_unindexed_emails(db, batch_size=batch_size)
-        logger.info(
-            "Periodic RAG daemon finished batch: %d emails indexed, %d chunks created",
-            results.get("emails_indexed", 0),
-            results.get("chunks_created", 0),
-        )
-        return results
+        # Purge any unembedded emails that failed embedding
+        purged = default_rag_service.purge_unembedded_emails(db)
+        if total_indexed or purged:
+            logger.info(
+                "Global RAG daemon cycle complete: %d emails indexed, %d chunks created, %d unembedded purged",
+                total_indexed,
+                total_chunks,
+                purged,
+            )
+        return {"total_unindexed": 0, "emails_indexed": total_indexed, "chunks_created": total_chunks}
     finally:
         db.close()
 

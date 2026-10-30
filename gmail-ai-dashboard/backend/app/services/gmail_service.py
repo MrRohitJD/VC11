@@ -546,6 +546,11 @@ def _sync_remaining_emails_worker(
 						progress_callback("syncing", seen, stored)
 				if page_new_count:
 					_schedule_ai_processing(account_id)
+					try:
+						from app.services.rag_auto_indexer import ensure_user_emails_embedded
+						ensure_user_emails_embedded(user_id)
+					except Exception:
+						pass
 				account = worker_db.get(GmailAccount, account_id)
 				if account:
 					account.inbox_sync_page_token = next_page_token
@@ -563,6 +568,11 @@ def _sync_remaining_emails_worker(
 				account.inbox_sync_heartbeat_at = None
 				account.last_synced_at = datetime.now(timezone.utc)
 				worker_db.commit()
+		try:
+			from app.services.rag_auto_indexer import ensure_user_emails_embedded
+			ensure_user_emails_embedded(user_id)
+		except Exception:
+			pass
 		if progress_callback:
 			progress_callback("completed", seen, stored)
 		logger.info("Finished Inbox backfill for account %s: %d scanned, %d stored", account_id, seen, stored)
@@ -651,6 +661,11 @@ def sync_all_emails(
 		account.inbox_sync_page_token = None
 		account.inbox_sync_heartbeat_at = None
 		db.commit()
+		try:
+			from app.services.rag_auto_indexer import ensure_user_emails_embedded
+			ensure_user_emails_embedded(user.id)
+		except Exception:
+			pass
 		if background_callback:
 			background_callback("completed", 0, 0)
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -14,6 +16,9 @@ from app.models.email import Email, GmailAccount, User
 from app.models.rag import EmailChunk, EmailEmbedding
 from app.rag.indexing import RAGIndexingPipeline
 from app.rag.pgvector_store import PostgresVectorStoreManager
+
+
+logger = logging.getLogger(__name__)
 
 
 class _PostgresCollectionFacade:
@@ -51,7 +56,7 @@ class RAGIndexerService:
                           EmailEmbedding.embedding.is_not(None),
                           EmailEmbedding.embedding_dimensions == settings.embedding_dimensions))
         stmt = (select(Email.id).join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
-                .where(~exists(indexed), (Email.body.is_not(None) | Email.body_html.is_not(None)))
+                .where(~exists(indexed))
                 .order_by(Email.received_at.desc().nullslast()))
         if user_id:
             stmt = stmt.where(GmailAccount.user_id == UUID(str(user_id)))
@@ -64,15 +69,28 @@ class RAGIndexerService:
 
     def index_unindexed_emails(self, db: Session, user_id: Optional[UUID] = None,
                                batch_size: Optional[int] = None) -> Dict[str, int]:
+        from sqlalchemy import delete
         ids = self.get_unindexed_email_ids(db, user_id=user_id, limit=batch_size)
         done = chunks = 0
         for email_id in ids:
             try:
                 chunks += self.index_email(db, email_id, user_id=user_id)
                 done += 1
-            except Exception:
+            except Exception as exc:
                 db.rollback()
+                logger.warning("Failed to index email %s: %s; purging unembedded email from database", email_id, exc)
+                try:
+                    db.execute(delete(Email).where(Email.id == email_id))
+                    db.commit()
+                except Exception:
+                    db.rollback()
+        # Purge any remaining unembedded emails when finishing batch
+        if not batch_size or len(ids) < batch_size:
+            self.purge_unembedded_emails(db, user_id=user_id)
         return {"total_unindexed": len(ids), "emails_indexed": done, "chunks_created": chunks}
+
+    def purge_unembedded_emails(self, db: Session, user_id: Optional[UUID] = None) -> int:
+        return self.pipeline.purge_unembedded_emails(db, user_id=user_id)
 
     def search_rag(self, query: str, user_id: UUID, top_k: int = 5,
                    filter_sender: Optional[str] = None) -> List[Dict[str, Any]]:
