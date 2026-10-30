@@ -100,7 +100,8 @@ def google_callback(request: Request, db: Session = Depends(get_db)):
 			ensure_personal_identity(user, personal_url, refresh_authorization=True)
 		except Exception as exc:
 			logger.error("Personal database identity could not be updated for user %s: %s", user.id, type(exc).__name__)
-			raise HTTPException(status_code=503, detail="Your personal database is unavailable") from exc
+			# The central account and OAuth grant are already committed. Keep the
+			# session usable so the owner can repair or disconnect the database.
 	# Automatically trigger RAG auto-embedding for any unindexed emails in background
 	try:
 		from app.services.rag_auto_indexer import ensure_user_emails_embedded

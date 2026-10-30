@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
+import logging
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +18,8 @@ from app.database.connection import init_db, SessionLocal, CentralSessionLocal
 from app.core.security import get_current_user, session_user_id
 from app.models.email import User
 from app.services.developer_settings import decrypt, database_url_context, llm_key_context, ensure_personal_identity
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -63,7 +66,11 @@ async def route_developer_connections(request: Request, call_next):
         url = decrypt(owner.developer_database_url)
         provider_key = (owner.developer_llm_provider, decrypt(owner.developer_llm_api_key)) if owner.developer_llm_api_key else None
         if url:
-            ensure_personal_identity(owner, url)
+            try:
+                ensure_personal_identity(owner, url)
+            except Exception as exc:
+                logger.error("Personal database identity could not be updated for user %s: %s", user_id, type(exc).__name__)
+                return JSONResponse({"detail": "Your personal database is unavailable. Open Settings to reconnect or disconnect it."}, status_code=503)
     db_token = database_url_context.set(url)
     key_token = llm_key_context.set(provider_key)
     try:
