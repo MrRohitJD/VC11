@@ -155,8 +155,6 @@ class TestUserAutoEmbeddingSync(unittest.TestCase):
         self.assertEqual(len(remaining_emails), 1)
         self.assertEqual(remaining_emails[0].id, email_valid.id)
 
-
-
     def test_purge_unembedded_emails_protects_demo_account(self):
         """Demo account emails without embeddings should not be purged during sweeps."""
         demo_user = User(
@@ -201,6 +199,89 @@ class TestUserAutoEmbeddingSync(unittest.TestCase):
         ).all())
         self.assertEqual(len(demo_emails_after), 1)
         self.assertEqual(demo_emails_after[0].id, demo_email.id)
+
+    def test_bulk_embedding_processes_multiple_emails_in_single_call(self):
+        """Bulk embedding groups chunk texts from multiple emails into a single embed_documents call."""
+        emails = [
+            Email(
+                id=uuid4(),
+                gmail_account_id=self.account.id,
+                gmail_message_id=f"bulk_msg_{i}",
+                subject=f"Bulk Subject {i}",
+                body=f"Bulk email message body {i} containing important work details.",
+                from_email=f"sender{i}@example.com",
+                to_email="testuser@example.com",
+                received_at=datetime.now(timezone.utc),
+            )
+            for i in range(5)
+        ]
+        self.db.add_all(emails)
+        self.db.commit()
+
+        call_batches = []
+        original_embed = default_rag_service.pipeline.embedding_function.embed_documents
+
+        def spy_embed(texts):
+            call_batches.append(list(texts))
+            return original_embed(texts)
+
+        default_rag_service.pipeline.embedding_function.embed_documents = spy_embed
+        try:
+            res = default_rag_service.index_unindexed_emails(self.db, user_id=self.user.id)
+            self.assertEqual(res["emails_indexed"], 5)
+            self.assertEqual(res["chunks_created"], 5)
+
+            # Assert that embed_documents was called only ONCE for all 5 emails instead of 5 times!
+            self.assertEqual(len(call_batches), 1)
+            self.assertEqual(len(call_batches[0]), 5)
+
+            # Verify all 5 embeddings are saved
+            for email in emails:
+                emb = self.db.scalar(
+                    select(EmailEmbedding).join(EmailChunk, EmailChunk.id == EmailEmbedding.chunk_id)
+                    .where(EmailChunk.email_id == email.id)
+                )
+                self.assertIsNotNone(emb)
+                self.assertEqual(emb.status, "INDEXED")
+        finally:
+            default_rag_service.pipeline.embedding_function.embed_documents = original_embed
+
+    def test_bulk_embedding_fallback_on_batch_failure(self):
+        """When a bulk batch fails, it falls back to individual email indexing without failing all."""
+        emails = [
+            Email(
+                id=uuid4(),
+                gmail_account_id=self.account.id,
+                gmail_message_id=f"fallback_msg_{i}",
+                subject=f"Fallback Subject {i}",
+                body=f"Body {i}",
+                from_email=f"user{i}@example.com",
+                to_email="testuser@example.com",
+                received_at=datetime.now(timezone.utc),
+            )
+            for i in range(3)
+        ]
+        self.db.add_all(emails)
+        self.db.commit()
+
+        original_embed = default_rag_service.pipeline.embedding_function.embed_documents
+        first_call = True
+
+        def failing_bulk_embed(texts):
+            nonlocal first_call
+            if first_call and len(texts) > 1:
+                first_call = False
+                raise RuntimeError("Simulated bulk API failure")
+            return original_embed(texts)
+
+        default_rag_service.pipeline.embedding_function.embed_documents = failing_bulk_embed
+        try:
+            res = default_rag_service.index_unindexed_emails(self.db, user_id=self.user.id)
+            # The fallback successfully indexed all emails individually!
+            self.assertEqual(res["emails_indexed"], 3)
+            self.assertEqual(res["chunks_created"], 3)
+        finally:
+            default_rag_service.pipeline.embedding_function.embed_documents = original_embed
 
 
 if __name__ == "__main__":

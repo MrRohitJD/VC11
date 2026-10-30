@@ -67,27 +67,40 @@ class RAGIndexerService:
             stmt = stmt.limit(limit)
         return list(db.scalars(stmt).all())
 
+    def index_emails_bulk(
+        self,
+        db: Session,
+        email_ids: List[UUID | str],
+        user_id: Optional[UUID] = None,
+        force: bool = False,
+        batch_size: int = 50,
+    ) -> Dict[str, int]:
+        return self.pipeline.index_emails_bulk(
+            db, email_ids, user_id=user_id, force=force, batch_size=batch_size
+        )
+
     def index_unindexed_emails(self, db: Session, user_id: Optional[UUID] = None,
                                batch_size: Optional[int] = None) -> Dict[str, int]:
-        from sqlalchemy import delete
         ids = self.get_unindexed_email_ids(db, user_id=user_id, limit=batch_size)
-        done = chunks = 0
-        for email_id in ids:
-            try:
-                chunks += self.index_email(db, email_id, user_id=user_id)
-                done += 1
-            except Exception as exc:
-                db.rollback()
-                logger.warning("Failed to index email %s: %s; purging unembedded email from database", email_id, exc)
-                try:
-                    db.execute(delete(Email).where(Email.id == email_id))
-                    db.commit()
-                except Exception:
-                    db.rollback()
+        if not ids:
+            if not batch_size:
+                self.purge_unembedded_emails(db, user_id=user_id)
+            return {"total_unindexed": 0, "emails_indexed": 0, "chunks_created": 0}
+
+        bulk_res = self.pipeline.index_emails_bulk(
+            db,
+            ids,
+            user_id=user_id,
+            batch_size=min(50, batch_size) if batch_size else 50,
+        )
         # Purge any remaining unembedded emails when finishing batch
         if not batch_size or len(ids) < batch_size:
             self.purge_unembedded_emails(db, user_id=user_id)
-        return {"total_unindexed": len(ids), "emails_indexed": done, "chunks_created": chunks}
+        return {
+            "total_unindexed": len(ids),
+            "emails_indexed": bulk_res["emails_indexed"],
+            "chunks_created": bulk_res["chunks_created"],
+        }
 
     def purge_unembedded_emails(self, db: Session, user_id: Optional[UUID] = None) -> int:
         return self.pipeline.purge_unembedded_emails(db, user_id=user_id)
