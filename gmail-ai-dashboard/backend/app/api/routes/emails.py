@@ -501,6 +501,9 @@ def list_emails(
 			ensure_user_emails_embedded(user.id)
 		except Exception:
 			pass
+	inbox_only = bool(inbox_only.default) if hasattr(inbox_only, 'default') else bool(inbox_only)
+	sent_only = bool(sent_only.default) if hasattr(sent_only, 'default') else bool(sent_only)
+	unread_only = bool(unread_only.default) if hasattr(unread_only, 'default') else bool(unread_only)
 	start_at = None
 	end_at = None
 	if isinstance(range_key, str):
