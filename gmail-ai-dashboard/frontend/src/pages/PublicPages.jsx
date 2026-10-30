@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { enterDemo } from '../services/api';
 import './PublicPages.css';
 
-const CONTACT = 'bibinvid4@gmail.com';
+const CONTACT = 'rohit.jadhav@rohit-jadhav.dev';
 const APP_NAME = 'Gmail AI Dashboard & Inbox Mail Assistant';
 
 function PublicLayout({ children }) {
