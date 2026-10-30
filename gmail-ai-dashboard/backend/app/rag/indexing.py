@@ -16,7 +16,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.email import Email, GmailAccount
+from app.models.email import Email, GmailAccount, User
 from app.models.rag import EmailChunk, EmailEmbedding
 from app.rag.chunking import default_chunker
 from app.rag.embeddings import get_embedding_model
@@ -203,7 +203,10 @@ class RAGIndexingPipeline:
                           EmailEmbedding.status == "INDEXED",
                           EmailEmbedding.embedding.is_not(None),
                           EmailEmbedding.embedding_dimensions == settings.embedding_dimensions))
-        stmt = select(Email.id).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(~exists(indexed))
+        stmt = (select(Email.id)
+                .join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
+                .join(User, User.id == GmailAccount.user_id)
+                .where(~exists(indexed), User.is_demo.is_(False)))
         if user_id:
             stmt = stmt.where(GmailAccount.user_id == UUID(str(user_id)))
         unembedded_ids = list(db.scalars(stmt).all())

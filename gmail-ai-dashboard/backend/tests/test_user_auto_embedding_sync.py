@@ -156,5 +156,52 @@ class TestUserAutoEmbeddingSync(unittest.TestCase):
         self.assertEqual(remaining_emails[0].id, email_valid.id)
 
 
+
+    def test_purge_unembedded_emails_protects_demo_account(self):
+        """Demo account emails without embeddings should not be purged during sweeps."""
+        demo_user = User(
+            id=uuid4(),
+            google_id="demo_google_id",
+            email="demo@gmail.com",
+            name="Demo Account",
+            is_demo=True,
+        )
+        self.db.add(demo_user)
+        self.db.flush()
+
+        demo_account = GmailAccount(
+            id=uuid4(),
+            user_id=demo_user.id,
+            email="demo@gmail.com",
+            access_token="fake_token",
+            sync_status="IDLE",
+        )
+        self.db.add(demo_account)
+        self.db.flush()
+
+        demo_email = Email(
+            id=uuid4(),
+            gmail_account_id=demo_account.id,
+            gmail_message_id="msg_demo_01",
+            subject="Demo Welcome",
+            body="Welcome to the demo mailbox.",
+            from_email="system@example.com",
+            to_email="demo@gmail.com",
+            received_at=datetime.now(timezone.utc),
+        )
+        self.db.add(demo_email)
+        self.db.commit()
+
+        # Run global purge (user_id=None)
+        default_rag_service.purge_unembedded_emails(self.db, user_id=None)
+
+        # Demo email must NOT be purged
+        demo_emails_after = list(self.db.scalars(
+            select(Email).where(Email.gmail_account_id == demo_account.id)
+        ).all())
+        self.assertEqual(len(demo_emails_after), 1)
+        self.assertEqual(demo_emails_after[0].id, demo_email.id)
+
+
 if __name__ == "__main__":
     unittest.main()
