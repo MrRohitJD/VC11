@@ -11,6 +11,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from alembic import op
+import sqlalchemy as sa
 
 from app.models.email import AiCategory, Base
 import app.models.llm  # noqa: F401 - register llm_classification_jobs
@@ -78,11 +79,19 @@ def upgrade() -> None:
         "WHERE email_id IS NOT NULL AND status IN ('PENDING', 'RUNNING')"
     )
 
-    bind.execute(
-        AiCategory.__table__.insert(),
-        [{"id": uuid4(), "name": name, "description": description, "is_active": True}
-         for name, description in CATEGORY_SEEDS],
+    existing_categories = set(
+        bind.execute(sa.select(AiCategory.name)).scalars().all()
     )
+    missing_seeds = [
+        {"id": uuid4(), "name": name, "description": description, "is_active": True}
+        for name, description in CATEGORY_SEEDS
+        if name not in existing_categories
+    ]
+    if missing_seeds:
+        bind.execute(
+            AiCategory.__table__.insert(),
+            missing_seeds,
+        )
 
 
 def downgrade() -> None:
