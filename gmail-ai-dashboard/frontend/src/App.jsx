@@ -120,7 +120,7 @@ function formatChange(current, comparison) {
 	return `${change >= 0 ? '+' : ''}${change.toFixed(1)}%`;
 }
 
-function buildStats(summary, rangeKey = 'this_week') {
+function buildStats(summary, rangeKey = 'all_time') {
 	const compText = comparisonLabels[rangeKey] || 'vs last period';
 	const labels = [
 		['Total Emails', 'total', 'inbox'], ['Auto Labeled', 'auto_labeled', 'tag'],
@@ -799,10 +799,10 @@ function Dashboard() {
 	const [selectedIds, setSelectedIds] = useState([]);
 	const [mobileOpen, setMobileOpen] = useState(false);
 	const [toast, setToast] = useState('');
-	const [range, setRange] = useState('this_week');
+	const [range, setRange] = useState('all_time');
 	const [analytics, setAnalytics] = useState(null);
 	const [analyticsError, setAnalyticsError] = useState('');
-	const [activityRange, setActivityRange] = useState('this_week');
+	const [activityRange, setActivityRange] = useState('all_time');
 	const [charts, setCharts] = useState(null);
 	const [recentEmails, setRecentEmails] = useState([]);
 	const [inboxEmails, setInboxEmails] = useState([]);
