@@ -22,7 +22,7 @@ def test_db():
 
 
 def test_list_emails_sent_only_filtering(test_db):
-    user = User(id=uuid4(), google_id="user-1", email="me@example.com", is_demo=False)
+    user = User(id=uuid4(), google_id="user-1", email="me@example.com", is_demo=True)
     test_db.add(user)
     test_db.flush()
 

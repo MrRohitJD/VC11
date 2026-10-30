@@ -503,7 +503,7 @@ def list_emails(
 			pass
 	start_at = None
 	end_at = None
-	if range_key is not None:
+	if isinstance(range_key, str):
 		if range_key not in RANGE_OPTIONS:
 			raise HTTPException(status_code=400, detail=f"Unsupported range: {range_key}")
 		client_tz = _resolve_client_timezone(tz, x_timezone)
@@ -519,7 +519,7 @@ def list_emails(
 		)
 
 	query = select(Email).where(Email.gmail_account_id == account.id)
-	if range_key is not None and start_at and end_at:
+	if isinstance(range_key, str) and start_at and end_at:
 		query = query.where(Email.received_at >= start_at, Email.received_at < end_at)
 	if inbox_only:
 		query = query.join(EmailLabel).join(Label).where(Label.label_id == "INBOX")
@@ -538,7 +538,7 @@ def list_emails(
 	if unread_only:
 		query = query.where(Email.is_read.is_(False))
 
-	if search:
+	if search and isinstance(search, str):
 		pattern = f"%{search}%"
 		query = query.where(
 			Email.subject.ilike(pattern)
@@ -547,7 +547,7 @@ def list_emails(
 			| Email.snippet.ilike(pattern)
 		)
 
-	if label:
+	if label and isinstance(label, str):
 		query = query.where(
 			Email.labels.any(
 				EmailLabel.label.has(
