@@ -1,6 +1,7 @@
 """Gmail sync routes — trigger sync, poll status, SSE stream for real-time progress."""
 
 import asyncio
+from contextvars import copy_context
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
@@ -225,9 +226,9 @@ def start_sync(
 		"error": None,
 	}
 
+	context = copy_context()
 	thread = threading.Thread(
-		target=_run_sync_in_thread,
-		args=(user_id_str, user.id),
+		target=lambda: context.run(_run_sync_in_thread, user_id_str, user.id),
 		daemon=True,
 	)
 	thread.start()

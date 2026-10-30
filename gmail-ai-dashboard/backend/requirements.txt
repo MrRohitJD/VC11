@@ -4,6 +4,7 @@ langchain-nvidia-ai-endpoints>=1.4,<2
 uvicorn[standard]
 pydantic-settings
 sqlalchemy
+cryptography>=43
 psycopg[binary]
 pgvector>=0.4,<1
 alembic>=1.13,<2

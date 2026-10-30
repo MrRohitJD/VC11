@@ -202,6 +202,20 @@ button { border: 0; cursor: pointer; }
 .settings-card > h1 { color: #202840; font-size: 22px; letter-spacing: -.03em; margin: 0 0 28px; }
 .settings-section { border-top: 1px solid var(--line); padding: 22px 0; }
 .settings-section h2 { color: #30394f; font-size: 13px; margin: 0 0 8px; }
+.developer-settings label { color: #30394f; display: block; font-size: 12px; font-weight: 600; margin: 16px 0 6px; }
+.developer-settings input, .developer-settings select { background: var(--surface, #fff); border: 1px solid var(--line); border-radius: 7px; box-sizing: border-box; color: var(--text, #30394f); font: inherit; max-width: 100%; padding: 10px 12px; width: 100%; }
+.developer-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 20px; }
+.developer-settings .import-result-msg.success { color: #18794e; }
+.developer-settings .import-result-msg.error { color: #b42318; }
+.developer-database-connected { color: #18794e; font-weight: 600; overflow-wrap: anywhere; }
+.developer-database-connected span { align-items: center; background: #e3f9f0; border-radius: 50%; display: inline-flex; height: 18px; justify-content: center; margin-right: 4px; width: 18px; }
+.database-notice h2 { color: #202840; font-size: 18px; margin: 0 0 10px; }
+.database-notice p { color: #65748e; font-size: 12px; line-height: 1.65; margin: 0 0 22px; }
+.database-notice-icon { align-items: center; border-radius: 50%; display: flex; font-size: 27px; font-weight: 700; height: 56px; justify-content: center; margin: 0 auto 18px; width: 56px; }
+.database-notice.success .database-notice-icon { background: #e3f9f0; color: #18794e; }
+.database-notice.error .database-notice-icon { background: #fff1f0; color: #b42318; }
+.database-notice.pending .database-notice-icon { background: #efedff; color: var(--purple); }
+.database-notice-close { background: var(--purple); color: #fff; justify-content: center; margin: 0 auto; min-width: 90px; }
 .settings-desc { color: #8f99ab; font-size: 11px; line-height: 1.6; margin: 0 0 14px; }
 .settings-profile { align-items: center; display: flex; gap: 14px; margin-bottom: 6px; }
 .settings-avatar img { border-radius: 50%; height: 48px; object-fit: cover; width: 48px; }

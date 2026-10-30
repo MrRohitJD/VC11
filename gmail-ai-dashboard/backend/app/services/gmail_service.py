@@ -4,6 +4,7 @@ import json
 import logging
 import time
 import base64
+from contextvars import copy_context
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import getaddresses, parsedate_to_datetime
@@ -633,8 +634,11 @@ def sync_all_emails(
 		db.commit()
 		if background_callback:
 			background_callback("syncing", 0, 0)
+		context = copy_context()
+		def run_in_context(*args, **kwargs):
+			return context.run(_sync_remaining_emails_worker, *args, **kwargs)
 		bg_thread = threading.Thread(
-			target=_sync_remaining_emails_worker,
+			target=run_in_context,
 			args=(user.id, account.id, resume_token),
 			kwargs={"progress_callback": background_callback},
 			name=f"inbox-sync-{str(account.id)[:8]}",

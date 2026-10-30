@@ -167,6 +167,29 @@
   font-weight: 600;
 }
 
+.rag-status-chip.checking {
+  background: #f3f4f6;
+  color: #4b5563;
+  border-color: #e5e7eb;
+}
+
+.rag-status-chip.error {
+  background: #fff1f2;
+  color: #be123c;
+  border-color: #fecdd3;
+}
+
+.rag-status-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
 .model-select {
   padding: 5px 10px;
   font-size: 11px;

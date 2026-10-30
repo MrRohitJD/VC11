@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
+from app.services.developer_settings import llm_key_context
 from app.models.chat_quota import ChatConcurrencyLock, ChatQuota, ChatRequestLeaseRecord
 from app.models.email import User
 
@@ -57,7 +58,8 @@ def set_demo_visitor_cookie(request: Request, response: Response) -> None:
 
 def _identity_and_limits(request: Request, user: User) -> tuple[str, int, int]:
     if not user.is_demo:
-        return f"user:{user.id}", USER_DAILY_LIMIT, USER_CONCURRENT_LIMIT
+        daily_limit = settings.developer_daily_chat_limit if llm_key_context.get() else USER_DAILY_LIMIT
+        return f"user:{user.id}", daily_limit, USER_CONCURRENT_LIMIT
 
     # Each demo browser gets its own quota. Shared network addresses must not
     # combine unrelated visitors' daily allowances.

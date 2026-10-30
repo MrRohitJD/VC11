@@ -10,6 +10,7 @@ Builds grounded email question-answering pipeline using:
 from __future__ import annotations
 
 import logging
+from contextvars import copy_context
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -38,6 +39,7 @@ except ImportError:
 
 
 from app.core.config import settings
+from app.services.developer_settings import llm_key_context
 from app.database.connection import SessionLocal
 from app.models.email import User
 from app.rag.retrieval import (
@@ -209,6 +211,32 @@ def get_chat_model() -> Any:
     def unavailable(_input):
         raise RuntimeError("No assistant LLM provider is configured")
     return RunnableLambda(unavailable)
+
+
+def personal_chat_model() -> Any | None:
+    """Use only the account's own provider when a personal key is configured."""
+    credential = llm_key_context.get()
+    if not credential:
+        return None
+    provider, key = credential
+    if provider == "google":
+        return ChatOpenAI(
+            model=settings.developer_gemini_model,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            api_key=key, temperature=0,
+            max_tokens=settings.llm_max_completion_tokens,
+            timeout=settings.llm_request_timeout_seconds,
+            max_retries=settings.llm_max_retries,
+        )
+    if provider == "openai":
+        return ChatOpenAI(
+            model=settings.developer_openai_model,
+            api_key=key, temperature=0,
+            max_tokens=settings.llm_max_completion_tokens,
+            timeout=settings.llm_request_timeout_seconds,
+            max_retries=settings.llm_max_retries,
+        )
+    raise ValueError("Unsupported personal LLM provider")
 
 
 def _require_chat_answer(response: Any) -> Any:
@@ -546,8 +574,9 @@ class GroundedRAGChain:
                 live_timeout = (settings.gmail_mcp_timeout_seconds if live_full_scan else
                                 min(settings.gmail_mcp_timeout_seconds, MAX_LIVE_GMAIL_SECONDS))
                 live_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gmail-mcp")
+                live_context = copy_context()
                 live_future = live_executor.submit(
-                    search_live_mailbox, user_id, effective_query, full_scan=live_full_scan,
+                    lambda: live_context.run(search_live_mailbox, user_id, effective_query, full_scan=live_full_scan),
                 )
             except Exception as exc:
                 live_error = error_code(exc)
@@ -590,8 +619,9 @@ class GroundedRAGChain:
             emit_activity("keyword_search", "Preparing keyword candidates in parallel", status="running",
                           provider="bm25", parallel=True, lane="keyword", parallel_group="retrieval")
             lexical_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mailbox-bm25")
+            context = copy_context()
             lexical_future = lexical_executor.submit(
-                lambda: _scoped_documents_in_worker(user_id, effective_query, filters)
+                lambda: context.run(_scoped_documents_in_worker, user_id, effective_query, filters)
             )
 
         # Fast retriever: LangChain + configured vector backend similarity search

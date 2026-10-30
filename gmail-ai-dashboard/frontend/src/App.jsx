@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate, Navigate } from 'react-router-dom';
 import {
 	AlertCircle, BarChart3, Bell, ChevronDown, CircleHelp, Download, FileText, Inbox,
@@ -13,7 +13,7 @@ import GmailConsent from './pages/GmailConsent';
 import SyncPage from './pages/SyncPage';
 import AiAssistant from './pages/AiAssistant';
 import { PublicHome, PrivacyPolicy, TermsOfService } from './pages/PublicPages';
-import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex, enterDemo } from './services/api';
+import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex, enterDemo, getDeveloperSettings, updateDeveloperSettings, getDeveloperSchemaUrl } from './services/api';
 
 const navItems = [
 	{ label: 'Inbox', icon: Inbox }, { label: 'Starred', icon: Star },
@@ -543,6 +543,15 @@ function SettingsPage() {
 	const [ragStatus, setRagStatus] = useState(null);
 	const [embedding, setEmbedding] = useState(false);
 	const [embeddingStatus, setEmbeddingStatus] = useState('');
+	const [developerSettings, setDeveloperSettings] = useState(null);
+	const [developerDatabaseUrl, setDeveloperDatabaseUrl] = useState('');
+	const [developerProvider, setDeveloperProvider] = useState('openai');
+	const [developerApiKey, setDeveloperApiKey] = useState('');
+	const [developerSaving, setDeveloperSaving] = useState(false);
+	const [developerMessage, setDeveloperMessage] = useState('');
+	const [developerMessageType, setDeveloperMessageType] = useState('');
+	const [databaseNotice, setDatabaseNotice] = useState(null);
+	const developerSettingsRevision = useRef(0);
 
 	const loadStats = () => {
 		getExportStats()
@@ -556,7 +565,67 @@ function SettingsPage() {
 		getRagStatus()
 			.then(({ data }) => setRagStatus(data))
 			.catch(() => setEmbeddingStatus('Embedding status is unavailable right now.'));
-	}, [user]);
+		const revision = developerSettingsRevision.current;
+		getDeveloperSettings()
+			.then(({ data }) => {
+				if (revision !== developerSettingsRevision.current) return;
+				setDeveloperSettings(data);
+				if (data.llm_provider) setDeveloperProvider(data.llm_provider);
+			})
+			.catch(() => setDeveloperMessage('Developer settings are unavailable right now.'));
+	}, [user?.id, user?.is_demo]);
+
+	const saveDeveloperSettings = async (changes) => {
+		developerSettingsRevision.current += 1;
+		setDeveloperSaving(true);
+		setDeveloperMessage('');
+		setDeveloperMessageType('');
+		const databaseChange = Object.prototype.hasOwnProperty.call(changes, 'database_url') || changes.clear_database;
+		if (databaseChange) setDatabaseNotice(changes.clear_database
+			? { pending: true, title: 'Disconnecting database', message: 'Switching to the app database. No data is transferred.' }
+			: { pending: true, title: 'Connecting database', message: 'Checking the database connection and app schema. No existing mail is transferred.' });
+		try {
+			const { data } = await updateDeveloperSettings(changes);
+			setDeveloperSettings(data);
+			setDeveloperDatabaseUrl('');
+			setDeveloperApiKey('');
+			if (databaseChange) {
+				setDatabaseNotice(changes.clear_database
+					? !data.database_configured
+						? { success: true, title: 'Database disconnected', message: 'You are connected to the app database. No data was transferred.' }
+						: { success: false, title: 'Could not disconnect database', message: 'The personal database is still selected. Please try again.' }
+					: data.database_configured
+						? { success: true, title: 'Database connected', message: `Connected to ${data.database_url_display || 'your database'}.` }
+						: { success: false, title: 'Database not connected', message: 'The database could not be connected. Please try again.' });
+			} else {
+				setDeveloperMessage('Developer settings saved.');
+				setDeveloperMessageType('success');
+			}
+		} catch (error) {
+			const detail = error.response?.data?.detail;
+			const message = typeof detail === 'string' ? detail
+				: error.response ? 'The server could not complete the database connection. Please try again.'
+					: 'The connection request did not reach the server or timed out. Check your network and try again.';
+			if (changes.clear_database) {
+				try {
+					const { data } = await getDeveloperSettings();
+					setDeveloperSettings(data);
+					setDatabaseNotice(data.database_configured
+						? { success: false, title: 'Database not disconnected', message: 'Your personal database is still connected. Please try again.' }
+						: { success: true, title: 'Database disconnected', message: 'You are connected to the app database. No data was transferred.' });
+				} catch {
+					setDatabaseNotice({ success: false, title: 'Disconnect status unavailable', message: 'Could not confirm which database is selected. Refresh settings and try again.' });
+				}
+			} else if (databaseChange) {
+				setDatabaseNotice({ success: false, title: 'Database connection failed', message });
+			} else {
+				setDeveloperMessage(typeof detail === 'string' ? detail : 'Could not save developer settings.');
+				setDeveloperMessageType('error');
+			}
+		} finally {
+			setDeveloperSaving(false);
+		}
+	};
 
 	const refreshRagStatus = async () => {
 		const { data } = await getRagStatus();
@@ -652,6 +721,32 @@ function SettingsPage() {
 						<span>{user?.email}</span>
 					</div>
 				</div>
+			</section>
+
+			<section className="settings-section developer-settings">
+				<h2>Developer settings</h2>
+				<p className="settings-desc">Connect your own PostgreSQL database and use your own Google Gemini or OpenAI API key. Each setting can be used independently. Leave them empty to use this app's current defaults.</p>
+				<label htmlFor="developer-database-url">Database URL</label>
+				<input id="developer-database-url" type="password" autoComplete="off" placeholder="postgresql://user:password@host:5432/database" value={developerDatabaseUrl} onChange={(event) => setDeveloperDatabaseUrl(event.target.value)} />
+				{developerSettings?.database_configured
+					? <p className="settings-desc developer-database-connected" role="status"><span aria-hidden="true">✓</span> Connected to {developerSettings.database_url_display}</p>
+					: <p className="settings-desc" role="status">You are connected to the app database.</p>}
+				<p className="settings-desc">For Supabase, use the Session pooler connection string from Connect (port 5432). Download and apply this app's schema in Supabase SQL Editor first. Existing app mail and assistant history stay in the app database. New syncs and assistant activity use your connected database.</p>
+				<div className="developer-actions">
+					<a className="settings-btn" href={getDeveloperSchemaUrl()} download="gmail-ai-dashboard-schema.sql">Download database schema</a>
+					<button type="button" className="settings-btn" disabled={developerSaving || !developerDatabaseUrl.trim()} onClick={() => saveDeveloperSettings({ database_url: developerDatabaseUrl })}>Connect Database</button>
+					{developerSettings?.database_configured && <button type="button" className="settings-btn" disabled={developerSaving} onClick={() => saveDeveloperSettings({ clear_database: true })}>Disconnect &amp; Use App Database</button>}
+				</div>
+				<label htmlFor="developer-llm-provider">LLM provider</label>
+				<select id="developer-llm-provider" value={developerProvider} onChange={(event) => setDeveloperProvider(event.target.value)}><option value="google">Google Gemini</option><option value="openai">OpenAI (ChatGPT)</option></select>
+				<label htmlFor="developer-llm-key">API key</label>
+				<input id="developer-llm-key" type="password" autoComplete="new-password" placeholder={developerSettings?.llm_key_configured ? 'Key saved; enter a new key to replace it' : 'Enter your provider API key'} value={developerApiKey} onChange={(event) => setDeveloperApiKey(event.target.value)} />
+				<p className="settings-desc">{developerSettings?.llm_key_configured ? `Using your ${developerSettings.llm_provider === 'google' ? 'Gemini' : 'OpenAI'} key. Up to ${developerSettings.daily_chat_limit} assistant requests per UTC day.` : `Using the app’s configured LLM providers. Up to ${developerSettings?.daily_chat_limit || 50} assistant requests per UTC day.`} Up to five assistant requests can run at once.</p>
+				<div className="developer-actions">
+					<button type="button" className="settings-btn" disabled={developerSaving || !developerApiKey.trim()} onClick={() => saveDeveloperSettings({ llm_provider: developerProvider, llm_api_key: developerApiKey })}>Save API key</button>
+					{developerSettings?.llm_key_configured && <button type="button" className="settings-btn" disabled={developerSaving} onClick={() => saveDeveloperSettings({ clear_llm_key: true })}>Use app key</button>}
+				</div>
+				{developerMessage && <p role={developerMessageType === 'error' ? 'alert' : 'status'} className={`import-result-msg ${developerMessageType}`}>{developerMessage}</p>}
 			</section>
 
 			<section className="settings-section">
@@ -788,6 +883,14 @@ function SettingsPage() {
 		</div>
 
 		<EraseDialog open={eraseOpen} onClose={() => setEraseOpen(false)} onConfirm={handleErase} confirming={erasing} />
+		{databaseNotice && <div className="modal-overlay" onClick={() => { if (!databaseNotice.pending) setDatabaseNotice(null); }} role="presentation">
+			<div className={`modal-card database-notice ${databaseNotice.pending ? 'pending' : databaseNotice.success ? 'success' : 'error'}`} role="alertdialog" aria-modal="true" aria-labelledby="database-notice-title" aria-describedby="database-notice-message" onClick={(event) => event.stopPropagation()}>
+				<div className="database-notice-icon" aria-hidden="true">{databaseNotice.pending ? <Loader size={25} /> : databaseNotice.success ? '✓' : '!'}</div>
+				<h2 id="database-notice-title">{databaseNotice.title}</h2>
+				<p id="database-notice-message">{databaseNotice.message}</p>
+				{!databaseNotice.pending && <button type="button" className="settings-btn database-notice-close" onClick={() => setDatabaseNotice(null)} autoFocus>OK</button>}
+			</div>
+		</div>}
 		{eraseToast && <div className="toast"><Zap size={16} /> {eraseToast}</div>}
 	</div>;
 }

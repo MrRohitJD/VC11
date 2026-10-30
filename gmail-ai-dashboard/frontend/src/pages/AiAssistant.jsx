@@ -135,7 +135,7 @@ export default function AiAssistant({ user: propUser }) {
 	const [recentChatsLoading, setRecentChatsLoading] = useState(true);
 	const [recentChatsError, setRecentChatsError] = useState('');
 	const [openingSessionId, setOpeningSessionId] = useState(null);
-	const [ragStatus, setRagStatus] = useState(null);
+	const [connection, setConnection] = useState({ state: 'checking', message: '' });
 	const [approvalFeedback, setApprovalFeedback] = useState({});
 	const [draftReview, setDraftReview] = useState(null);
 	const [draftReviewBusy, setDraftReviewBusy] = useState(false);
@@ -240,16 +240,28 @@ export default function AiAssistant({ user: propUser }) {
 		} catch { /* optional */ }
 	}, [sidePanelOpen]);
 
-	// Fetch system status on mount
-	useEffect(() => {
-		getRagStatus()
-			.then((res) => {
-				setRagStatus(res.data);
-			})
-			.catch(() => {
-				// Offline or non-blocking
-			});
+	const checkConnection = useCallback(async () => {
+		setConnection({ state: 'checking', message: '' });
+		try {
+			const { data } = await getRagStatus();
+			setConnection(data?.status === 'operational'
+				? { state: 'connected', message: 'Assistant status is operational.' }
+				: { state: 'error', label: 'Assistant unavailable', message: 'The assistant status endpoint did not report an operational state.' });
+		} catch (error) {
+			const status = error.response?.status;
+			const label = status === 401 ? 'Session expired' : status ? `Status failed (${status})` : 'API unreachable';
+			const message = status === 401
+				? 'Your session has expired. Sign in again.'
+				: status
+					? `The assistant status endpoint returned HTTP ${status}. Check the API logs and database connection.`
+					: 'The assistant API could not be reached. Check that the backend is running and the API URL is correct.';
+			setConnection({ state: 'error', label, message });
+		}
 	}, []);
+
+	useEffect(() => {
+		checkConnection();
+	}, [checkConnection]);
 
 	useEffect(() => {
 		if (followLatestRef.current) messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -642,9 +654,10 @@ export default function AiAssistant({ user: propUser }) {
 									<button type="button" className="assistant-btn-clear assistant-focus-toggle" aria-pressed={chatFocused} onClick={() => setChatFocused((focused) => !focused)}>
 										{chatFocused ? <Minimize2 size={14} /> : <Maximize2 size={14} />}{chatFocused ? 'Exit focus' : 'Focus chat'}
 									</button>
-									<div className="rag-status-chip" title="Assistant connection">
+									<div className={`rag-status-chip ${connection.state}`} title={connection.message || 'Checking assistant connection'} role="status">
 										<Database size={13} />
-										<span>{ragStatus ? 'Connected' : 'Connection unavailable'}</span>
+										<span>{connection.state === 'connected' ? 'Connected' : connection.state === 'checking' ? 'Checking connection' : connection.label}</span>
+										{connection.state === 'error' && <button type="button" onClick={checkConnection} aria-label="Retry assistant connection" title="Retry assistant connection"><RefreshCw size={13} /></button>}
 									</div>
 
 									<button

@@ -12,6 +12,7 @@ Each batch is committed independently; no DB transaction is held during LLM call
 from __future__ import annotations
 
 import logging
+from contextvars import copy_context
 import threading
 import time
 from datetime import datetime, timezone
@@ -21,10 +22,11 @@ from sqlalchemy import exists, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.database.connection import SessionLocal
-from app.models.email import Email, EmailLabel, GmailAccount, Label, utcnow
+from app.database.connection import SessionLocal, CentralSessionLocal
+from app.models.email import Email, EmailLabel, GmailAccount, Label, User, utcnow
 from app.models.llm import LlmClassificationJob, LlmEmailClassification, LlmLabel
 from app.services.llm_provider import PROMPT_VERSION, classify_emails_batch
+from app.services.developer_settings import decrypt, database_url_context, llm_key_context
 
 logger = logging.getLogger(__name__)
 
@@ -290,8 +292,16 @@ def _run_classification_job(job_id: UUID, gmail_account_id: UUID) -> None:
     already-classified emails are skipped by the NOT EXISTS query.
     """
     db = SessionLocal()
+    key_token = None
     account_id_str = str(gmail_account_id)
     try:
+        account = db.get(GmailAccount, gmail_account_id)
+        if account is not None and llm_key_context.get() is None:
+            with CentralSessionLocal() as central:
+                owner = central.get(User, account.user_id)
+                if owner is not None and owner.developer_llm_api_key:
+                    key_token = llm_key_context.set((
+                        owner.developer_llm_provider, decrypt(owner.developer_llm_api_key)))
         # Mark job as RUNNING
         job = db.get(LlmClassificationJob, job_id)
         if job is None:
@@ -428,6 +438,8 @@ def _run_classification_job(job_id: UUID, gmail_account_id: UUID) -> None:
             pass
         _update_job_state(account_id_str, {"status": "failed", "error": str(exc)[:300]})
     finally:
+        if key_token is not None:
+            llm_key_context.reset(key_token)
         db.close()
 
 
@@ -524,9 +536,9 @@ def enqueue_classification_job(
     account_id_str = str(gmail_account_id)
     _update_job_state(account_id_str, {"status": "queued", "job_id": str(job_id)})
 
+    context = copy_context()
     thread = threading.Thread(
-        target=_run_classification_job,
-        args=(job_id, gmail_account_id),
+        target=lambda: context.run(_run_classification_job, job_id, gmail_account_id),
         name=f"llm-classify-{job_type}-{str(job_id)[:8]}",
         daemon=True,
     )
@@ -578,13 +590,11 @@ def _run_global_classification_cycle() -> None:
     db = SessionLocal()
     try:
         unclassified_count = _count_unclassified(db)
-        if unclassified_count == 0:
-            return
-
-        logger.info(
-            "Background AI daemon detected %d unclassified emails across accounts. Starting classification...",
-            unclassified_count,
-        )
+        if unclassified_count:
+            logger.info(
+                "Background AI daemon detected %d unclassified emails across accounts. Starting classification...",
+                unclassified_count,
+            )
 
         account_ids = db.scalars(
             select(Email.gmail_account_id)
@@ -601,6 +611,9 @@ def _run_global_classification_cycle() -> None:
         for account_id in account_ids:
             # Auto-enable ai_classification_enabled for all accounts
             account = db.get(GmailAccount, account_id)
+            if (account and database_url_context.get() is None
+                    and db.get(User, account.user_id).developer_database_url):
+                continue
             if account and not account.ai_classification_enabled:
                 account.ai_classification_enabled = True
                 db.commit()
@@ -608,6 +621,19 @@ def _run_global_classification_cycle() -> None:
             enqueue_classification_job(account_id, job_type="DAEMON_SWEEP")
     finally:
         db.close()
+    if database_url_context.get() is None:
+        with CentralSessionLocal() as central:
+            personal_urls = [decrypt(value) for value in central.scalars(
+                select(User.developer_database_url).where(
+                    User.developer_database_url.is_not(None))).all()]
+        for url in personal_urls:
+            token = database_url_context.set(url)
+            try:
+                _run_global_classification_cycle()
+            except Exception as exc:
+                logger.warning("Personal classification sweep failed: %s", type(exc).__name__)
+            finally:
+                database_url_context.reset(token)
 
 
 def _global_ai_classifier_loop() -> None:

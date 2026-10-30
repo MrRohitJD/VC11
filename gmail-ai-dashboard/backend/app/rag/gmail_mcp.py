@@ -9,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from app.core.config import settings
+from app.services.developer_settings import database_url_context
 logger = logging.getLogger(__name__)
 from app.rag.search_plan import gmail_search_query
 
@@ -22,7 +23,7 @@ async def _search(user_id, query, *, full_scan=False):
     from mcp.client.stdio import stdio_client
     from sqlalchemy.engine import make_url
 
-    database_url = make_url(settings.database_url)
+    database_url = make_url(database_url_context.get() or settings.database_url)
     if database_url.drivername.startswith('sqlite') and database_url.database not in (None, '', ':memory:'):
         database_url = database_url.set(database=str(Path(database_url.database).resolve()))
 

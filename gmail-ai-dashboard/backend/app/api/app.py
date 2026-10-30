@@ -11,9 +11,12 @@ from app.api.routes.emails import router as emails_router
 from app.api.routes.gmail import router as gmail_router
 from app.api.routes.llm import router as llm_router
 from app.api.routes.rag import router as rag_router
+from app.api.routes.developer import router as developer_router
 from app.core.config import settings
-from app.database.connection import init_db, SessionLocal
-from app.core.security import get_current_user
+from app.database.connection import init_db, SessionLocal, CentralSessionLocal
+from app.core.security import get_current_user, session_user_id
+from app.models.email import User
+from app.services.developer_settings import decrypt, database_url_context, llm_key_context, ensure_personal_identity
 
 
 @asynccontextmanager
@@ -38,6 +41,36 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Gmail AI Dashboard API", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def route_developer_connections(request: Request, call_next):
+    path = request.url.path
+    # Identity and developer credentials always live in the deployment database.
+    central_paths = ("/api/auth/google", "/api/auth/callback", "/auth/google/callback",
+                     "/api/auth/demo", "/api/auth/logout", "/api/auth/me",
+                     "/api/developer")
+    if not path.startswith("/api/") or path.startswith(central_paths):
+        return await call_next(request)
+    try:
+        user_id = session_user_id(request)
+    except HTTPException:
+        return await call_next(request)
+    with CentralSessionLocal() as db:
+        owner = db.get(User, user_id)
+        if owner is None or owner.is_demo:
+            return await call_next(request)
+        url = decrypt(owner.developer_database_url)
+        provider_key = (owner.developer_llm_provider, decrypt(owner.developer_llm_api_key)) if owner.developer_llm_api_key else None
+        if url:
+            ensure_personal_identity(owner, url)
+    db_token = database_url_context.set(url)
+    key_token = llm_key_context.set(provider_key)
+    try:
+        return await call_next(request)
+    finally:
+        database_url_context.reset(db_token)
+        llm_key_context.reset(key_token)
 OLD_HEROKU_HOST = "ai-powered-gmail-0007703734bc.herokuapp.com"
 allowed_origins = [settings.frontend_url]
 if OLD_HEROKU_HOST not in settings.frontend_url:
@@ -74,6 +107,7 @@ app.include_router(emails_router)
 app.include_router(gmail_router)
 app.include_router(llm_router)
 app.include_router(rag_router)
+app.include_router(developer_router)
 app.add_api_route("/auth/google/callback", google_callback, methods=["GET"], include_in_schema=False)
 
 

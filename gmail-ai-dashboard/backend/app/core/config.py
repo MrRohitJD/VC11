@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     backend_url: str = "http://localhost:8000"
     frontend_url: str = "http://localhost:5173"
     session_secret: str = "change-this-session-secret"
+    developer_settings_encryption_key: str = ""
+    developer_gemini_model: str = "gemini-2.5-flash"
+    developer_openai_model: str = "gpt-4.1-mini"
+    developer_daily_chat_limit: int = Field(500, ge=1, le=10000, validation_alias=AliasChoices("DEVELOPER_DAILY_CHAT_LIMIT"))
     secure_cookies: bool = False
 
     # LLM & Embedding provider keys

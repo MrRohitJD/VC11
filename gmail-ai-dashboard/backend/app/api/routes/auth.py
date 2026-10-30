@@ -17,10 +17,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.security import get_current_user
-from app.database.connection import get_db
+from app.database.connection import get_db, CentralSessionLocal, engine
 from app.database.crud import delete_user_gmail_data, serialize_user, upsert_google_user
 from app.models.email import User
 from app.services.chat_quota import set_demo_visitor_cookie
+from app.services.developer_settings import decrypt, database_url_context, ensure_personal_identity
 from app.services.demo_seed import DEMO_EMAIL, DEMO_GOOGLE_ID
 
 logger = logging.getLogger(__name__)
@@ -93,11 +94,18 @@ def google_callback(request: Request, db: Session = Depends(get_db)):
 		raise HTTPException(status_code=409, detail="This address is reserved for the public demo")
 
 	user = upsert_google_user(db, google_id=claims["sub"], email=claims["email"], name=claims.get("name"), picture=claims.get("picture"), access_token=credentials.token, refresh_token=credentials.refresh_token, token_expiry=credentials.expiry, scope=credentials.scopes and " ".join(credentials.scopes))
-
+	personal_url = decrypt(user.developer_database_url)
+	if personal_url:
+		try:
+			ensure_personal_identity(user, personal_url, refresh_authorization=True)
+		except Exception as exc:
+			logger.error("Personal database identity could not be updated for user %s: %s", user.id, type(exc).__name__)
+			raise HTTPException(status_code=503, detail="Your personal database is unavailable") from exc
 	# Automatically trigger RAG auto-embedding for any unindexed emails in background
 	try:
 		from app.services.rag_auto_indexer import ensure_user_emails_embedded
-		ensure_user_emails_embedded(user.id)
+		if not personal_url:
+			ensure_user_emails_embedded(user.id)
 	except Exception as auto_emb_exc:
 		logger.warning("Failed to launch background auto-indexer for user %s: %s", user.id, auto_emb_exc)
 
@@ -111,10 +119,14 @@ def google_callback(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/me")
 def current_user(user: User = Depends(get_current_user)):
-	if not user.is_demo:
+	if not user.is_demo and not user.developer_database_url:
 		try:
 			from app.services.rag_auto_indexer import ensure_user_emails_embedded
-			ensure_user_emails_embedded(user.id)
+			token = database_url_context.set(decrypt(user.developer_database_url))
+			try:
+				ensure_user_emails_embedded(user.id)
+			finally:
+				database_url_context.reset(token)
 		except Exception:
 			pass
 	return serialize_user(user)
@@ -153,6 +165,11 @@ def erase_all_data(
 	deleting the ``users`` row, the user's labels, or the user's actual Gmail.
 	"""
 	delete_user_gmail_data(db, user)
+	if db.get_bind() is not engine:
+		with CentralSessionLocal() as central:
+			central_user = central.get(User, user.id)
+			if central_user is not None:
+				delete_user_gmail_data(central, central_user)
 	response = Response(status_code=status.HTTP_204_NO_CONTENT)
 	response.delete_cookie(SESSION_COOKIE)
 	return response

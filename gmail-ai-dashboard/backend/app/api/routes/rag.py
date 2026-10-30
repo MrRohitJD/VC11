@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import json
 from queue import Queue, Empty
+from contextvars import copy_context
 from threading import Thread, Event
 from datetime import datetime, timezone
 from email.utils import parseaddr
@@ -47,6 +48,9 @@ from app.models.rag import (
     EmailSendApproval,
 )
 from app.rag.graph_agent import default_assistant
+from app.rag.graph_agent import LangGraphMailboxAssistant
+from app.rag.agent import GmailAIAssistant
+from app.rag.chains import personal_chat_model
 from app.rag.preprocessing import clean_email_text
 from app.rag.query_constraints import mailbox_time_context
 from app.rag.indexing import default_pipeline
@@ -221,7 +225,12 @@ def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[s
             f_dict["thread_id"] = body.thread_id
 
         with mailbox_time_context(x_timezone):
-            agent_res = default_assistant.run(
+            own_model = personal_chat_model()
+            assistant = (LangGraphMailboxAssistant(model=own_model)
+                         if own_model is not None and isinstance(default_assistant, LangGraphMailboxAssistant)
+                         else GmailAIAssistant(model=own_model) if own_model is not None
+                         else default_assistant)
+            agent_res = assistant.run(
                 query=body.query.strip(),
                 db=db,
                 user_id=user.id,
@@ -356,7 +365,8 @@ def stream_chat(
     # Start work when the request is accepted so a disconnect before the first
     # stream event cannot strand the concurrency lease.
     try:
-        Thread(target=work, daemon=True).start()
+        context = copy_context()
+        Thread(target=lambda: context.run(work), daemon=True).start()
     except Exception:
         lease.release()
         raise

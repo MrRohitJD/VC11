@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from app.database.connection import SessionLocal
+from app.database.connection import SessionLocal, CentralSessionLocal
+from app.services.developer_settings import decrypt, database_url_context
 from app.models.email import User
 from app.models.rag import EmailSendApproval
 from app.services.gmail_service import send_gmail_message
@@ -24,16 +25,18 @@ def deliver_due_scheduled_emails() -> int:
     delivered = 0
     now = datetime.now(timezone.utc)
     with SessionLocal() as db:
-        approvals = db.scalars(
-            select(EmailSendApproval)
+        statement = (select(EmailSendApproval)
             .where(
                 EmailSendApproval.status == "SCHEDULED",
                 EmailSendApproval.scheduled_for.is_not(None),
                 EmailSendApproval.scheduled_for <= now,
             )
             .order_by(EmailSendApproval.scheduled_for)
-            .limit(20)
-        ).all()
+            .limit(20))
+        if database_url_context.get() is None:
+            statement = statement.join(User, User.id == EmailSendApproval.user_id).where(
+                User.developer_database_url.is_(None))
+        approvals = db.scalars(statement).all()
         for approval in approvals:
             approval.status = "SENDING"
             db.commit()
@@ -59,6 +62,19 @@ def deliver_due_scheduled_emails() -> int:
                 approval.status = "SCHEDULED"
                 db.commit()
                 logger.warning("Scheduled Gmail delivery failed for %s: %s", approval.id, type(exc).__name__)
+    if database_url_context.get() is None:
+        with CentralSessionLocal() as central:
+            personal_urls = [decrypt(value) for value in central.scalars(
+                select(User.developer_database_url).where(
+                    User.developer_database_url.is_not(None))).all()]
+        for url in personal_urls:
+            token = database_url_context.set(url)
+            try:
+                delivered += deliver_due_scheduled_emails()
+            except Exception as exc:
+                logger.warning("Personal scheduled delivery failed: %s", type(exc).__name__)
+            finally:
+                database_url_context.reset(token)
     return delivered
 
 

@@ -9,7 +9,8 @@ from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.email import Email, GmailAccount
+from app.services.developer_settings import database_url_context
+from app.models.email import Email, GmailAccount, User
 from app.models.rag import EmailChunk, EmailEmbedding
 from app.rag.indexing import RAGIndexingPipeline
 from app.rag.pgvector_store import PostgresVectorStoreManager
@@ -54,6 +55,9 @@ class RAGIndexerService:
                 .order_by(Email.received_at.desc().nullslast()))
         if user_id:
             stmt = stmt.where(GmailAccount.user_id == UUID(str(user_id)))
+        elif database_url_context.get() is None:
+            stmt = stmt.join(User, User.id == GmailAccount.user_id).where(
+                User.developer_database_url.is_(None))
         if limit:
             stmt = stmt.limit(limit)
         return list(db.scalars(stmt).all())

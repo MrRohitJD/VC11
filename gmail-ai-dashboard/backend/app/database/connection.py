@@ -5,15 +5,19 @@ Alembic migrations before starting the API; startup only verifies the schema.
 """
 
 from collections.abc import Generator
+from functools import lru_cache
 import logging
 
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
+from app.services.developer_settings import database_url_context
 import app.models.llm  # noqa: F401 - registers job mapper before sessions are used
 import app.models.chat_quota  # noqa: F401 - registers quota and concurrency lease mappers
+import app.models.rag  # noqa: F401 - registers mailbox index and history mappers
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +32,22 @@ if not settings.database_url.startswith("sqlite"):
         max_overflow=settings.database_max_overflow,
     )
 engine: Engine = create_engine(settings.database_url, **_engine_options)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+CentralSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+@lru_cache(maxsize=32)
+def _personal_engine(url: str) -> Engine:
+    # Never retain a pool of connections to user-supplied servers.
+    return create_engine(url, poolclass=NullPool, pool_pre_ping=True,
+                         connect_args={"connect_timeout": 5})
+
+
+def SessionLocal() -> Session:
+    url = database_url_context.get()
+    if url:
+        return sessionmaker(bind=_personal_engine(url), autoflush=False,
+                            autocommit=False)()
+    return CentralSessionLocal()
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -47,6 +66,7 @@ REQUIRED_TABLES = frozenset({
 })
 
 REQUIRED_COLUMNS = {
+    "users": frozenset({"developer_database_url", "developer_llm_provider", "developer_llm_api_key"}),
     "gmail_accounts": frozenset({
         "inbox_sync_page_token", "inbox_sync_heartbeat_at",
     }),

@@ -13,7 +13,7 @@ from app.database.connection import get_db
 from app.models.email import User
 
 
-def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+def session_user_id(request: Request) -> UUID:
 	value = request.cookies.get("gmail_ai_session")
 	if not value or "." not in value:
 		raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
@@ -30,6 +30,11 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 	except (KeyError, TypeError, ValueError, json.JSONDecodeError):
 		raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
 
+	return user_id
+
+
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+	user_id = session_user_id(request)
 	user = db.scalar(select(User).where(User.id == user_id))
 	if user is None:
 		raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")

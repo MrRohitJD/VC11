@@ -28,6 +28,9 @@ export const getCurrentUser = () => api.get('/api/auth/me');
 export const enterDemo = () => api.post('/api/auth/demo');
 export const logout = () => api.post('/api/auth/logout');
 export const eraseAllData = () => api.delete('/api/auth/erase');
+export const getDeveloperSettings = () => api.get('/api/developer');
+export const updateDeveloperSettings = (changes) => api.put('/api/developer', changes);
+export const getDeveloperSchemaUrl = () => `${API_BASE}/api/developer/schema.sql`;
 
 export const startSync = () => api.post('/api/gmail/sync');
 export const getSyncStatus = () => api.get('/api/gmail/sync/status');

@@ -11,12 +11,14 @@ Provides:
 from __future__ import annotations
 
 import logging
+from contextvars import copy_context
 import threading
 import time
 from typing import Dict, Optional, Set
 from uuid import UUID
 
-from app.database.connection import SessionLocal
+from app.database.connection import SessionLocal, CentralSessionLocal
+from app.services.developer_settings import decrypt, database_url_context
 from app.services.rag_indexer import default_rag_service
 
 logger = logging.getLogger(__name__)
@@ -86,8 +88,9 @@ def ensure_user_emails_embedded(user_id: UUID, session_factory=None) -> None:
             with _user_workers_lock:
                 _active_user_workers.discard(user_id_str)
 
+    context = copy_context()
     worker_thread = threading.Thread(
-        target=_worker,
+        target=lambda: context.run(_worker),
         name=f"rag-auto-indexer-{user_id_str[:8]}",
         daemon=True,
     )
@@ -126,6 +129,20 @@ def _global_rag_auto_indexer_loop(interval_seconds: float = 30.0) -> None:
         try:
             _daemon_wake_event.clear()
             _run_global_rag_indexing_cycle()
+            from sqlalchemy import select
+            from app.models.email import User
+            with CentralSessionLocal() as central:
+                personal_urls = [decrypt(value) for value in central.scalars(
+                    select(User.developer_database_url).where(
+                        User.developer_database_url.is_not(None))).all()]
+            for url in personal_urls:
+                token = database_url_context.set(url)
+                try:
+                    _run_global_rag_indexing_cycle()
+                except Exception as exc:
+                    logger.warning("Personal embedding sweep failed: %s", type(exc).__name__)
+                finally:
+                    database_url_context.reset(token)
         except Exception as exc:
             logger.exception("Error in background RAG auto-indexer daemon: %s", exc)
 

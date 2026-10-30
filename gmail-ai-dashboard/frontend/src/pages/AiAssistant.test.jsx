@@ -16,6 +16,31 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
+it('shows a pending check, reports an HTTP failure, and recovers on retry', async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    let rejectStatus;
+    getRagStatus.mockImplementationOnce(() => new Promise((_, reject) => { rejectStatus = reject; }))
+        .mockResolvedValueOnce({ data: { status: 'operational' } });
+
+    render(<MemoryRouter><AiAssistant /></MemoryRouter>);
+    expect(screen.getByText('Checking connection')).toBeInTheDocument();
+    rejectStatus({ response: { status: 503 } });
+    const failed = await screen.findByText('Status failed (503)');
+    expect(failed.closest('.rag-status-chip')).toHaveAttribute('title', expect.stringContaining('HTTP 503'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry assistant connection' }));
+    expect(await screen.findByText('Connected')).toBeInTheDocument();
+    expect(getRagStatus).toHaveBeenCalledTimes(2);
+});
+
+it('identifies an unreachable API instead of a generic connection error', async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    getRagStatus.mockRejectedValueOnce(new Error('Network Error'));
+    render(<MemoryRouter><AiAssistant /></MemoryRouter>);
+    const failed = await screen.findByText('API unreachable');
+    expect(failed.closest('.rag-status-chip')).toHaveAttribute('title', expect.stringContaining('backend is running'));
+});
+
 it('opens the complete message when View email is clicked on a citation', async () => {
     Element.prototype.scrollIntoView = vi.fn();
     getRagStatus.mockResolvedValue({ data: {} });

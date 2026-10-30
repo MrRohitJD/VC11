@@ -443,6 +443,29 @@ def classify_emails_batch(
     Returns:
         (classifications, model_name_used)
     """
+    from app.services.developer_settings import llm_key_context
+    if llm_key_context.get():
+        # A personal key must never fall through to the deployment's paid keys.
+        try:
+            from langchain_core.messages import HumanMessage, SystemMessage
+            from app.rag.chains import personal_chat_model
+            model = personal_chat_model().with_structured_output(
+                BatchClassificationResponse, method="function_calling")
+            response = model.invoke([
+                SystemMessage(content=_build_system_prompt(categories)),
+                HumanMessage(content=_build_user_prompt(emails)),
+            ])
+            allowed = set(categories or APPROVED_CATEGORIES)
+            valid = [item for item in response.classifications if item.email_id in
+                     {email["email_id"] for email in emails}]
+            for item in valid:
+                if item.label not in allowed:
+                    item.label = "OTHER" if "OTHER" in allowed else next(iter(allowed), "")
+            if valid:
+                return valid, f"personal/{llm_key_context.get()[0]}"
+        except Exception as exc:
+            logger.warning("Personal classification provider failed: %s", type(exc).__name__)
+        return _local_classify(emails, categories)
     allowed_categories = set(categories or APPROVED_CATEGORIES)
     providers = (
         ("nvidia", _try_nvidia),

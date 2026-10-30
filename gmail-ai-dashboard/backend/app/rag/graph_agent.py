@@ -36,6 +36,7 @@ except ImportError:
 from langsmith import Client, trace, tracing_context
 
 from app.core.config import settings
+from app.services.developer_settings import database_url_context
 from app.models.rag import ChatMessage, EmailSendApproval
 from app.models.email import User
 from app.rag.agent import (
@@ -479,14 +480,15 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
         citations = []
         saver = None
         checkpoint_cm = None
+        active_database_url = database_url_context.get() or settings.database_url
         is_postgres = (
             settings.vector_backend == "postgres"
-            and settings.database_url.startswith(("postgres://", "postgresql://", "postgresql+psycopg://"))
+            and active_database_url.startswith(("postgres://", "postgresql://", "postgresql+psycopg://"))
         )
         if is_postgres:
             try:
                 from langgraph.checkpoint.postgres import PostgresSaver
-                checkpoint_conn = settings.database_url.replace("postgresql+psycopg://", "postgresql://", 1)
+                checkpoint_conn = active_database_url.replace("postgresql+psycopg://", "postgresql://", 1)
                 checkpoint_cm = PostgresSaver.from_conn_string(checkpoint_conn)
                 saver = checkpoint_cm.__enter__()
                 if hasattr(saver, "setup"):
