@@ -36,7 +36,9 @@ export const startSync = () => api.post('/api/gmail/sync');
 export const getSyncStatus = () => api.get('/api/gmail/sync/status');
 
 export const fetchEmails = (params) => api.get('/api/emails', { params });
+export const fetchSentEmails = (params) => api.get('/api/emails', { params: { sent_only: true, ...params } });
 export const fetchEmail = (id) => api.get(`/api/emails/${id}`);
+export const sendEmail = (data) => api.post('/api/emails/send', data);
 export const fetchLabels = () => api.get('/api/labels');
 export const fetchAnalyticsSummary = (range, tz) => {
 	const userTz = tz || getClientTimezone();

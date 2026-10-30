@@ -37,7 +37,7 @@ from app.database.connection import get_db, SessionLocal
 from app.services.chat_quota import reserve_chat_request
 from app.services.gmail_service import normalize_recipient_header, send_gmail_message
 from app.rag.activity import activity_context
-from app.models.email import Email, GmailAccount, User
+from app.models.email import Email, EmailLabel, GmailAccount, Label, User
 from app.models.rag import (
     Attachment,
     ChatMessage,
@@ -665,6 +665,36 @@ def approve_email_send(
     approval.status = "SENT"
     approval.sent_at = datetime.now(timezone.utc)
     approval.delivery_message_id = delivery.get("id") if isinstance(delivery, dict) else None
+
+    try:
+        account = db.scalar(select(GmailAccount).where(GmailAccount.user_id == user.id))
+        if account:
+            sent_label = db.scalar(
+                select(Label).where(Label.gmail_account_id == account.id, Label.label_id == "SENT")
+            )
+            if not sent_label:
+                sent_label = Label(gmail_account_id=account.id, label_id="SENT", name="SENT", type="system")
+                db.add(sent_label)
+                db.flush()
+            msg_id = approval.delivery_message_id or f"sent-{approval.id}"
+            sent_email = Email(
+                gmail_account_id=account.id,
+                gmail_message_id=msg_id,
+                from_email=account.email,
+                to_email=approval.recipient_email,
+                cc=approval.cc,
+                bcc=approval.bcc,
+                subject=approval.subject,
+                snippet=(approval.draft_body or "")[:160],
+                body=approval.draft_body,
+                received_at=approval.sent_at,
+                is_read=True,
+            )
+            db.add(sent_email)
+            db.flush()
+            db.add(EmailLabel(email_id=sent_email.id, label_id=sent_label.id, gmail_account_id=account.id))
+    except Exception:
+        logger.warning("Failed to record sent email locally for approval %s", approval.id, exc_info=True)
     db.commit()
 
     return ApprovalActionResponse(

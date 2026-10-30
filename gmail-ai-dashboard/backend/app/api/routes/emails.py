@@ -1,19 +1,24 @@
 """Email & label query routes — all endpoints enforce user-level authorization."""
 
 import json
+import logging
 from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.security import get_current_user
 from app.database.connection import get_db
 from app.models.email import AiCategory, Email, EmailClassification, EmailLabel, GmailAccount, Label, User
-from app.services.gmail_service import _parse_message, build_gmail_service_for_user
+from app.services.gmail_service import _parse_message, build_gmail_service_for_user, normalize_recipient_header, send_gmail_message
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["emails"])
 
@@ -475,6 +480,7 @@ def list_emails(
 	search: Optional[str] = Query(None),
 	label: Optional[str] = Query(None),
 	inbox_only: bool = Query(False),
+	sent_only: bool = Query(False),
 	unread_only: bool = Query(False),
 	range_key: Optional[str] = Query(None, alias="range"),
 	tz: Optional[str] = Query(None),
@@ -517,6 +523,18 @@ def list_emails(
 		query = query.where(Email.received_at >= start_at, Email.received_at < end_at)
 	if inbox_only:
 		query = query.join(EmailLabel).join(Label).where(Label.label_id == "INBOX")
+	elif sent_only:
+		query = query.where(
+			Email.labels.any(
+				EmailLabel.label.has(
+					or_(
+						Label.label_id.ilike("SENT"),
+						Label.name.ilike("SENT"),
+					)
+				)
+			)
+			| (Email.from_email.ilike(f"%{account.email}%"))
+		)
 	if unread_only:
 		query = query.where(Email.is_read.is_(False))
 
@@ -525,12 +543,20 @@ def list_emails(
 		query = query.where(
 			Email.subject.ilike(pattern)
 			| Email.from_email.ilike(pattern)
+			| Email.to_email.ilike(pattern)
 			| Email.snippet.ilike(pattern)
 		)
 
 	if label:
 		query = query.where(
-			Email.labels.any(EmailLabel.label.has(Label.name.ilike(label)))
+			Email.labels.any(
+				EmailLabel.label.has(
+					or_(
+						Label.name.ilike(label),
+						Label.label_id.ilike(label),
+					)
+				)
+			)
 			| Email.classifications.any(EmailClassification.category.has(AiCategory.name.ilike(label)))
 		)
 
@@ -670,3 +696,184 @@ def _serialize_email(email: Email, include_body: bool = False) -> dict:
 			email.attachments_meta or []
 		)
 	return result
+
+
+class SendEmailRequest(BaseModel):
+	to: Optional[str] = None
+	recipient: Optional[str] = None
+	recipient_email: Optional[str] = None
+	subject: Optional[str] = ""
+	body: Optional[str] = None
+	draft_body: Optional[str] = None
+	message: Optional[str] = None
+	cc: Optional[str] = None
+	bcc: Optional[str] = None
+
+	@property
+	def resolved_recipient(self) -> str:
+		val = (self.to or self.recipient or self.recipient_email or "").strip()
+		if not val:
+			raise ValueError("A valid recipient email address is required")
+		return val
+
+	@property
+	def resolved_body(self) -> str:
+		return (self.body or self.draft_body or self.message or "").strip()
+
+
+@router.post("/emails/send")
+@router.post("/gmail/send")
+def send_email_endpoint(
+	payload: SendEmailRequest,
+	user: User = Depends(get_current_user),
+	db: Session = Depends(get_db),
+):
+	"""Send an email through the user's Gmail account (or simulated in demo mode)."""
+	try:
+		raw_recipient = payload.resolved_recipient
+	except ValueError as exc:
+		raise HTTPException(status_code=422, detail=str(exc))
+
+	try:
+		recipient = normalize_recipient_header(raw_recipient, "recipient", required=True)
+	except Exception as exc:
+		raise HTTPException(status_code=422, detail=str(exc))
+
+	cc = None
+	if payload.cc:
+		try:
+			cc = normalize_recipient_header(payload.cc, "Cc")
+		except Exception as exc:
+			raise HTTPException(status_code=422, detail=str(exc))
+
+	bcc = None
+	if payload.bcc:
+		try:
+			bcc = normalize_recipient_header(payload.bcc, "Bcc")
+		except Exception as exc:
+			raise HTTPException(status_code=422, detail=str(exc))
+
+	subject = (payload.subject or "").strip()
+	body = payload.resolved_body
+
+	account = _get_account(db, user)
+	now = datetime.now(timezone.utc)
+
+	if user.is_demo:
+		delivery_id = f"demo-sent-{uuid4().hex[:12]}"
+		try:
+			sent_label = db.scalar(
+				select(Label).where(Label.gmail_account_id == account.id, Label.label_id == "SENT")
+			)
+			if not sent_label:
+				sent_label = Label(
+					id=uuid4(),
+					gmail_account_id=account.id,
+					label_id="SENT",
+					name="SENT",
+					type="SYSTEM",
+				)
+				db.add(sent_label)
+				db.flush()
+
+			sent_email = Email(
+				id=uuid4(),
+				gmail_account_id=account.id,
+				gmail_message_id=delivery_id,
+				thread_id=f"thread-{delivery_id}",
+				from_email=user.email,
+				sender_name=user.name or user.email,
+				to_email=recipient,
+				cc=cc,
+				bcc=bcc,
+				subject=subject,
+				snippet=body[:150] if body else "",
+				body=body,
+				body_html=f"<p>{body}</p>" if body else "",
+				received_at=now,
+				is_read=True,
+				is_starred=False,
+				has_attachment=False,
+			)
+			db.add(sent_email)
+			db.flush()
+			db.add(EmailLabel(email_id=sent_email.id, label_id=sent_label.id, gmail_account_id=account.id))
+			db.commit()
+		except Exception as exc:
+			logger.warning("Could not persist demo sent email: %s", exc)
+			db.rollback()
+
+		return {
+			"status": "SENT",
+			"message": "Email sent successfully (demo mode).",
+			"delivery_message_id": delivery_id,
+			"demo": True,
+		}
+
+	try:
+		delivery = send_gmail_message(
+			db=db,
+			user=user,
+			recipient=recipient,
+			subject=subject,
+			body=body,
+			cc=cc,
+			bcc=bcc,
+		)
+		delivery_id = delivery.get("id") if isinstance(delivery, dict) else str(delivery)
+	except PermissionError as exc:
+		raise HTTPException(status_code=403, detail=str(exc))
+	except ValueError as exc:
+		raise HTTPException(status_code=422, detail=str(exc))
+	except Exception as exc:
+		logger.exception("Failed to send email via Gmail API: %s", exc)
+		raise HTTPException(status_code=502, detail=f"Failed to deliver email via Gmail: {str(exc)}")
+
+	try:
+		sent_label = db.scalar(
+			select(Label).where(Label.gmail_account_id == account.id, Label.label_id == "SENT")
+		)
+		if not sent_label:
+			sent_label = Label(
+				id=uuid4(),
+				gmail_account_id=account.id,
+				label_id="SENT",
+				name="SENT",
+				type="SYSTEM",
+			)
+			db.add(sent_label)
+			db.flush()
+
+		sent_email = Email(
+			id=uuid4(),
+			gmail_account_id=account.id,
+			gmail_message_id=delivery_id or f"sent-{uuid4().hex[:12]}",
+			thread_id=delivery.get("threadId") if isinstance(delivery, dict) else None,
+			from_email=user.email,
+			sender_name=user.name or user.email,
+			to_email=recipient,
+			cc=cc,
+			bcc=bcc,
+			subject=subject,
+			snippet=body[:150] if body else "",
+			body=body,
+			body_html=f"<p>{body}</p>" if body else "",
+			received_at=now,
+			is_read=True,
+			is_starred=False,
+			has_attachment=False,
+		)
+		db.add(sent_email)
+		db.flush()
+		db.add(EmailLabel(email_id=sent_email.id, label_id=sent_label.id, gmail_account_id=account.id))
+		db.commit()
+	except Exception as exc:
+		logger.warning("Could not persist sent email cache: %s", exc)
+		db.rollback()
+
+	return {
+		"status": "SENT",
+		"message": "Email sent successfully.",
+		"delivery_message_id": delivery_id,
+		"demo": False,
+	}

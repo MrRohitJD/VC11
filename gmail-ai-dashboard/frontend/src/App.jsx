@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
 import { useLocation, useNavigate, Navigate } from 'react-router-dom';
 import {
 	AlertCircle, BarChart3, Bell, ChevronDown, CircleHelp, Download, FileText, Inbox,
@@ -13,6 +13,8 @@ import GmailConsent from './pages/GmailConsent';
 import SyncPage from './pages/SyncPage';
 import AiAssistant from './pages/AiAssistant';
 import { PublicHome, PrivacyPolicy, TermsOfService } from './pages/PublicPages';
+import ComposeModal from './components/ComposeModal';
+const SentMessagesView = lazy(() => import('./components/SentMessagesView'));
 import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex, enterDemo, getDeveloperSettings, updateDeveloperSettings, getDeveloperSchemaUrl } from './services/api';
 
 const navItems = [
@@ -22,18 +24,18 @@ const navItems = [
 	{ label: 'Trash', icon: Trash2 },
 ];
 
-function Sidebar({ active, onNavigate, onClose, unreadCount }) {
+function Sidebar({ active, onNavigate, onClose, unreadCount, sentCount, onCompose }) {
 	const navigate = useNavigate();
 	return <aside className="sidebar">
 		<div className="brand"><div className="brand-mark"><Mail size={18} /></div><span>Gmail AI <strong>Dashboard</strong></span><button className="mobile-close" onClick={onClose}><X size={18} /></button></div>
-		<button className="compose-button"><PenLine size={17} /> Compose</button>
+		<button className="compose-button" onClick={onCompose}><PenLine size={17} /> Compose</button>
 		<div className="nav-group">
 			<button className={`nav-item ${active === 'Dashboard' ? 'active' : ''}`} onClick={() => onNavigate('Dashboard')}>
 				<LayoutDashboard size={17} />
 				<span>Dashboard</span>
 			</button>
 		</div>
-		<div className="nav-group"><p className="nav-label">MAILBOX</p>{navItems.map(({ label, icon: Icon, count }) => <button key={label} className={`nav-item ${active === label ? 'active' : ''}`} onClick={() => onNavigate(label)}><Icon size={17} /><span>{label}</span>{label === 'Inbox' ? <small>{unreadCount}</small> : count ? <small>{count}</small> : null}</button>)}</div>
+		<div className="nav-group"><p className="nav-label">MAILBOX</p>{navItems.map(({ label, icon: Icon, count }) => <button key={label} className={`nav-item ${active === label ? 'active' : ''}`} onClick={() => onNavigate(label)}><Icon size={17} /><span>{label}</span>{label === 'Inbox' ? <small>{unreadCount}</small> : label === 'Sent' && sentCount !== undefined ? <small>{sentCount}</small> : count ? <small>{count}</small> : null}</button>)}</div>
 		<div className="nav-group nav-lower">
 			<p className="nav-label">WORKSPACE</p>
 			<button className={`nav-item ${active === 'Assistant' ? 'active' : ''}`} onClick={() => navigate('/assistant')}>
@@ -234,7 +236,7 @@ function QuickActions({ onAction }) {
 	return <section className="quick-section"><div className="section-heading"><div><h2>Quick Actions</h2><p>Manage your inbox efficiently</p></div></div><div className="quick-grid">{actions.map(({ label, detail, icon: Icon, color }) => <button className="quick-action" key={label} onClick={() => onAction(label)}><div className={`quick-icon ${color}`}><Icon size={18} /></div><div><strong>{label}</strong><span>{detail}</span></div><ChevronDown className="action-arrow" size={16} /></button>)}</div></section>;
 }
 
-function RecentEmails({ emailsToShow, selectedId, onSelectEmail, selected, onToggleStar, selectedIds, onToggleSelect, onOpenMailbox, title = 'Recent Emails', loading = false }) {
+function RecentEmails({ emailsToShow, selectedId, onSelectEmail, selected, onToggleStar, selectedIds, onToggleSelect, onOpenMailbox, onOpenSent, title = 'Recent Emails', loading = false }) {
 	return (
 		<section className="panel recent-panel">
 			<div className="panel-heading">
@@ -242,9 +244,17 @@ function RecentEmails({ emailsToShow, selectedId, onSelectEmail, selected, onTog
 					<h2>{title}</h2>
 					<p>{title === 'Inbox' ? 'All messages in your Gmail inbox' : 'Your latest messages and AI classifications'}</p>
 				</div>
-				<button className="view-all" onClick={onOpenMailbox}>
-					{title === 'Inbox' ? `${emailsToShow.length} mails` : 'View all'} <span>→</span>
-				</button>
+				<div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+					{title === 'Recent Emails' && onOpenSent && (
+						<button className="view-all sent-link-btn" type="button" onClick={onOpenSent} title="View all sent messages">
+							<Send size={12} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
+							Sent messages <span>→</span>
+						</button>
+					)}
+					<button className="view-all" onClick={onOpenMailbox}>
+						{title === 'Inbox' ? `${emailsToShow.length} mails` : 'View all'} <span>→</span>
+					</button>
+				</div>
 			</div>
 			<div className="email-table">
 				{loading ? (
@@ -397,7 +407,7 @@ function InboxView({ emails, selectedId, onSelectEmail, selectedIds, onToggleSel
 	);
 }
 
-function EmailPreview({ email, onClose, onExpand, isModal = false }) {
+function EmailPreview({ email, onClose, onExpand, onReply, onForward, isModal = false }) {
 	if (!email) {
 		return (
 			<section className="panel preview-panel empty-preview">
@@ -455,8 +465,8 @@ function EmailPreview({ email, onClose, onExpand, isModal = false }) {
 				)}
 			</div>
 			<div className="preview-footer">
-				<button><ReplyIcon /> Reply</button>
-				<button><ForwardIcon /> Forward</button>
+				<button onClick={onReply}><ReplyIcon /> Reply</button>
+				<button onClick={onForward}><ForwardIcon /> Forward</button>
 			</div>
 		</section>
 	);
@@ -919,6 +929,35 @@ function Dashboard() {
 	const [isRefreshing, setIsRefreshing] = useState(false);
 	const [isSyncing, setIsSyncing] = useState(false);
 	const [backgroundSync, setBackgroundSync] = useState(null);
+	const [composeOpen, setComposeOpen] = useState(false);
+	const [composeData, setComposeData] = useState(null);
+	const [sentRefreshKey, setSentRefreshKey] = useState(0);
+	const [sentTotal, setSentTotal] = useState(0);
+
+	const handleOpenCompose = (data = null) => {
+		setComposeData(data);
+		setComposeOpen(true);
+	};
+
+	const handleReply = (targetEmail) => {
+		const target = targetEmail || previewEmail;
+		if (!target) return;
+		handleOpenCompose({
+			to: target.email || target.from_email || '',
+			subject: target.subject?.startsWith('Re:') ? target.subject : `Re: ${target.subject || ''}`,
+			body: `\n\n--- On ${target.date || ''}, ${target.sender || ''} wrote ---\n${target.body || target.preview || ''}`,
+		});
+	};
+
+	const handleForward = (targetEmail) => {
+		const target = targetEmail || previewEmail;
+		if (!target) return;
+		handleOpenCompose({
+			to: '',
+			subject: target.subject?.startsWith('Fwd:') ? target.subject : `Fwd: ${target.subject || ''}`,
+			body: `\n\n---------- Forwarded message ---------\nFrom: ${target.sender || ''} <${target.email || target.from_email || ''}>\nDate: ${target.date || ''}\nSubject: ${target.subject || ''}\nTo: ${target.to_email || ''}\n\n${target.body || target.preview || ''}`,
+		});
+	};
 
 	const navigate = useNavigate();
 	const { user, logout } = useAuth();
@@ -927,11 +966,16 @@ function Dashboard() {
 		setEmailsLoading(true);
 		setAnalyticsError('');
 		try {
-			const [summaryRes, chartsRes, emailsRes] = await Promise.allSettled([
+			const [summaryRes, chartsRes, emailsRes, sentRes] = await Promise.allSettled([
 				fetchAnalyticsSummary(targetRange),
 				fetchAnalyticsCharts(targetActivityRange),
 				fetchEmails({ per_page: 50, page: 1, inbox_only: true }),
+				fetchEmails({ per_page: 1, page: 1, sent_only: true }),
 			]);
+
+			if (sentRes.status === 'fulfilled') {
+				setSentTotal(sentRes.value.data.total || 0);
+			}
 
 			if (summaryRes.status === 'fulfilled') {
 				setAnalytics(summaryRes.value.data);
@@ -1108,8 +1152,9 @@ function Dashboard() {
 		}
 	};
 
-	const handleEmailClick = (id) => {
+	const handleEmailClick = (id, emailObj = null) => {
 		const email =
+			emailObj ||
 			(recentEmails || []).find((item) => item.id === id) ||
 			(inboxEmails || []).find((item) => item.id === id) ||
 			(filteredEmails || []).find((item) => item.id === id);
@@ -1196,34 +1241,58 @@ function Dashboard() {
 		return (
 			<div className="app-shell">
 				<div className="sidebar-wrap">
-					<Sidebar active={active} onNavigate={setActive} onClose={() => {}} unreadCount={unreadCount} />
+					<Sidebar active={active} onNavigate={setActive} onClose={() => {}} unreadCount={unreadCount} sentCount={sentTotal} onCompose={() => handleOpenCompose()} />
 				</div>
 				<div className="main-shell">
 					<Header search={search} setSearch={setSearch} onMenu={() => {}} onLogout={handleLogout} user={user} onNavigateSettings={() => navigate('/settings')} />
 					<main className="content">
 						{backgroundSync?.background_status === 'syncing' && <p role="status">{backgroundSync.background_scanned ? `Syncing the rest of your Inbox: ${backgroundSync.background_scanned.toLocaleString()} older messages checked.` : 'Syncing the rest of your Inbox...'}</p>}
 						{backgroundSync?.background_status === 'error' && <p role="alert">Inbox sync paused. <button type="button" onClick={handleSync} disabled={isSyncing}>Retry sync</button></p>}
-						<InboxView
-							emails={inboxEmails}
-							selectedId={selectedId}
-							onSelectEmail={handleEmailClick}
-							selectedIds={selectedIds}
-							onToggleSelect={toggleSelect}
-							unreadCount={unreadCount}
-							loading={emailsLoading}
-							loadingMore={loadingMoreInbox}
-							hasMore={inboxEmails.length < inboxTotal}
-							onLoadMore={loadMoreInbox}
-						/>
+						{active === 'Sent' ? (
+							<Suspense fallback={<div className="mailbox-loading">Loading sent messages...</div>}>
+								<SentMessagesView
+									key={sentRefreshKey}
+									selectedId={selectedId}
+									onSelectEmail={handleEmailClick}
+									selectedIds={selectedIds}
+									onToggleSelect={toggleSelect}
+									searchQuery={search}
+								/>
+							</Suspense>
+						) : (
+							<InboxView
+								emails={inboxEmails}
+								selectedId={selectedId}
+								onSelectEmail={handleEmailClick}
+								selectedIds={selectedIds}
+								onToggleSelect={toggleSelect}
+								unreadCount={unreadCount}
+								loading={emailsLoading}
+								loadingMore={loadingMoreInbox}
+								hasMore={inboxEmails.length < inboxTotal}
+								onLoadMore={loadMoreInbox}
+							/>
+						)}
 					</main>
 				</div>
 				{expandedPreview && previewEmail && (
 					<div className="modal-overlay" onClick={() => setExpandedPreview(false)}>
 						<div className="expanded-preview-modal" onClick={(event) => event.stopPropagation()}>
-							<EmailPreview isModal email={previewEmail} onClose={() => setExpandedPreview(false)} onExpand={() => setExpandedPreview(false)} />
+							<EmailPreview isModal email={previewEmail} onClose={() => setExpandedPreview(false)} onExpand={() => setExpandedPreview(false)} onReply={() => handleReply(previewEmail)} onForward={() => handleForward(previewEmail)} />
 						</div>
 					</div>
 				)}
+				<ComposeModal
+					isOpen={composeOpen}
+					onClose={() => setComposeOpen(false)}
+					initialData={composeData}
+					onSent={() => {
+						setToast('Email sent successfully!');
+						setTimeout(() => setToast(''), 3000);
+						setSentRefreshKey((k) => k + 1);
+						setSentTotal((prev) => prev + 1);
+					}}
+				/>
 			</div>
 		);
 	}
@@ -1232,7 +1301,7 @@ function Dashboard() {
 		<div className="app-shell">
 			<div className={`sidebar-overlay ${mobileOpen ? 'show' : ''}`} onClick={() => setMobileOpen(false)} />
 			<div className={mobileOpen ? 'sidebar-wrap open' : 'sidebar-wrap'}>
-				<Sidebar active={active} onNavigate={(label) => { setActive(label); setMobileOpen(false); }} onClose={() => setMobileOpen(false)} unreadCount={unreadCount} />
+				<Sidebar active={active} onNavigate={(label) => { setActive(label); setMobileOpen(false); }} onClose={() => setMobileOpen(false)} unreadCount={unreadCount} sentCount={sentTotal} onCompose={() => { handleOpenCompose(); setMobileOpen(false); }} />
 			</div>
 			<div className="main-shell">
 				<Header search={search} setSearch={setSearch} onMenu={() => setMobileOpen(true)} onLogout={handleLogout} user={user} onNavigateSettings={() => navigate('/settings')} />
@@ -1286,11 +1355,13 @@ function Dashboard() {
 							title="Recent Emails"
 							loading={emailsLoading}
 							onOpenMailbox={() => setActive('Inbox')}
+							onOpenSent={() => setActive('Sent')}
+							sentCount={sentTotal}
 							onToggleStar={(id) => setRecentEmails((items) => items.map((item) => item.id === id ? { ...item, starred: !item.starred } : item))}
 							selectedIds={selectedIds}
 							onToggleSelect={toggleSelect}
 						/>
-						<EmailPreview email={previewEmail} onClose={() => { setSelectedId(null); setPreviewEmail(null); }} onExpand={() => setExpandedPreview(true)} />
+						<EmailPreview email={previewEmail} onClose={() => { setSelectedId(null); setPreviewEmail(null); }} onExpand={() => setExpandedPreview(true)} onReply={() => handleReply(previewEmail)} onForward={() => handleForward(previewEmail)} />
 					</div>
 				</main>
 			</div>
@@ -1298,10 +1369,21 @@ function Dashboard() {
 			{expandedPreview && previewEmail && (
 				<div className="modal-overlay" onClick={() => setExpandedPreview(false)}>
 					<div className="expanded-preview-modal" onClick={(event) => event.stopPropagation()}>
-						<EmailPreview isModal email={previewEmail} onClose={() => setExpandedPreview(false)} onExpand={() => setExpandedPreview(false)} />
+						<EmailPreview isModal email={previewEmail} onClose={() => setExpandedPreview(false)} onExpand={() => setExpandedPreview(false)} onReply={() => handleReply(previewEmail)} onForward={() => handleForward(previewEmail)} />
 					</div>
 				</div>
 			)}
+			<ComposeModal
+				isOpen={composeOpen}
+				onClose={() => setComposeOpen(false)}
+				initialData={composeData}
+				onSent={() => {
+					setToast('Email sent successfully!');
+					setTimeout(() => setToast(''), 3000);
+					setSentRefreshKey((k) => k + 1);
+					setSentTotal((prev) => prev + 1);
+				}}
+			/>
 		</div>
 	);
 }

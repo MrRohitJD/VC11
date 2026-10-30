@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import EmailDetailsModal, { formatEmailDate } from '../components/EmailDetailsModal';
+import ComposeModal from '../components/ComposeModal';
 import SearchActivity from '../components/SearchActivity';
 import {
 	approveRagEmail,
@@ -137,6 +138,7 @@ export default function AiAssistant({ user: propUser }) {
 	const [openingSessionId, setOpeningSessionId] = useState(null);
 	const [connection, setConnection] = useState({ state: 'checking', message: '' });
 	const [approvalFeedback, setApprovalFeedback] = useState({});
+	const [composeOpen, setComposeOpen] = useState(false);
 	const [draftReview, setDraftReview] = useState(null);
 	const [draftReviewBusy, setDraftReviewBusy] = useState(false);
 	const [draftReviewActionError, setDraftReviewActionError] = useState('');
@@ -544,7 +546,7 @@ export default function AiAssistant({ user: propUser }) {
 					<div className="brand-mark"><Mail size={18} /></div>
 					<span>Gmail AI <strong>Dashboard</strong></span>
 				</div>
-				<button className="compose-button" onClick={() => navigate('/dashboard')}>
+				<button className="compose-button" onClick={() => setComposeOpen(true)}>
 					<PenLine size={17} /> Compose
 				</button>
 				<div className="nav-group">
@@ -1167,6 +1169,8 @@ export default function AiAssistant({ user: propUser }) {
 					</section>
 				</div>
 			)}
+
+			<ComposeModal isOpen={composeOpen} onClose={() => setComposeOpen(false)} />
 		</div>
 	);
 }

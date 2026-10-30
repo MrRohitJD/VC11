@@ -93,6 +93,14 @@ SAMPLE_MAIL = (
     ("Open source issue discussion", "Code Community", "discuss@codecommunity.example", "Maintainers replied to your issue with suggestions for an API test and a documentation update.", 28, 7, 16, "CATEGORY_FORUMS", "TECHNICAL", "Community"),
 )
 
+SAMPLE_SENT_MAIL = (
+    ("Follow-up on project demo and architecture review", "Demo User", DEMO_EMAIL, "nikhil@northstar.example", "Hi Nikhil, thanks for your feedback on the architecture diagram. I have updated the API test cases and committed the changes to the repository.", 1, 15, 30, "CATEGORY_PERSONAL", "PROJECTS", "Project"),
+    ("Availability for software intern interview", "Demo User", DEMO_EMAIL, "maya@northstar.example", "Hi Maya, thank you for the invitation. Tuesday at 10:00 AM works well for me. Looking forward to speaking with you.", 2, 11, 20, "CATEGORY_PERSONAL", "JOB", "Career"),
+    ("Updated draft of mailbox assistant paper", "Demo User", DEMO_EMAIL, "rao@university.example", "Dear Professor Rao, please find attached the revised draft of our paper incorporating your suggestions on evaluation metrics and user isolation.", 4, 16, 45, "CATEGORY_PERSONAL", "EDUCATION", "University"),
+    ("Query regarding scholarship document submission", "Demo User", DEMO_EMAIL, "scholarships@university.example", "Dear Student Services, I have submitted my official transcript and statement of purpose for the scholarship application. Could you confirm receipt?", 7, 10, 15, "CATEGORY_PERSONAL", "EDUCATION", "University"),
+    ("Thank you for the mentor discussion", "Demo User", DEMO_EMAIL, "devika@mentor.example", "Hi Devika, thanks for taking the time to discuss internship preparation. I will refine the resume summary as suggested before the career fair.", 12, 17, 10, "CATEGORY_PERSONAL", "MEETINGS", "Career"),
+)
+
 
 ADDITIONAL_DEMO_THEMES = (
     ("Research briefing", "NEWSLETTERS", "Research", "research"),
@@ -205,7 +213,7 @@ def seed_demo_mailbox(db: Session) -> User:
     account.ai_classification_enabled = True
 
     specs = [("INBOX", "INBOX", "system"), ("IMPORTANT", "IMPORTANT", "system"),
-             ("STARRED", "STARRED", "system")]
+             ("STARRED", "STARRED", "system"), ("SENT", "SENT", "system")]
     specs += [(key, name, "system") for key, name in GMAIL_CATEGORIES]
     specs += [(f"AI_{name}", name, "ai") for name in AI_DESCRIPTIONS]
     personal_labels = {row[9] for row in SAMPLE_MAIL}
@@ -286,6 +294,42 @@ def seed_demo_mailbox(db: Session) -> User:
                                        is_current=True, classified_at=now))
         elif existing_classification.model_name == "synthetic-demo":
             existing_classification.confidence_score = None
+
+    for s_idx, (subject, sender_name, sender, recipient, body, days, hour, minute,
+                gmail_category, ai_category, personal_label) in enumerate(SAMPLE_SENT_MAIL, 1):
+        message_id = f"synthetic-demo-sent-{s_idx:03d}"
+        email = existing.get(message_id)
+        if email is None:
+            received_at = (now - timedelta(days=days)).replace(hour=hour, minute=minute,
+                                                               second=0, microsecond=0)
+            if received_at > now:
+                received_at -= timedelta(days=1)
+            email = Email(gmail_account_id=account.id, gmail_message_id=message_id,
+                          thread_id=f"synthetic-thread-sent-{s_idx:03d}",
+                          from_email=sender, sender_name=sender_name, to_email=recipient,
+                          subject=subject, snippet=body[:160], body=body,
+                          received_at=received_at, is_read=True, is_starred=False)
+            db.add(email)
+            db.flush()
+        label_keys = {"SENT", gmail_category, f"AI_{ai_category}",
+                      f"DEMO_{personal_label.upper()}"}
+        for key in label_keys:
+            if key in labels:
+                pair = (email.id, labels[key].id)
+                if pair not in links:
+                    db.add(EmailLabel(email_id=email.id, label_id=labels[key].id,
+                                      gmail_account_id=account.id))
+                    links.add(pair)
+        existing_classification = db.scalar(select(EmailClassification).where(
+                EmailClassification.email_id == email.id,
+                EmailClassification.is_current.is_(True)))
+        if existing_classification is None and ai_category in categories:
+            db.add(EmailClassification(email_id=email.id,
+                                       category_id=categories[ai_category].id,
+                                       model_name="synthetic-demo",
+                                       classification_status="SUCCEEDED",
+                                       classification_reason="Assigned by the demo fixture",
+                                       is_current=True, classified_at=now))
     db.commit()
     db.refresh(user)
     return user
