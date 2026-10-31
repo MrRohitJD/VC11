@@ -38,6 +38,24 @@ def _digest(value: str) -> str:
     return hmac.new(settings.session_secret.encode(), value.encode(), hashlib.sha256).hexdigest()
 
 
+def _extract_client_ip(request: Request) -> str:
+    """Extract client IP respecting trusted proxy configurations."""
+    trusted_proxies_cfg = getattr(settings, "trusted_proxies", "")
+    trusted = [p.strip() for p in trusted_proxies_cfg.split(",") if p.strip()] if isinstance(trusted_proxies_cfg, str) else []
+    client_host = request.client.host if request.client else "unknown"
+    if trusted and client_host in trusted:
+        xff = request.headers.get("x-forwarded-for", "")
+        if xff:
+            client_host = xff.split(",")[0].strip()
+    return client_host
+
+
+def _digest_ip(ip: str) -> str:
+    """Hash IP address using HMAC-SHA256 for privacy protection."""
+    secret = settings.session_secret
+    return hmac.new(secret.encode(), f"demo-ip:{ip}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
 def _visitor_id(request: Request) -> str | None:
     raw_cookie = request.cookies.get(DEMO_VISITOR_COOKIE, "")
     visitor, separator, signature = raw_cookie.partition(".")
@@ -204,6 +222,47 @@ def reserve_chat_request(db: Session, request: Request, user: User) -> ChatConcu
                 ),
                 headers={"Retry-After": str(retry_after)},
             )
+
+        # For demo users, enforce additional IP-level and global daily capacity protections
+        if user.is_demo:
+            ip_str = _extract_client_ip(request)
+            ip_identity = f"network_quota:ip:{_digest_ip(ip_str)}"
+            ip_limit = getattr(settings, "demo_ip_daily_limit", 25)
+
+            _lock_identity(db, ip_identity)
+            ip_quota = db.get(ChatQuota, (ip_identity, day))
+            if ip_quota is None:
+                ip_quota = ChatQuota(identity=ip_identity, day=day, count=0)
+                db.add(ip_quota)
+                db.flush()
+            if ip_quota.count >= ip_limit:
+                next_reset = datetime.combine(day + timedelta(days=1), datetime_time.min, tzinfo=timezone.utc)
+                retry_after = max(1, math.ceil((next_reset - now).total_seconds()))
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Daily assistant limit reached for this IP network ({ip_limit} requests per day). Try again tomorrow or sign in.",
+                    headers={"Retry-After": str(retry_after)},
+                )
+            ip_quota.count += 1
+
+            # Global demo aggregate daily budget limit
+            global_identity = "global_quota:demo"
+            global_limit = getattr(settings, "demo_global_daily_limit", 500)
+            _lock_identity(db, global_identity)
+            global_quota = db.get(ChatQuota, (global_identity, day))
+            if global_quota is None:
+                global_quota = ChatQuota(identity=global_identity, day=day, count=0)
+                db.add(global_quota)
+                db.flush()
+            if global_quota.count >= global_limit:
+                next_reset = datetime.combine(day + timedelta(days=1), datetime_time.min, tzinfo=timezone.utc)
+                retry_after = max(1, math.ceil((next_reset - now).total_seconds()))
+                raise HTTPException(
+                    status_code=429,
+                    detail="Daily global demo query capacity reached. Try again tomorrow or sign in with Google.",
+                    headers={"Retry-After": str(retry_after)},
+                )
+            global_quota.count += 1
 
         quota.count += 1
         db.add(ChatRequestLeaseRecord(

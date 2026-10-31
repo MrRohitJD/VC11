@@ -27,8 +27,14 @@ class Settings(BaseSettings):
     oauth_redirect_uri: str = Field("http://localhost:8000/api/auth/callback", validation_alias=AliasChoices("OAUTH_GOOGLE_REDIRECT_URI", "GOOGLE_REDIRECT_URI"))
     backend_url: str = "http://localhost:8000"
     frontend_url: str = "http://localhost:5173"
+    environment: str = Field("development", validation_alias=AliasChoices("ENVIRONMENT", "NODE_ENV", "APP_ENV"))
     session_secret: str = "change-this-session-secret"
     developer_settings_encryption_key: str = ""
+    developer_settings_legacy_encryption_key: str = Field("", validation_alias=AliasChoices("DEVELOPER_SETTINGS_LEGACY_ENCRYPTION_KEY", "LEGACY_ENCRYPTION_KEY"))
+    developer_database_allow_private_networking: bool = Field(False, validation_alias=AliasChoices("DEVELOPER_DATABASE_ALLOW_PRIVATE_NETWORKING"))
+    trusted_proxies: str = Field("", validation_alias=AliasChoices("TRUSTED_PROXIES"))
+    demo_ip_daily_limit: int = Field(25, ge=1, le=1000, validation_alias=AliasChoices("DEMO_IP_DAILY_LIMIT"))
+    demo_global_daily_limit: int = Field(500, ge=10, le=100000, validation_alias=AliasChoices("DEMO_GLOBAL_DAILY_LIMIT"))
     developer_gemini_model: str = "gemini-2.5-flash"
     developer_openai_model: str = "gpt-4.1-mini"
     developer_daily_chat_limit: int = Field(500, ge=1, le=10000, validation_alias=AliasChoices("DEVELOPER_DAILY_CHAT_LIMIT"))
@@ -107,6 +113,35 @@ class Settings(BaseSettings):
             return "postgresql+psycopg://" + value[len("postgres://"):]
         if value.startswith("postgresql://"):
             return "postgresql+psycopg://" + value[len("postgresql://"):]
+        return value
+
+    @field_validator("session_secret")
+    @classmethod
+    def validate_session_secret(cls, value: str, info) -> str:
+        env = str(info.data.get("environment", "")).lower()
+        is_production = env in {"production", "prod"}
+        if is_production:
+            if not value or value == "change-this-session-secret" or len(value.strip()) < 32:
+                raise ValueError(
+                    "SESSION_SECRET must be explicitly set to a high-entropy string (min 32 chars) in production."
+                )
+        return value
+
+    @field_validator("developer_settings_encryption_key")
+    @classmethod
+    def validate_developer_settings_encryption_key(cls, value: str, info) -> str:
+        env = str(info.data.get("environment", "")).lower()
+        is_production = env in {"production", "prod"}
+        session_sec = str(info.data.get("session_secret", ""))
+        if value:
+            if value == session_sec and value != "":
+                raise ValueError(
+                    "DEVELOPER_SETTINGS_ENCRYPTION_KEY must be distinct from SESSION_SECRET."
+                )
+            if len(value.strip()) < 32 and is_production:
+                raise ValueError(
+                    "DEVELOPER_SETTINGS_ENCRYPTION_KEY must be at least 32 characters in production."
+                )
         return value
 
     model_config = SettingsConfigDict(

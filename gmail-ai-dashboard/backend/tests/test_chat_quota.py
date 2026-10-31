@@ -83,38 +83,38 @@ def test_demo_cookie_is_reused_on_reentry():
     assert _demo_cookie(_request(cookie=cookie)) == cookie
 
 
-def test_demo_allows_two_concurrent_requests_and_does_not_charge_rejected_request(db):
+def test_demo_allows_four_concurrent_requests_and_does_not_charge_rejected_request(db):
     user = SimpleNamespace(id=uuid4(), is_demo=True)
     cookie = _demo_cookie(_request())
-    first = reserve_chat_request(db, _request(cookie=cookie), user)
-    second = reserve_chat_request(db, _request(cookie=cookie), user)
+    leases = [reserve_chat_request(db, _request(cookie=cookie), user) for _ in range(4)]
 
     with pytest.raises(HTTPException) as error:
         reserve_chat_request(db, _request(cookie=cookie), user)
     assert error.value.status_code == 429
-    assert "2 assistant requests" in error.value.detail
-    assert db.scalar(select(ChatQuota.count).where(ChatQuota.identity.like("demo:%"))) == 2
+    assert "4 assistant requests" in error.value.detail
+    assert db.scalar(select(ChatQuota.count).where(ChatQuota.identity.like("demo:%"))) == 4
 
-    first.release()
-    third = reserve_chat_request(db, _request(cookie=cookie), user)
-    assert db.scalar(select(ChatQuota.count).where(ChatQuota.identity.like("demo:%"))) == 3
-    second.release()
-    third.release()
+    leases[0].release()
+    fifth = reserve_chat_request(db, _request(cookie=cookie), user)
+    assert db.scalar(select(ChatQuota.count).where(ChatQuota.identity.like("demo:%"))) == 5
+    for lease in leases[1:]:
+        lease.release()
+    fifth.release()
 
 
-def test_signed_in_users_can_run_four_requests_concurrently(db):
+def test_signed_in_users_can_run_five_requests_concurrently(db):
     user = SimpleNamespace(id=uuid4(), is_demo=False)
-    leases = [reserve_chat_request(db, _request(), user) for _ in range(4)]
+    leases = [reserve_chat_request(db, _request(), user) for _ in range(5)]
 
     with pytest.raises(HTTPException) as error:
         reserve_chat_request(db, _request(), user)
     assert error.value.status_code == 429
-    assert "4 assistant requests" in error.value.detail
-    assert db.scalar(select(ChatQuota.count).where(ChatQuota.identity == f"user:{user.id}")) == 4
+    assert "5 assistant requests" in error.value.detail
+    assert db.scalar(select(ChatQuota.count).where(ChatQuota.identity == f"user:{user.id}")) == 5
 
     leases[0].release()
-    fifth = reserve_chat_request(db, _request(), user)
-    assert db.scalar(select(ChatQuota.count).where(ChatQuota.identity == f"user:{user.id}")) == 5
+    sixth = reserve_chat_request(db, _request(), user)
+    assert db.scalar(select(ChatQuota.count).where(ChatQuota.identity == f"user:{user.id}")) == 6
     for lease in leases[1:]:
         lease.release()
-    fifth.release()
+    sixth.release()

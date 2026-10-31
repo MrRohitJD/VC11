@@ -1,1 +1,66 @@
+# Set default behavior: auto detect text files and normalize to LF
+* text=auto eol=lf
+
+# ------------------------------------------------------------------------------
+# Shell Scripts & Container Executables (MUST use LF for Linux / Docker / Heroku)
+# ------------------------------------------------------------------------------
 *.sh text eol=lf
+Dockerfile text eol=lf
+Procfile text eol=lf
+heroku.yml text eol=lf
+
+# ------------------------------------------------------------------------------
+# Source Code & Configs (Enforce LF across platforms)
+# ------------------------------------------------------------------------------
+*.py text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.sql text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.scss text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+.dockerignore text eol=lf
+
+# ------------------------------------------------------------------------------
+# Windows-specific Scripts
+# ------------------------------------------------------------------------------
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# ------------------------------------------------------------------------------
+# Binary Assets (Prevent line ending conversions and diff corruptions)
+# ------------------------------------------------------------------------------
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.svg text eol=lf
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.otf binary
+*.pdf binary
+*.zip binary
+*.tar.gz binary
+*.tgz binary
+*.gz binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+*.pkl binary
+*.joblib binary

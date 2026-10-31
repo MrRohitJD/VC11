@@ -16,8 +16,9 @@ from app.models.rag import Base as RagBase
 import app.models.chat_quota  # noqa: F401
 import app.models.llm  # noqa: F401
 from app.services.developer_settings import (
-    encrypt, normalized_database_url, public_settings,
-    verify_personal_database,
+    encrypt, decrypt, normalized_database_url, public_settings,
+    verify_personal_database, ensure_personal_identity,
+    clear_personal_db_status, set_personal_db_fallback,
 )
 
 router = APIRouter(prefix="/api/developer", tags=["developer"])
@@ -90,23 +91,19 @@ def update_developer_settings(body: DeveloperSettingsUpdate,
             raise HTTPException(503, str(exc)) from exc
     if body.clear_database:
         owner.developer_database_url = None
+        clear_personal_db_status(owner.id)
     elif body.database_url is not None and body.database_url.strip():
         try:
             url = normalized_database_url(body.database_url)
             verify_personal_database(url)
         except (ValueError, SQLAlchemyError, OSError) as exc:
-            # Never return a driver exception: it may contain the password.
+            # Never return a raw driver exception: it may contain passwords or leak internal topology
             if isinstance(exc, ValueError):
                 raise HTTPException(400, str(exc)) from exc
-            if isinstance(exc, OperationalError):
-                message = str(exc.orig).lower()
-                if any(term in message for term in ("timeout", "timed out", "network is unreachable", "could not translate host", "name or service not known")):
-                    raise HTTPException(400, "Could not reach the database. For Supabase, try the Session pooler connection string from Connect (port 5432), especially if this server has no IPv6 access") from exc
-                if any(term in message for term in ("password authentication failed", "invalid password", "invalid user", "tenant or user not found")):
-                    raise HTTPException(400, "Database authentication failed. Check the username and password in the connection string") from exc
-            raise HTTPException(400, "Could not connect to the database") from exc
+            raise HTTPException(400, "Could not connect to the database. Please verify your connection credentials and ensure the database host is reachable.") from exc
         try:
             owner.developer_database_url = encrypt(url)
+            clear_personal_db_status(owner.id)
         except ValueError as exc:
             raise HTTPException(503, str(exc)) from exc
 
@@ -127,3 +124,37 @@ def update_developer_settings(body: DeveloperSettingsUpdate,
 
     db.commit()
     return public_settings(owner)
+
+
+@router.post("/reconnect")
+def reconnect_personal_database(user: User = Depends(get_current_user),
+                                db: Session = Depends(central_db)):
+    """Test and re-establish connection to a configured personal database."""
+    if user.is_demo:
+        raise HTTPException(403, "Developer settings are unavailable in the demo")
+    owner = db.get(User, user.id)
+    if not owner.developer_database_url:
+        raise HTTPException(400, "No personal database is currently configured")
+    try:
+        url = decrypt(owner.developer_database_url)
+    except Exception as exc:
+        raise HTTPException(400, "Personal database credentials could not be decrypted. Please enter your connection URL again.") from exc
+
+    try:
+        verify_personal_database(url)
+        ensure_personal_identity(owner, url)
+        clear_personal_db_status(owner.id)
+    except Exception as exc:
+        safe_msg = (
+            "Unable to connect to your personal database due to invalid credentials or a connection error. "
+            "VC11 has automatically switched to the default application database. "
+            "Your data operations will continue using the application database."
+        )
+        set_personal_db_fallback(owner.id, safe_msg)
+        raise HTTPException(400, "Could not reconnect to personal database. Please verify that the database server is running and accessible.") from exc
+
+    return {
+        "status": "connected",
+        "database_mode": "PERSONAL_ACTIVE",
+        "message": "Successfully reconnected to personal database.",
+    }

@@ -30,6 +30,7 @@ export const logout = () => api.post('/api/auth/logout');
 export const eraseAllData = () => api.delete('/api/auth/erase');
 export const getDeveloperSettings = () => api.get('/api/developer');
 export const updateDeveloperSettings = (changes) => api.put('/api/developer', changes);
+export const reconnectDeveloperDatabase = () => api.post('/api/developer/reconnect');
 export const getDeveloperSchemaUrl = () => `${API_BASE}/api/developer/schema.sql`;
 
 export const startSync = () => api.post('/api/gmail/sync');

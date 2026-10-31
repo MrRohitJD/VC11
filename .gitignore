@@ -1,17 +1,119 @@
-__pycache__/
-*.py[cod]
-.pytest_cache/
-venv/
-.venv/
-env/
-node_modules/
-dist/
-*.db
-*.sqlite
-*.sqlite3
-*.log
+# ==============================================================================
+# Environment Variables & Secrets
+# ==============================================================================
 .env
 .env.*
 !.env.example
-gmail-ai-dashboard/backend/data/
+!.env.template
+credentials/
+**/credentials.json
+**/token.json
+*.pem
+*.key
+*.cert
+*.crt
 
+# ==============================================================================
+# Python & Virtual Environments
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.pyo
+
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ==============================================================================
+# Testing, Linting & Coverage
+# ==============================================================================
+.pytest_cache/
+.pytest_tmp*/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.hypothesis/
+coverage.xml
+nosetests.xml
+
+# ==============================================================================
+# Node.js & Frontend Build Outputs
+# ==============================================================================
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+dist-ssr/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.turbo/
+
+# ==============================================================================
+# Databases, Models & Local Application Data
+# ==============================================================================
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.sql.bak
+*.pkl
+*.joblib
+gmail-ai-dashboard/backend/data/
+/data/
+
+# Private or local datasets
+*.csv
+!gmail-ai-dashboard/dataset/sample.csv
+
+# ==============================================================================
+# Logs & Diagnostic Outputs
+# ==============================================================================
+*.log
+logs/
+
+# ==============================================================================
+# Jupyter & Notebooks
+# ==============================================================================
+.ipynb_checkpoints/
+
+# ==============================================================================
+# Agentic, Customization & Skill Artifacts
+# ==============================================================================
+.agents/
+skills-lock.json
+.gemini/
+.system_generated/
+
+# ==============================================================================
+# Operating System & IDE Specific Files
+# ==============================================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*~

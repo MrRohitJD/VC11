@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
-from app.services.developer_settings import database_url_context
+from app.services.developer_settings import database_url_context, get_pinned_hostaddr
 import app.models.llm  # noqa: F401 - registers job mapper before sessions are used
 import app.models.chat_quota  # noqa: F401 - registers quota and concurrency lease mappers
 import app.models.rag  # noqa: F401 - registers mailbox index and history mappers
@@ -38,8 +38,12 @@ CentralSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=Fals
 @lru_cache(maxsize=32)
 def _personal_engine(url: str) -> Engine:
     # Never retain a pool of connections to user-supplied servers.
+    connect_args: dict[str, object] = {"connect_timeout": 5}
+    pinned_ip = get_pinned_hostaddr(url)
+    if pinned_ip:
+        connect_args["hostaddr"] = pinned_ip
     return create_engine(url, poolclass=NullPool, pool_pre_ping=True,
-                         connect_args={"connect_timeout": 5})
+                         connect_args=connect_args)
 
 
 def SessionLocal() -> Session:

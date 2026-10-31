@@ -17,7 +17,11 @@ from app.core.config import settings
 from app.database.connection import init_db, SessionLocal, CentralSessionLocal
 from app.core.security import get_current_user, session_user_id
 from app.models.email import User
-from app.services.developer_settings import decrypt, database_url_context, llm_key_context, ensure_personal_identity
+from app.services.developer_settings import (
+    decrypt, database_url_context, llm_key_context, ensure_personal_identity,
+    DatabaseRoutingMode, database_routing_mode_context, database_fallback_reason_context,
+    set_personal_db_fallback, clear_personal_db_status, get_personal_db_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,37 +53,88 @@ app = FastAPI(title="Gmail AI Dashboard API", lifespan=lifespan)
 @app.middleware("http")
 async def route_developer_connections(request: Request, call_next):
     path = request.url.path
-    # Identity and developer credentials always live in the deployment database.
     central_paths = ("/api/auth/google", "/api/auth/callback", "/auth/google/callback",
-                     "/api/auth/demo", "/api/auth/logout", "/api/auth/me",
-                     "/api/developer")
+                     "/api/auth/demo", "/api/auth/logout")
     if not path.startswith("/api/") or path.startswith(central_paths):
         return await call_next(request)
     try:
         user_id = session_user_id(request)
     except HTTPException:
         return await call_next(request)
+
+    url = None
+    provider_key = None
+    mode = DatabaseRoutingMode.APP_DEFAULT.value
+    fallback_reason = None
+
     with CentralSessionLocal() as db:
         owner = db.get(User, user_id)
-        if owner is None or owner.is_demo:
-            return await call_next(request)
-        url = decrypt(owner.developer_database_url)
-        provider_key = (owner.developer_llm_provider, decrypt(owner.developer_llm_api_key)) if owner.developer_llm_api_key else None
-        if url:
-            try:
-                ensure_personal_identity(owner, url)
-            except Exception as exc:
-                logger.error("Personal database identity could not be updated for user %s: %s", user_id, type(exc).__name__)
-                # Keep mailbox access on the app database while the optional
-                # personal connection is unavailable.
-                url = None
+        if owner is not None and not owner.is_demo:
+            if owner.developer_llm_api_key:
+                try:
+                    decrypted_key = decrypt(owner.developer_llm_api_key)
+                    provider_key = (owner.developer_llm_provider, decrypted_key)
+                except Exception as exc:
+                    logger.warning("Could not decrypt developer LLM key for user %s: %s", user_id, type(exc).__name__)
+
+            if owner.developer_database_url:
+                try:
+                    url = decrypt(owner.developer_database_url)
+                except Exception as exc:
+                    logger.warning("Could not decrypt developer database URL for user %s: %s", user_id, type(exc).__name__)
+                    url = None
+                    fallback_reason = (
+                        "Unable to connect to your personal database due to invalid credentials or a connection error. "
+                        "VC11 has automatically switched to the default application database. "
+                        "Your data operations will continue using the application database."
+                    )
+                    set_personal_db_fallback(user_id, fallback_reason)
+                    mode = DatabaseRoutingMode.APP_FALLBACK.value
+
+                if url:
+                    # Check if personal database is in cooldown from prior failure
+                    cached_fallback = get_personal_db_status(user_id)
+                    if cached_fallback:
+                        mode = DatabaseRoutingMode.APP_FALLBACK.value
+                        fallback_reason = cached_fallback.get("reason")
+                        url = None
+                    else:
+                        try:
+                            ensure_personal_identity(owner, url)
+                            mode = DatabaseRoutingMode.PERSONAL_ACTIVE.value
+                            clear_personal_db_status(user_id)
+                        except Exception as exc:
+                            logger.error("Personal database connection failed for user %s: %s", user_id, type(exc).__name__)
+                            # Automatic fallback to application database
+                            url = None
+                            mode = DatabaseRoutingMode.APP_FALLBACK.value
+                            fallback_reason = (
+                                "Unable to connect to your personal database due to invalid credentials or a connection error. "
+                                "VC11 has automatically switched to the default application database. "
+                                "Your data operations will continue using the application database."
+                            )
+                            set_personal_db_fallback(user_id, fallback_reason)
+
+    # For settings routes, queries always execute against CentralSessionLocal
+    if path in ("/api/developer", "/api/auth/me"):
+        url = None
+
     db_token = database_url_context.set(url)
     key_token = llm_key_context.set(provider_key)
+    mode_token = database_routing_mode_context.set(mode)
+    reason_token = database_fallback_reason_context.set(fallback_reason)
+
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["X-Database-Mode"] = mode
+        if fallback_reason:
+            response.headers["X-Database-Fallback-Reason"] = fallback_reason
+        return response
     finally:
         database_url_context.reset(db_token)
         llm_key_context.reset(key_token)
+        database_routing_mode_context.reset(mode_token)
+        database_fallback_reason_context.reset(reason_token)
 OLD_HEROKU_HOST = "ai-powered-gmail-0007703734bc.herokuapp.com"
 allowed_origins = [settings.frontend_url]
 if OLD_HEROKU_HOST not in settings.frontend_url:

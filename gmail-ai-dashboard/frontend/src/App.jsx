@@ -15,7 +15,7 @@ import AiAssistant from './pages/AiAssistant';
 import { PublicHome, PrivacyPolicy, TermsOfService } from './pages/PublicPages';
 import ComposeModal from './components/ComposeModal';
 const SentMessagesView = lazy(() => import('./components/SentMessagesView'));
-import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex, enterDemo, getDeveloperSettings, updateDeveloperSettings, getDeveloperSchemaUrl } from './services/api';
+import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex, enterDemo, getDeveloperSettings, updateDeveloperSettings, reconnectDeveloperDatabase, getDeveloperSchemaUrl } from './services/api';
 
 const navItems = [
 	{ label: 'Inbox', icon: Inbox }, { label: 'Starred', icon: Star },
@@ -585,6 +585,25 @@ function SettingsPage() {
 			.catch(() => setDeveloperMessage('Developer settings are unavailable right now.'));
 	}, [user?.id, user?.is_demo]);
 
+	const handleReconnectDatabase = async () => {
+		developerSettingsRevision.current += 1;
+		setDeveloperSaving(true);
+		setDeveloperMessage('');
+		setDeveloperMessageType('');
+		try {
+			const { data } = await reconnectDeveloperDatabase();
+			setDeveloperSettings(data);
+			setDeveloperMessage('Successfully reconnected to your personal database.');
+			setDeveloperMessageType('success');
+		} catch (err) {
+			const reason = err?.response?.data?.detail || 'Personal database connection failed.';
+			setDeveloperMessage(reason + ' VC11 continues operating using the application database.');
+			setDeveloperMessageType('error');
+		} finally {
+			setDeveloperSaving(false);
+		}
+	};
+
 	const saveDeveloperSettings = async (changes) => {
 		developerSettingsRevision.current += 1;
 		setDeveloperSaving(true);
@@ -738,9 +757,57 @@ function SettingsPage() {
 				<p className="settings-desc">Connect your own PostgreSQL database and use your own Google Gemini or OpenAI API key. Each setting can be used independently. Leave them empty to use this app's current defaults.</p>
 				<label htmlFor="developer-database-url">Database URL</label>
 				<input id="developer-database-url" type="password" autoComplete="off" placeholder="postgresql://user:password@host:5432/database" value={developerDatabaseUrl} onChange={(event) => setDeveloperDatabaseUrl(event.target.value)} />
+				<div className="database-mode-status" style={{ margin: '8px 0 12px 0' }}>
+					<span style={{ fontWeight: 600, marginRight: '8px' }}>Active Database:</span>
+					{developerSettings?.database_mode === 'PERSONAL_ACTIVE' && (
+						<span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: '4px', fontSize: '0.85rem', fontWeight: 600, background: '#d4edda', color: '#155724' }}>
+							Personal Database (Active)
+						</span>
+					)}
+					{developerSettings?.database_mode === 'APP_FALLBACK' && (
+						<span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: '4px', fontSize: '0.85rem', fontWeight: 600, background: '#fff3cd', color: '#856404' }}>
+							Application Database (Fallback Active)
+						</span>
+					)}
+					{(!developerSettings?.database_mode || developerSettings?.database_mode === 'APP_DEFAULT') && (
+						<span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: '4px', fontSize: '0.85rem', fontWeight: 600, background: '#e2e3e5', color: '#383d41' }}>
+							Application Database (Default)
+						</span>
+					)}
+				</div>
+				{developerSettings?.fallback_notice && (
+					<div className="database-fallback-banner" role="alert" style={{
+						background: '#fff3cd',
+						border: '1px solid #ffeeba',
+						borderRadius: '6px',
+						padding: '12px 16px',
+						margin: '12px 0',
+						color: '#856404'
+					}}>
+						<div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600, marginBottom: '6px' }}>
+							<AlertTriangle size={18} />
+							<span>{developerSettings.fallback_notice.title}</span>
+						</div>
+						<p style={{ margin: '0 0 10px 0', fontSize: '0.9rem', lineHeight: '1.4' }}>
+							{developerSettings.fallback_notice.message}
+						</p>
+						<div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+							<button
+								type="button"
+								className="settings-btn"
+								disabled={developerSaving}
+								onClick={handleReconnectDatabase}
+								style={{ fontSize: '0.85rem', padding: '5px 12px' }}
+							>
+								Retry Connection
+							</button>
+							<small style={{ color: '#6c757d' }}>Your saved personal database settings remain securely stored.</small>
+						</div>
+					</div>
+				)}
 				{developerSettings?.database_configured
-					? <p className="settings-desc developer-database-connected" role="status"><span aria-hidden="true">✓</span> Connected to {developerSettings.database_url_display}</p>
-					: <p className="settings-desc" role="status">You are connected to the app database.</p>}
+					? <p className="settings-desc developer-database-connected" role="status"><span aria-hidden="true">✓</span> Saved personal database: {developerSettings.database_url_display}</p>
+					: <p className="settings-desc" role="status">You are using the default central application database.</p>}
 				<p className="settings-desc">For Supabase, use the Session pooler connection string from Connect (port 5432). Download and apply this app's schema in Supabase SQL Editor first. Existing app mail and assistant history stay in the app database. New syncs and assistant activity use your connected database.</p>
 				<div className="developer-actions">
 					<a className="settings-btn" href={getDeveloperSchemaUrl()} download="gmail-ai-dashboard-schema.sql">Download database schema</a>

@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VC11 — Interactive 3D Architecture Visualizer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #090d16;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
+    }
+    #canvas-container {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 1;
+    }
+    /* UI Overlay */
+    header {
+      position: absolute;
+      top: 16px;
+      left: 20px;
+      z-index: 10;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 14px 20px;
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    header h1 {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    header h1 span.badge {
+      background: #3b82f6;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 20px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    header p {
+      font-size: 12px;
+      color: #94a3b8;
+      margin-top: 4px;
+    }
+    
+    /* Control Toolbar */
+    .controls-bar {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 10px 18px;
+      border-radius: 30px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+    }
+    .btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #e2e8f0;
+      padding: 7px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn:hover {
+      background: rgba(255, 255, 255, 0.18);
+      color: #fff;
+      border-color: #3b82f6;
+    }
+    .btn.active {
+      background: #2563eb;
+      border-color: #3b82f6;
+      color: #fff;
+    }
+
+    /* Zone Legend */
+    .zone-legend {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      z-index: 10;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 12px 16px;
+      border-radius: 12px;
+      font-size: 11px;
+      max-width: 220px;
+    }
+    .zone-legend h4 {
+      font-size: 12px;
+      font-weight: 700;
+      color: #cbd5e1;
+      margin-bottom: 8px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+      cursor: pointer;
+      padding: 2px 4px;
+      border-radius: 4px;
+      transition: background 0.15s;
+    }
+    .legend-item:hover {
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    /* Inspector Side Drawer */
+    #inspector {
+      position: absolute;
+      top: 16px;
+      right: 20px;
+      bottom: 16px;
+      width: 440px;
+      background: rgba(15, 23, 42, 0.95);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 16px;
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      box-shadow: -10px 0 40px rgba(0,0,0,0.7);
+      transform: translateX(470px);
+      transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    #inspector.open {
+      transform: translateX(0);
+    }
+    .inspector-header {
+      padding: 18px 20px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+    .inspector-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #fff;
+    }
+    .inspector-zone {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 3px 8px;
+      border-radius: 4px;
+      margin-top: 6px;
+    }
+    .close-btn {
+      background: none;
+      border: none;
+      color: #94a3b8;
+      font-size: 22px;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .close-btn:hover { color: #fff; }
+    .inspector-body {
+      padding: 20px;
+      overflow-y: auto;
+      flex: 1;
+    }
+    .field-group {
+      margin-bottom: 16px;
+    }
+    .field-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #94a3b8;
+      font-weight: 700;
+      margin-bottom: 5px;
+    }
+    .field-value {
+      font-size: 13px;
+      line-height: 1.5;
+      color: #e2e8f0;
+      word-break: break-word;
+    }
+    .field-value code {
+      background: rgba(0,0,0,0.4);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'SFMono-Regular', Consolas, Monaco, monospace;
+      font-size: 12px;
+      color: #60a5fa;
+    }
+    .tag-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 4px;
+    }
+    .tag {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+    }
+    .hint-box {
+      background: rgba(59, 130, 246, 0.1);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      color: #93c5fd;
+      margin-top: 14px;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>VC11 Architecture Map <span class="badge">3D Interactive</span></h1>
+    <p>Click any node to inspect internals • Drag to rotate • Scroll to zoom • Right-click to pan</p>
+  </header>
+
+  <div class="controls-bar">
+    <button class="btn" id="btn-reset">Reset View</button>
+    <button class="btn active" id="btn-rotate">Auto-Rotate</button>
+    <button class="btn" id="btn-filter-all">Show All</button>
+  </div>
+
+  <div class="zone-legend">
+    <h4>Architecture Zones</h4>
+    <div class="legend-item" data-zone="Frontend"><div class="dot" style="background:#06b6d4;"></div> Frontend Layer</div>
+    <div class="legend-item" data-zone="Backend"><div class="dot" style="background:#3b82f6;"></div> Backend (FastAPI)</div>
+    <div class="legend-item" data-zone="Database"><div class="dot" style="background:#10b981;"></div> Database (PostgreSQL)</div>
+    <div class="legend-item" data-zone="AI/RAG"><div class="dot" style="background:#a855f7;"></div> AI & RAG Subsystem</div>
+    <div class="legend-item" data-zone="Agents"><div class="dot" style="background:#f59e0b;"></div> Agent & Tools Layer</div>
+    <div class="legend-item" data-zone="MCP"><div class="dot" style="background:#f97316;"></div> MCP Protocol Layer</div>
+    <div class="legend-item" data-zone="Gmail"><div class="dot" style="background:#ef4444;"></div> Gmail & OAuth</div>
+    <div class="legend-item" data-zone="Infra"><div class="dot" style="background:#6366f1;"></div> Infrastructure & Cloud</div>
+  </div>
+
+  <div id="inspector">
+    <div class="inspector-header">
+      <div>
+        <div class="inspector-title" id="insp-name">Component Name</div>
+        <div class="inspector-zone" id="insp-zone" style="background:#3b82f6; color:#fff;">ZONE</div>
+      </div>
+      <button class="close-btn" id="insp-close">&times;</button>
+    </div>
+    <div class="inspector-body">
+      <div class="field-group">
+        <div class="field-label">Responsibility</div>
+        <div class="field-value" id="insp-desc">Description of component.</div>
+      </div>
+      <div class="field-group">
+        <div class="field-label">Source File</div>
+        <div class="field-value"><code id="insp-file">path/to/file.py</code></div>
+      </div>
+      <div class="field-group">
+        <div class="field-label">Associated Technologies</div>
+        <div class="tag-list" id="insp-tech"></div>
+      </div>
+      <div class="field-group" id="grp-endpoints">
+        <div class="field-label">API Endpoints</div>
+        <div class="field-value" id="insp-endpoints"></div>
+      </div>
+      <div class="field-group" id="grp-tables">
+        <div class="field-label">Database Tables</div>
+        <div class="field-value" id="insp-tables"></div>
+      </div>
+      <div class="field-group">
+        <div class="field-label">Connected Components</div>
+        <div class="tag-list" id="insp-connected"></div>
+      </div>
+      <div class="field-group">
+        <div class="field-label">Detailed Operation</div>
+        <div class="field-value" id="insp-details">Explanation of how it functions.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="canvas-container"></div>
+
+  <!-- Three.js + OrbitControls from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+  <script>
+    // ------------------------------------------------------------------------
+    // Architectural Nodes Database
+    // ------------------------------------------------------------------------
+    const NODES = [
+      // Frontend Zone (X: -60 .. -30, Z: -30 .. 30)
+      {
+        id: 'fe_app',
+        name: 'React Application (App.jsx)',
+        zone: 'Frontend',
+        color: 0x06b6d4,
+        pos: [-55, 10, 0],
+        file: 'frontend/src/App.jsx',
+        tech: ['React 18', 'Vite', 'React Router v6', 'AuthContext'],
+        desc: 'Single Page Application core orchestrating client-side routing, protected auth sessions, sidebar navigation, and dashboard analytics.',
+        endpoints: ['/api/analytics/charts', '/api/analytics/summary', '/api/emails'],
+        tables: ['users', 'emails', 'labels'],
+        connected: ['fe_ai', 'fe_sync', 'api_client', 'be_app'],
+        details: 'Initializes the global AuthContext, validates current user via /api/auth/me, mounts the responsive layout with topbar and folder sidebar, and renders charts via Recharts.'
+      },
+      {
+        id: 'fe_ai',
+        name: 'AI Assistant Page (AiAssistant.jsx)',
+        zone: 'Frontend',
+        color: 0x06b6d4,
+        pos: [-45, 15, -20],
+        file: 'frontend/src/pages/AiAssistant.jsx',
+        tech: ['React 18', 'SSE Client', 'DOMPurify', 'SearchActivity'],
+        desc: 'Chat interface for the Mailbox AI Assistant, rendering real-time streaming telemetry, cited message pills, and draft approval cards.',
+        endpoints: ['POST /api/rag/chat/stream', 'GET /api/rag/sessions', 'POST /api/rag/approvals/{id}/approve'],
+        tables: ['chat_sessions', 'chat_messages', 'email_send_approvals'],
+        connected: ['fe_app', 'api_client', 'be_rag', 'rag_graph'],
+        details: 'Connects to /api/rag/chat/stream via native fetch and TextDecoder to stream Server-Sent Events. Parses "activity" events to update SearchActivity lanes live and renders final grounded answers with clickable source pills.'
+      },
+      {
+        id: 'fe_sync',
+        name: 'Sync Progress Screen (SyncPage.jsx)',
+        zone: 'Frontend',
+        color: 0x06b6d4,
+        pos: [-45, 5, 20],
+        file: 'frontend/src/pages/SyncPage.jsx',
+        tech: ['EventSource', 'SSE', 'React Hooks'],
+        desc: 'Real-time synchronization view displaying animated step progression and email count counters during initial ingestion.',
+        endpoints: ['POST /api/gmail/sync', 'GET /api/gmail/sync/stream', 'GET /api/gmail/sync/status'],
+        tables: ['gmail_accounts', 'sync_history'],
+        connected: ['fe_app', 'api_client', 'be_gmail'],
+        details: 'Opens EventSource to /api/gmail/sync/stream and polls /status every 2s as a fallback. Advances timeline through listing, fetching, and storing stages, auto-navigating to /dashboard upon completion.'
+      },
+      {
+        id: 'api_client',
+        name: 'API Client Service (services/api.js)',
+        zone: 'Frontend',
+        color: 0x06b6d4,
+        pos: [-30, 0, 0],
+        file: 'frontend/src/services/api.js',
+        tech: ['Axios', 'Fetch TextDecoder', 'X-Timezone Header'],
+        desc: 'Centralized HTTP and SSE client managing API requests, credentials, and client timezone injection.',
+        endpoints: ['All /api/* endpoints'],
+        tables: [],
+        connected: ['fe_app', 'fe_ai', 'fe_sync', 'be_app'],
+        details: 'Attaches withCredentials: true for cookie auth and automatically detects the browser timezone, appending it via X-Timezone header and tz query parameters.'
+      },
+
+      // Backend Zone (X: -10 .. 20, Z: -20 .. 20)
+      {
+        id: 'be_app',
+        name: 'FastAPI Web Application (app/api/app.py)',
+        zone: 'Backend',
+        color: 0x3b82f6,
+        pos: [-5, 12, 0],
+        file: 'backend/app/api/app.py',
+        tech: ['FastAPI', 'Uvicorn', 'Starlette Middleware', 'Lifespan Daemons'],
+        desc: 'ASGI application factory configuring middleware pipelines, lifespan daemons, router inclusion, and SPA static hosting.',
+        endpoints: ['GET /health', 'All Routers'],
+        tables: ['All 13 core tables'],
+        connected: ['api_client', 'be_auth', 'be_emails', 'be_gmail', 'be_rag', 'be_dev', 'db_conn'],
+        details: 'Runs lifespan daemons on startup (verify_schema, AI classifier, RAG auto-indexer, email delivery scheduler). Executes route_developer_connections middleware on every request to route personal DB contexts.'
+      },
+      {
+        id: 'be_auth',
+        name: 'Auth Router (app/api/routes/auth.py)',
+        zone: 'Backend',
+        color: 0x3b82f6,
+        pos: [5, 20, -15],
+        file: 'backend/app/api/routes/auth.py',
+        tech: ['HMAC-SHA256', 'Google Auth OAuthlib', 'PKCE'],
+        desc: 'Authentication and session controller handling Google OAuth2 callback, PKCE validation, demo logins, and session cookie generation.',
+        endpoints: ['GET /api/auth/google', 'GET /api/auth/callback', 'GET /api/auth/me', 'POST /api/auth/demo', 'POST /api/auth/logout'],
+        tables: ['users', 'gmail_accounts'],
+        connected: ['be_app', 'gmail_oauth', 'db_conn'],
+        details: 'Issues HMAC-SHA256 signed session cookies containing user UUID and expiration. Verifies Google ID token claims and upserts user records.'
+      },
+      {
+        id: 'be_gmail',
+        name: 'Gmail Sync Router (app/api/routes/gmail.py)',
+        zone: 'Backend',
+        color: 0x3b82f6,
+        pos: [10, 15, 15],
+        file: 'backend/app/api/routes/gmail.py',
+        tech: ['Threading Daemons', 'SSE Streaming', 'Sync Leases'],
+        desc: 'Coordinates mailbox synchronization threads, SSE progress streaming, and concurrency lease management.',
+        endpoints: ['POST /api/gmail/sync', 'GET /api/gmail/sync/status', 'GET /api/gmail/sync/stream'],
+        tables: ['gmail_accounts', 'sync_history'],
+        connected: ['be_app', 'svc_gmail', 'gmail_api'],
+        details: 'Enforces a 15-minute lease lock via inbox_sync_heartbeat_at. Spawns background worker thread to execute batch Gmail API fetching.'
+      },
+      {
+        id: 'be_rag',
+        name: 'RAG & Assistant Router (app/api/routes/rag.py)',
+        zone: 'Backend',
+        color: 0x3b82f6,
+        pos: [12, -5, -20],
+        file: 'backend/app/api/routes/rag.py',
+        tech: ['SSE Streaming', 'LangGraph Integration', 'Chat Quota Guard'],
+        desc: 'Primary AI assistant router exposing streaming chat, session history, citation inspection, and draft approvals.',
+        endpoints: ['POST /api/rag/chat/stream', 'GET /api/rag/sessions', 'POST /api/rag/approvals/{id}/approve', 'GET /api/rag/sources/{id}'],
+        tables: ['chat_sessions', 'chat_messages', 'chat_retrievals', 'email_send_approvals', 'chat_quotas'],
+        connected: ['be_app', 'rag_graph', 'quota_svc', 'db_conn'],
+        details: 'Reserves chat quota and concurrency lease, executes LangGraph mailbox assistant inside a worker thread, and streams activity events and final answers.'
+      },
+      {
+        id: 'be_dev',
+        name: 'Developer Settings Router (app/api/routes/developer.py)',
+        zone: 'Backend',
+        color: 0x3b82f6,
+        pos: [5, -15, 15],
+        file: 'backend/app/api/routes/developer.py',
+        tech: ['Fernet Encryption', 'SSRF Guard', 'DDL Generator'],
+        desc: 'Manages user-supplied PostgreSQL databases and custom Gemini/OpenAI API keys with encryption at rest.',
+        endpoints: ['GET /api/developer', 'PUT /api/developer', 'GET /api/developer/schema.sql'],
+        tables: ['users'],
+        connected: ['be_app', 'db_personal', 'db_conn'],
+        details: 'Verifies personal database connectivity and schema using verify_personal_database(), generates on-the-fly DDL SQL, and encrypts secrets with Fernet.'
+      },
+
+      // Database Zone (X: 30 .. 50, Z: 0 .. 30)
+      {
+        id: 'db_conn',
+        name: 'Database Engine & Connection Pool (connection.py)',
+        zone: 'Database',
+        color: 0x10b981,
+        pos: [35, 10, 10],
+        file: 'backend/app/database/connection.py',
+        tech: ['SQLAlchemy 2.0', 'psycopg3', 'NullPool', 'ContextVars'],
+        desc: 'Dual-mode database session manager routing queries to either Central Application DB or User Personal DB.',
+        endpoints: [],
+        tables: ['All tables'],
+        connected: ['be_app', 'db_central', 'db_personal'],
+        details: 'Inspects database_url_context. If set, creates a session with NullPool and DNS-pinned hostaddr to personal DB. Otherwise returns CentralSessionLocal.'
+      },
+      {
+        id: 'db_central',
+        name: 'Central Application DB (PostgreSQL + pgvector)',
+        zone: 'Database',
+        color: 0x10b981,
+        pos: [48, 12, -5],
+        file: 'Heroku Postgres add-on',
+        tech: ['PostgreSQL 16', 'pgvector', 'HALFVEC(3072)', 'IVFFlat'],
+        desc: 'Central persistent database storing identities, OAuth tokens, synchronized mailboxes, and 3072-dimensional half-precision vectors.',
+        endpoints: [],
+        tables: ['users', 'gmail_accounts', 'emails', 'email_chunks', 'email_embeddings', 'chat_sessions', 'chat_messages'],
+        connected: ['db_conn'],
+        details: 'Hosts the full 16-migration Alembic schema with partial indexes for dashboard analytics and cosine similarity vector index.'
+      },
+      {
+        id: 'db_personal',
+        name: 'User Personal Database (Isolated PostgreSQL)',
+        zone: 'Database',
+        color: 0x10b981,
+        pos: [48, -10, 25],
+        file: 'External User-Supplied Database',
+        tech: ['PostgreSQL', 'Strict Failure Mode', 'SSRF DNS Pinning'],
+        desc: 'Optional user-provided database. Isolates all synchronized emails, vector embeddings, and chats from the application host.',
+        endpoints: [],
+        tables: ['Same Alembic schema replicated'],
+        connected: ['db_conn'],
+        details: 'Protected by DNS hostaddr pinning to prevent SSRF. If connection fails, request errors immediately without falling back to central DB.'
+      },
+
+      // AI & RAG Subsystem (X: 20 .. 50, Z: -40 .. -15)
+      {
+        id: 'rag_graph',
+        name: 'LangGraph Mailbox Assistant (graph_agent.py)',
+        zone: 'AI/RAG',
+        color: 0xa855f7,
+        pos: [28, 5, -35],
+        file: 'backend/app/rag/graph_agent.py',
+        tech: ['LangGraph', 'StateGraph', 'SqliteSaver', '10 Agent Patterns'],
+        desc: 'Stateful agent graph coordinating intent routing, query rewriting, hybrid retrieval, tool execution, and grounded answering.',
+        endpoints: ['POST /api/rag/chat/stream'],
+        tables: ['chat_messages', 'chat_retrievals', 'email_send_approvals'],
+        connected: ['be_rag', 'rag_retrieval', 'rag_tools', 'ext_llm', 'langsmith'],
+        details: 'Executes bounded ReAct loop with SQLite/Postgres checkpointing. Evaluates evidence validity before answering and emits live SSE telemetry.'
+      },
+      {
+        id: 'rag_retrieval',
+        name: 'Hybrid Retriever & RRF (retrieval.py)',
+        zone: 'AI/RAG',
+        color: 0xa855f7,
+        pos: [42, -5, -30],
+        file: 'backend/app/rag/retrieval.py',
+        tech: ['pgvector Cosine Search', 'BM25 Sparse Search', 'RRF Rank Fusion'],
+        desc: 'Dual-engine retrieval subsystem combining dense vector similarity with sparse lexical keyword matching via Reciprocal Rank Fusion.',
+        endpoints: [],
+        tables: ['email_embeddings', 'email_chunks', 'emails'],
+        connected: ['rag_graph', 'db_central', 'ext_embed'],
+        details: 'Retrieves dense candidates using <=> cosine distance, computes sparse BM25 scores, fuses rankings with RRF (k=60), and filters by user_id.'
+      },
+      {
+        id: 'rag_auto',
+        name: 'RAG Auto-Indexer Daemon (rag_auto_indexer.py)',
+        zone: 'AI/RAG',
+        color: 0xa855f7,
+        pos: [35, -20, -10],
+        file: 'backend/app/services/rag_auto_indexer.py',
+        tech: ['Background Worker', 'Recursive Splitting', 'SHA-256 Hashing'],
+        desc: 'Continuous daemon discovering un-embedded emails, chunking text, generating 3072-dim embeddings, and updating pgvector.',
+        endpoints: ['POST /api/rag/index'],
+        tables: ['emails', 'email_chunks', 'email_embeddings'],
+        connected: ['be_app', 'db_central', 'ext_embed'],
+        details: 'Runs every 30s. Splits cleaned email text into 1000-char chunks (150 overlap), computes content hash to prevent duplicates, and saves HALFVEC.'
+      },
+
+      // Agent Tools Layer (X: 10 .. 30, Z: -50 .. -30)
+      {
+        id: 'rag_tools',
+        name: 'Mailbox Agent Tools (app/rag/tools.py)',
+        zone: 'Agents',
+        color: 0xf59e0b,
+        pos: [18, -10, -42],
+        file: 'backend/app/rag/tools.py',
+        tech: ['LangChain @tool', 'Pydantic Schemas', 'Human-in-the-Loop'],
+        desc: '18 registered LangChain agent tools covering search, filtering, thread lookup, attachments, drafting, scheduling, and sending.',
+        endpoints: [],
+        tables: ['emails', 'labels', 'attachments', 'email_send_approvals'],
+        connected: ['rag_graph', 'mcp_client', 'svc_gmail'],
+        details: 'Includes search_emails, search_gmail_mcp, filter_emails_by_date, draft_email, schedule_email, and send_email. SanitizeToolArgs redacts tokens.'
+      },
+
+      // MCP Layer (X: -10 .. 15, Z: -50 .. -35)
+      {
+        id: 'mcp_client',
+        name: 'Gmail MCP Client (rag/gmail_mcp.py)',
+        zone: 'MCP',
+        color: 0xf97316,
+        pos: [5, -18, -45],
+        file: 'backend/app/rag/gmail_mcp.py',
+        tech: ['Model Context Protocol', 'In-Process RPC Bridge'],
+        desc: 'Bridge enabling the LangGraph agent to discover live Gmail messages through the standardized MCP protocol.',
+        endpoints: [],
+        tables: ['emails', 'labels'],
+        connected: ['rag_tools', 'mcp_server'],
+        details: 'Executes search_live_mailbox() passing user_id and queries to the MCP server. Caches returned messages into local PostgreSQL.'
+      },
+      {
+        id: 'mcp_server',
+        name: 'Gmail MCP Server (services/gmail_mcp_server.py)',
+        zone: 'MCP',
+        color: 0xf97316,
+        pos: [-10, -20, -35],
+        file: 'backend/app/services/gmail_mcp_server.py',
+        tech: ['JSON-RPC over Stdio', 'Read-Only Security Gate'],
+        desc: 'Dedicated read-only MCP server exposing search_mailbox tool. Interacts with Gmail API without exposing write or delete actions.',
+        endpoints: [],
+        tables: ['gmail_accounts', 'emails'],
+        connected: ['mcp_client', 'gmail_api'],
+        details: 'Runs over stdio or in-process. Uses authenticated user OAuth tokens, executes users.messages.list, hydrates full payloads, and commits local records.'
+      },
+
+      // Gmail Integration Layer (X: -30 .. -10, Z: 20 .. 45)
+      {
+        id: 'svc_gmail',
+        name: 'Gmail Client Service (gmail_service.py)',
+        zone: 'Gmail',
+        color: 0xef4444,
+        pos: [-15, 18, 30],
+        file: 'backend/app/services/gmail_service.py',
+        tech: ['google-api-python-client', 'MIME Multipart', 'Incremental Sync'],
+        desc: 'Low-level Gmail API interface handling message parsing, incremental sync via historyId, and outbound email transmission.',
+        endpoints: [],
+        tables: ['emails', 'labels', 'email_labels'],
+        connected: ['be_gmail', 'rag_tools', 'gmail_api'],
+        details: 'Builds authenticated service with automatic token refresh. Implements sync_all_emails() and send_gmail_message() with CC/BCC normalization.'
+      },
+      {
+        id: 'gmail_oauth',
+        name: 'Google Identity & OAuth 2.0',
+        zone: 'Gmail',
+        color: 0xef4444,
+        pos: [-25, 25, 45],
+        file: 'Google Cloud Platform',
+        tech: ['OAuth 2.0', 'OpenID Connect', 'PKCE'],
+        desc: 'Google authorization server handling user consent, identity token verification, and refresh token issuance.',
+        endpoints: ['accounts.google.com/o/oauth2/v2/auth', 'oauth2.googleapis.com/token'],
+        tables: [],
+        connected: ['be_auth'],
+        details: 'Requests gmail.readonly and gmail.send scopes. Returns authorization codes exchanged for access and refresh tokens.'
+      },
+      {
+        id: 'gmail_api',
+        name: 'Google Gmail REST API v1',
+        zone: 'Gmail',
+        color: 0xef4444,
+        pos: [-5, 28, 48],
+        file: 'gmail.googleapis.com',
+        tech: ['Gmail REST API v1', 'Batch Requests'],
+        desc: 'External Google endpoint for mailbox retrieval, label syncing, and outbound delivery.',
+        endpoints: ['users.messages.list', 'users.messages.get', 'users.messages.send', 'users.labels.list'],
+        tables: [],
+        connected: ['svc_gmail', 'mcp_server'],
+        details: 'Paginates message listings up to 500 per request. Fetches full MIME payloads and handles rate limiting.'
+      },
+
+      // External Providers & Infrastructure (X: 30 .. 60, Z: -50 .. -20)
+      {
+        id: 'ext_llm',
+        name: 'Azure OpenAI & Gemini LLM Providers',
+        zone: 'Infra',
+        color: 0x6366f1,
+        pos: [50, 15, -45],
+        file: 'Azure OpenAI Service / Google AI Studio',
+        tech: ['gpt-4.1-mini', 'gemini-2.5-flash', 'LangChain Core'],
+        desc: 'External LLM inference endpoints powering the intent router, task planner, relevance checker, and answer generator.',
+        endpoints: ['Azure OpenAI Chat Completions', 'Gemini generateContent'],
+        tables: [],
+        connected: ['rag_graph'],
+        details: 'Configured via AZURE_OPENAI_API_KEY or DEVELOPER_LLM_API_KEY. Default model is gpt-4.1-mini with 20s timeout.'
+      },
+      {
+        id: 'ext_embed',
+        name: 'Azure OpenAI text-embedding-3-large',
+        zone: 'Infra',
+        color: 0x6366f1,
+        pos: [55, -15, -35],
+        file: 'Azure OpenAI Embedding Resource',
+        tech: ['text-embedding-3-large', '3072 Dimensions'],
+        desc: 'High-dimensional embedding provider converting email chunks and search queries into dense vector vectors.',
+        endpoints: ['Azure OpenAI Embeddings API'],
+        tables: [],
+        connected: ['rag_retrieval', 'rag_auto'],
+        details: 'Generates 3072-dimensional vector floats for chunks and query transformation search strings.'
+      },
+      {
+        id: 'langsmith',
+        name: 'LangSmith Observability Platform',
+        zone: 'Infra',
+        color: 0x6366f1,
+        pos: [35, 25, -45],
+        file: 'https://api.smith.langchain.com',
+        tech: ['LangSmith Tracing', 'Root Run Context'],
+        desc: 'Enterprise observability backend logging graph runs, tool inputs, latency, and token consumption.',
+        endpoints: ['POST api.smith.langchain.com/runs'],
+        tables: [],
+        connected: ['rag_graph'],
+        details: 'Controlled by LANGSMITH_TRACING=true. Surfaces trace URLs in SearchActivity UI for execution debugging.'
+      },
+      {
+        id: 'quota_svc',
+        name: 'Chat Quota & Concurrency Leases (chat_quota.py)',
+        zone: 'Backend',
+        color: 0x3b82f6,
+        pos: [15, -8, -5],
+        file: 'backend/app/services/chat_quota.py',
+        tech: ['Row-Level Locking', 'SELECT FOR UPDATE', 'Heartbeat Leases'],
+        desc: 'Guards against LLM cost spikes and server overload by enforcing atomic daily quotas and concurrency caps.',
+        endpoints: [],
+        tables: ['chat_quotas', 'chat_concurrency_locks', 'chat_request_leases'],
+        connected: ['be_rag', 'db_conn'],
+        details: 'Locks identity rows via SELECT FOR UPDATE, enforces 50 daily / 5 concurrent limits for users, and spawns heartbeat threads.'
+      }
+    ];
+
+    // Connections between nodes
+    const LINKS = [
+      { from: 'fe_app', to: 'api_client' },
+      { from: 'fe_ai', to: 'api_client' },
+      { from: 'fe_sync', to: 'api_client' },
+      { from: 'api_client', to: 'be_app' },
+      { from: 'be_app', to: 'be_auth' },
+      { from: 'be_app', to: 'be_gmail' },
+      { from: 'be_app', to: 'be_rag' },
+      { from: 'be_app', to: 'be_dev' },
+      { from: 'be_auth', to: 'gmail_oauth' },
+      { from: 'be_gmail', to: 'svc_gmail' },
+      { from: 'svc_gmail', to: 'gmail_api' },
+      { from: 'be_rag', to: 'quota_svc' },
+      { from: 'be_rag', to: 'rag_graph' },
+      { from: 'rag_graph', to: 'rag_retrieval' },
+      { from: 'rag_graph', to: 'rag_tools' },
+      { from: 'rag_graph', to: 'ext_llm' },
+      { from: 'rag_graph', to: 'langsmith' },
+      { from: 'rag_tools', to: 'mcp_client' },
+      { from: 'mcp_client', to: 'mcp_server' },
+      { from: 'mcp_server', to: 'gmail_api' },
+      { from: 'rag_retrieval', to: 'ext_embed' },
+      { from: 'rag_retrieval', to: 'db_conn' },
+      { from: 'rag_auto', to: 'ext_embed' },
+      { from: 'rag_auto', to: 'db_conn' },
+      { from: 'be_dev', to: 'db_conn' },
+      { from: 'db_conn', to: 'db_central' },
+      { from: 'db_conn', to: 'db_personal' }
+    ];
+
+    // ------------------------------------------------------------------------
+    // Three.js Scene Setup
+    // ------------------------------------------------------------------------
+    const container = document.getElementById('canvas-container');
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x090d16, 0.005);
+
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 1000);
+    camera.position.set(0, 70, 110);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.shadowMap.enabled = true;
+    container.appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 0.6;
+    controls.maxDistance = 250;
+    controls.minDistance = 20;
+
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+    scene.add(ambientLight);
+
+    const dirLight1 = new THREE.DirectionalLight(0x60a5fa, 1.2);
+    dirLight1.position.set(50, 80, 50);
+    scene.add(dirLight1);
+
+    const dirLight2 = new THREE.DirectionalLight(0xa855f7, 0.8);
+    dirLight2.position.set(-50, -40, -50);
+    scene.add(dirLight2);
+
+    // Floor Grid
+    const grid = new THREE.GridHelper(180, 36, 0x1e293b, 0x0f172a);
+    grid.position.y = -30;
+    scene.add(grid);
+
+    // ------------------------------------------------------------------------
+    // Construct Nodes & Links
+    // ------------------------------------------------------------------------
+    const nodeMap = new Map();
+    const nodeMeshes = [];
+
+    // Geometries & Materials
+    const sphereGeo = new THREE.SphereGeometry(3.5, 32, 32);
+    const boxGeo = new THREE.BoxGeometry(6, 6, 6);
+
+    NODES.forEach((n) => {
+      const isBox = (n.zone === 'Database' || n.zone === 'Infra');
+      const geo = isBox ? boxGeo : sphereGeo;
+      
+      const mat = new THREE.MeshStandardMaterial({
+        color: n.color,
+        roughness: 0.25,
+        metalness: 0.8,
+        emissive: n.color,
+        emissiveIntensity: 0.25
+      });
+
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(n.pos[0], n.pos[1], n.pos[2]);
+      mesh.userData = n;
+      scene.add(mesh);
+
+      // Glow halo
+      const haloGeo = isBox ? new THREE.BoxGeometry(7, 7, 7) : new THREE.SphereGeometry(4.2, 16, 16);
+      const haloMat = new THREE.MeshBasicMaterial({
+        color: n.color,
+        transparent: true,
+        opacity: 0.15,
+        wireframe: true
+      });
+      const halo = new THREE.Mesh(haloGeo, haloMat);
+      mesh.add(halo);
+
+      nodeMap.set(n.id, mesh);
+      nodeMeshes.push(mesh);
+    });
+
+    // Draw Links
+    const linkMaterial = new THREE.LineBasicMaterial({
+      color: 0x475569,
+      transparent: true,
+      opacity: 0.45
+    });
+
+    LINKS.forEach((lnk) => {
+      const src = nodeMap.get(lnk.from);
+      const dst = nodeMap.get(lnk.to);
+      if (src && dst) {
+        const points = [src.position, dst.position];
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+        const line = new THREE.Line(lineGeo, linkMaterial);
+        scene.add(line);
+      }
+    });
+
+    // ------------------------------------------------------------------------
+    // Raycasting & Selection Handling
+    // ------------------------------------------------------------------------
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    const inspector = document.getElementById('inspector');
+    let selectedMesh = null;
+
+    function openInspector(data) {
+      document.getElementById('insp-name').textContent = data.name;
+      const zoneBadge = document.getElementById('insp-zone');
+      zoneBadge.textContent = data.zone;
+      zoneBadge.style.background = '#' + data.color.toString(16).padStart(6, '0');
+
+      document.getElementById('insp-desc').textContent = data.desc;
+      document.getElementById('insp-file').textContent = data.file || 'N/A';
+      document.getElementById('insp-details').textContent = data.details || 'N/A';
+
+      // Tech tags
+      const techBox = document.getElementById('insp-tech');
+      techBox.innerHTML = '';
+      (data.tech || []).forEach((t) => {
+        const span = document.createElement('span');
+        span.className = 'tag';
+        span.textContent = t;
+        techBox.appendChild(span);
+      });
+
+      // Endpoints
+      const epBox = document.getElementById('insp-endpoints');
+      const grpEndpoints = document.getElementById('grp-endpoints');
+      if (data.endpoints && data.endpoints.length > 0) {
+        grpEndpoints.style.display = 'block';
+        epBox.innerHTML = data.endpoints.map(e => `<code>${e}</code>`).join('<br>');
+      } else {
+        grpEndpoints.style.display = 'none';
+      }
+
+      // Tables
+      const tblBox = document.getElementById('insp-tables');
+      const grpTables = document.getElementById('grp-tables');
+      if (data.tables && data.tables.length > 0) {
+        grpTables.style.display = 'block';
+        tblBox.innerHTML = data.tables.map(t => `<code>${t}</code>`).join(', ');
+      } else {
+        grpTables.style.display = 'none';
+      }
+
+      // Connected
+      const connBox = document.getElementById('insp-connected');
+      connBox.innerHTML = '';
+      (data.connected || []).forEach((cId) => {
+        const cNode = NODES.find(n => n.id === cId);
+        if (cNode) {
+          const span = document.createElement('span');
+          span.className = 'tag';
+          span.style.cursor = 'pointer';
+          span.textContent = cNode.name.split('(')[0];
+          span.onclick = () => {
+            const m = nodeMap.get(cId);
+            if (m) selectNode(m);
+          };
+          connBox.appendChild(span);
+        }
+      });
+
+      inspector.classList.add('open');
+    }
+
+    function selectNode(mesh) {
+      if (selectedMesh) {
+        selectedMesh.material.emissiveIntensity = 0.25;
+      }
+      selectedMesh = mesh;
+      selectedMesh.material.emissiveIntensity = 0.9;
+      openInspector(mesh.userData);
+
+      // Focus camera slightly towards node
+      const targetPos = mesh.position.clone().add(new THREE.Vector3(15, 12, 25));
+      // Smooth lerp can be handled via controls.target
+      controls.target.copy(mesh.position);
+    }
+
+    window.addEventListener('click', (event) => {
+      // Ignore clicks on HTML overlays
+      if (event.target.closest('#inspector') || event.target.closest('header') || 
+          event.target.closest('.controls-bar') || event.target.closest('.zone-legend')) {
+        return;
+      }
+
+      mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+      mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObjects(nodeMeshes);
+
+      if (intersects.length > 0) {
+        selectNode(intersects[0].object);
+      }
+    });
+
+    // UI Buttons
+    document.getElementById('insp-close').addEventListener('click', () => {
+      inspector.classList.remove('open');
+      if (selectedMesh) {
+        selectedMesh.material.emissiveIntensity = 0.25;
+        selectedMesh = null;
+      }
+    });
+
+    document.getElementById('btn-reset').addEventListener('click', () => {
+      camera.position.set(0, 70, 110);
+      controls.target.set(0, 0, 0);
+      inspector.classList.remove('open');
+      if (selectedMesh) {
+        selectedMesh.material.emissiveIntensity = 0.25;
+        selectedMesh = null;
+      }
+    });
+
+    const btnRotate = document.getElementById('btn-rotate');
+    btnRotate.addEventListener('click', () => {
+      controls.autoRotate = !controls.autoRotate;
+      btnRotate.classList.toggle('active', controls.autoRotate);
+    });
+
+    // Zone Filtering
+    document.querySelectorAll('.legend-item').forEach((item) => {
+      item.addEventListener('click', () => {
+        const zone = item.getAttribute('data-zone');
+        nodeMeshes.forEach((m) => {
+          if (m.userData.zone === zone) {
+            m.visible = true;
+            m.material.opacity = 1.0;
+          } else {
+            m.visible = false;
+          }
+        });
+      });
+    });
+
+    document.getElementById('btn-filter-all').addEventListener('click', () => {
+      nodeMeshes.forEach(m => m.visible = true);
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Animation Loop
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
