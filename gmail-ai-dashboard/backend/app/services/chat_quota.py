@@ -70,16 +70,20 @@ def _digest_ip(ip: str) -> str:
 def _visitor_id(request: Request) -> str | None:
     raw_cookie = request.cookies.get(DEMO_VISITOR_COOKIE, "")
     visitor, separator, signature = raw_cookie.partition(".")
-    if separator and visitor and len(visitor) <= 128 and hmac.compare_digest(signature, _digest(visitor)):
-        return visitor
+    if separator and visitor and len(visitor) <= 128:
+        expected_visitor = hmac.new(settings.session_secret.encode(), f"visitor:{visitor}".encode(), hashlib.sha256).hexdigest()
+        expected_raw = _digest(visitor)
+        if hmac.compare_digest(signature, expected_visitor) or hmac.compare_digest(signature, expected_raw):
+            return visitor
     return None
 
 
 def set_demo_visitor_cookie(request: Request, response: Response) -> None:
     """Keep a signed visitor identifier across demo sessions and logouts."""
     visitor = _visitor_id(request) or secrets.token_urlsafe(32)
+    sig = hmac.new(settings.session_secret.encode(), f"visitor:{visitor}".encode(), hashlib.sha256).hexdigest()
     response.set_cookie(
-        DEMO_VISITOR_COOKIE, f"{visitor}.{_digest(visitor)}",
+        DEMO_VISITOR_COOKIE, f"{visitor}.{sig}",
         httponly=True, secure=settings.secure_cookies, samesite="lax",
         path="/",
         max_age=settings.demo_visitor_ttl_days * 86400,

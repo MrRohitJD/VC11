@@ -47,7 +47,8 @@ def validate_visitor_cookie(raw_cookie: str) -> Tuple[Optional[str], bool]:
         return None, True
 
     expected = _digest_visitor(visitor_id)
-    if not hmac.compare_digest(signature, expected):
+    legacy = hmac.new(settings.session_secret.encode(), visitor_id.encode(), hashlib.sha256).hexdigest()
+    if not (hmac.compare_digest(signature, expected) or hmac.compare_digest(signature, legacy)):
         return None, True
 
     return visitor_id, False

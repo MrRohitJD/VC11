@@ -41,8 +41,9 @@ def test_db():
     engine.dispose()
 
 
-def test_user_quota_preserved_after_mailbox_data_erase(test_db):
+def test_user_quota_preserved_after_mailbox_data_erase(test_db, monkeypatch):
     """Erasing mailbox data must NOT reset the user's daily assistant quota."""
+    monkeypatch.setattr("app.services.chat_quota.USER_DAILY_LIMIT", 50)
     user = User(
         id=uuid4(),
         google_id="google-quota-test",

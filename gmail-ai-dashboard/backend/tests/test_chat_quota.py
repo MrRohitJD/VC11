@@ -153,3 +153,20 @@ def test_signed_in_users_can_run_five_requests_concurrently(db):
     for lease in leases[1:]:
         lease.release()
     sixth.release()
+
+
+def test_visitor_service_cookie_compatibility_with_chat_quota(db):
+    """Ensure cookies issued by visitor_service are accepted without 401 error."""
+    from app.services.visitor_service import set_visitor_cookie
+    resp = Response()
+    vid = set_visitor_cookie(resp)
+    parsed = SimpleCookie()
+    parsed.load(resp.headers["set-cookie"])
+    cookie_val = parsed["gmail_ai_demo_visitor"].value
+
+    user = SimpleNamespace(id=uuid4(), is_demo=True)
+    req = _request(cookie=cookie_val)
+    lease = reserve_chat_request(db, req, user)
+    assert lease is not None
+    lease.release()
+

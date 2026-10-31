@@ -241,6 +241,7 @@ def test_corrupted_ciphertext_graceful_handling():
 
 def test_demo_quota_ip_rate_limiting_prevents_cookie_reset(monkeypatch):
     """Clearing demo cookies cannot bypass the per-IP daily limit (10 requests/day)."""
+    monkeypatch.setattr("app.services.chat_quota.DEMO_DAILY_LIMIT", 10)
     engine = create_engine("sqlite:///:memory:")
     ChatQuota.__table__.create(engine)
     ChatConcurrencyLock.__table__.create(engine)
