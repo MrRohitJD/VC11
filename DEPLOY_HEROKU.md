@@ -32,6 +32,15 @@ Set these config vars on `ai-powered-gmail`:
 | `AZURE_OPENAI_ENDPOINT` | `https://rg-openai-sea.cognitiveservices.azure.com/` |
 | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | `text-embedding-3-large`|
 | `AZURE_OPENAI_CHAT_DEPLOYMENT` | `gpt-4.1-mini` |
+| `RATE_LIMIT_ENABLED` | `true` (Master toggle for multi-layer rate limiting and quota enforcement) |
+| `RATE_LIMIT_GLOBAL_PER_MINUTE` | `600` (Aggregate request limit across all visitors) |
+| `RATE_LIMIT_IP_BURST_PER_MINUTE` | `120` (IP burst protection window) |
+| `RATE_LIMIT_IP_SUSTAINED_PER_HOUR` | `1000` (IP sustained request threshold) |
+| `RATE_LIMIT_VISITOR_PER_MINUTE` | `60` (Per-visitor session request limit) |
+| `AI_DAILY_BUDGET_USD` | `10.0` (Global daily AI cost ceiling in USD) |
+| `AI_MONTHLY_BUDGET_USD` | `150.0` (Global monthly AI cost ceiling in USD) |
+| `CLOUDFLARE_TRUSTED_IPS` | Optional comma-separated CIDRs; defaults to official Cloudflare IPv4/IPv6 ranges |
+| `VISITOR_COOKIE_NAME` | `gmail_ai_demo_visitor` (HMAC-signed visitor cookie) |
 
 Keep `SESSION_SECRET`, `DEVELOPER_SETTINGS_ENCRYPTION_KEY`, `AZURE_OPENAI_API_KEY`, `OAUTH_GOOGLE_CLIENT_ID`, and `OAUTH_GOOGLE_CLIENT_SECRET` as Heroku config vars. Do not commit them.
 
@@ -90,6 +99,29 @@ curl -i https://mail-assistant.rohit-jadhav.dev/health
 # Authenticated API calls return X-Database-Mode header (APP_DEFAULT, PERSONAL_ACTIVE, or APP_FALLBACK)
 curl -i https://mail-assistant.rohit-jadhav.dev/api/developer
 ```
+
+### 4. Verify Rate Limiting & RFC Headers
+```powershell
+# Public or demo requests return X-RateLimit-* headers
+curl -i https://mail-assistant.rohit-jadhav.dev/api/auth/demo
+# Expected headers:
+# X-RateLimit-Limit: <int>
+# X-RateLimit-Remaining: <int>
+# X-RateLimit-Reset: <epoch-seconds>
+# Set-Cookie: gmail_ai_demo_visitor=<hash>.<ts>.<sig>; Path=/; HttpOnly; Secure; SameSite=Lax
+```
+
+### 5. Emergency Rollback Plan
+If rate limiting or database migrations cause unexpected operational issues in production:
+1. **Emergency Application Kill Switch:** Disable application middleware immediately without redeploying code:
+   ```bash
+   heroku config:set RATE_LIMIT_ENABLED=false -a ai-powered-gmail
+   ```
+2. **Database Migration Downgrade:** If schema changes need to be reverted:
+   ```bash
+   heroku run "alembic downgrade 20261030_0016" -a ai-powered-gmail
+   ```
+   *(This cleanly drops `rate_limit_buckets`, `demo_visitors`, `security_events`, and `ai_usage_logs` while preserving core tables).*
 
 ---
 

@@ -18,6 +18,7 @@ from app.services.developer_settings import database_url_context, get_pinned_hos
 import app.models.llm  # noqa: F401 - registers job mapper before sessions are used
 import app.models.chat_quota  # noqa: F401 - registers quota and concurrency lease mappers
 import app.models.rag  # noqa: F401 - registers mailbox index and history mappers
+import app.models.rate_limit  # noqa: F401 - registers rate limiting, visitor, and security event mappers
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ REQUIRED_TABLES = frozenset({
     "ai_categories", "email_classifications", "sync_history",
     "llm_classification_jobs", "chat_quotas", "chat_concurrency_locks",
     "chat_request_leases", "email_send_approvals",
+    "rate_limit_buckets", "demo_visitors", "security_events", "ai_usage_logs",
 })
 
 REQUIRED_COLUMNS = {

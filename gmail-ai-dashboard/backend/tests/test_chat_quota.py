@@ -44,7 +44,8 @@ def db():
     engine.dispose()
 
 
-def test_signed_in_limit_is_50_per_account_and_survives_session_changes(db):
+def test_signed_in_limit_is_50_per_account_and_survives_session_changes(db, monkeypatch):
+    monkeypatch.setattr("app.services.chat_quota.USER_DAILY_LIMIT", 50)
     user = SimpleNamespace(id=uuid4(), is_demo=False)
     for i in range(50):
         _reserve_and_release(db, _request(cookie=str(i)), user)
@@ -90,7 +91,8 @@ def test_demo_limit_enforces_both_cookie_and_ip(db):
     assert f"{DEMO_DAILY_LIMIT} requests" in cookie_error.value.detail
 
 
-def test_demo_ip_concurrency_blocks_new_cookies_on_same_ip(db):
+def test_demo_ip_concurrency_blocks_new_cookies_on_same_ip(db, monkeypatch):
+    monkeypatch.setattr("app.services.chat_quota.DEMO_DAILY_LIMIT", 10)
     user = SimpleNamespace(id=uuid4(), is_demo=True)
     # 4 concurrent requests on same IP across different cookies
     cookies = [_demo_cookie(_request()) for _ in range(4)]
@@ -115,7 +117,8 @@ def test_demo_cookie_is_reused_on_reentry():
     assert _demo_cookie(_request(cookie=cookie)) == cookie
 
 
-def test_demo_allows_four_concurrent_requests_and_does_not_charge_rejected_request(db):
+def test_demo_allows_four_concurrent_requests_and_does_not_charge_rejected_request(db, monkeypatch):
+    monkeypatch.setattr("app.services.chat_quota.DEMO_DAILY_LIMIT", 10)
     user = SimpleNamespace(id=uuid4(), is_demo=True)
     cookie = _demo_cookie(_request())
     leases = [reserve_chat_request(db, _request(cookie=cookie), user) for _ in range(4)]

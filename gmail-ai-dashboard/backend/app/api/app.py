@@ -13,6 +13,9 @@ from app.api.routes.gmail import router as gmail_router
 from app.api.routes.llm import router as llm_router
 from app.api.routes.rag import router as rag_router
 from app.api.routes.developer import router as developer_router
+from app.api.routes.export import router as export_router
+from app.middleware.rate_limit_middleware import MultiLayerRateLimitMiddleware
+
 from app.core.config import settings
 from app.database.connection import init_db, SessionLocal, CentralSessionLocal
 from app.core.security import get_current_user, session_user_id
@@ -48,6 +51,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Gmail AI Dashboard API", lifespan=lifespan)
+app.add_middleware(MultiLayerRateLimitMiddleware)
 
 
 @app.middleware("http")
@@ -172,6 +176,7 @@ app.include_router(gmail_router)
 app.include_router(llm_router)
 app.include_router(rag_router)
 app.include_router(developer_router)
+app.include_router(export_router)
 app.add_api_route("/auth/google/callback", google_callback, methods=["GET"], include_in_schema=False)
 
 

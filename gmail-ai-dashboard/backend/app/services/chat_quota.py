@@ -238,7 +238,7 @@ def reserve_chat_request(db: Session, request: Request, user: User) -> ChatConcu
         if user.is_demo:
             ip_str = _extract_client_ip(request)
             ip_identity = f"network_quota:ip:{_digest_ip(ip_str)}"
-            ip_limit = getattr(settings, "demo_ip_daily_limit", DEMO_DAILY_LIMIT)
+            ip_limit = min(getattr(settings, "demo_ip_daily_limit", DEMO_DAILY_LIMIT), DEMO_DAILY_LIMIT)
 
             _lock_identity(db, ip_identity)
 

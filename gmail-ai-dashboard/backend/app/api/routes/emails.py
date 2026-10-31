@@ -1,3 +1,5 @@
+from app.services.gmail_quota import check_outbound_email_quota, record_successful_send
+from app.services.ip_trust import digest_ip, extract_client_ip
 """Email & label query routes — all endpoints enforce user-level authorization."""
 
 import json
@@ -8,7 +10,7 @@ from typing import Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Request, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -728,6 +730,8 @@ class SendEmailRequest(BaseModel):
 @router.post("/gmail/send")
 def send_email_endpoint(
 	payload: SendEmailRequest,
+	request: Request = None,
+	idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 	user: User = Depends(get_current_user),
 	db: Session = Depends(get_db),
 ):
@@ -758,6 +762,21 @@ def send_email_endpoint(
 
 	subject = (payload.subject or "").strip()
 	body = payload.resolved_body
+
+	# Outbound email rate limiting, duplicate protection, and idempotency
+	cached = check_outbound_email_quota(
+		db=db,
+		user=user,
+		recipient=recipient,
+		subject=subject,
+		body=body,
+		cc=cc,
+		bcc=bcc,
+		idempotency_key=idempotency_key,
+		ip_hash=digest_ip(extract_client_ip(request)) if request is not None else None,
+	)
+	if cached:
+		return cached
 
 	account = _get_account(db, user)
 	now = datetime.now(timezone.utc)
@@ -874,9 +893,11 @@ def send_email_endpoint(
 		logger.warning("Could not persist sent email cache: %s", exc)
 		db.rollback()
 
-	return {
+	success_resp = {
 		"status": "SENT",
 		"message": "Email sent successfully.",
 		"delivery_message_id": delivery_id,
 		"demo": False,
 	}
+	record_successful_send(idempotency_key, success_resp)
+	return success_resp

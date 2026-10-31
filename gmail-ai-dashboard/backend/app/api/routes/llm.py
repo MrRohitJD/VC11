@@ -1,3 +1,4 @@
+from app.services.concurrency_manager import acquire_operation_lease
 """LLM classification API routes.
 
 Endpoints:
@@ -97,7 +98,8 @@ def start_backfill(
     from app.services.llm_classification_service import trigger_immediate_classification
     trigger_immediate_classification()
 
-    job = enqueue_classification_job(account.id, job_type="MANUAL_TRAIN")
+    with acquire_operation_lease(db, "llm_classify", account.id, user_limit=1, global_limit=2):
+        job = enqueue_classification_job(account.id, job_type="MANUAL_TRAIN")
     if job is None:
         return {
             "message": "All emails already classified with AI labels.",

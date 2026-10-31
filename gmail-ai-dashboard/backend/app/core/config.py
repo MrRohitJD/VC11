@@ -40,6 +40,23 @@ class Settings(BaseSettings):
     developer_daily_chat_limit: int = Field(500, ge=1, le=10000, validation_alias=AliasChoices("DEVELOPER_DAILY_CHAT_LIMIT"))
     secure_cookies: bool = Field(False, validation_alias=AliasChoices("SECURE_COOKIES", "secure_cookies"))
 
+    # Multi-Layer Rate Limiting & Abuse Prevention
+    rate_limit_enabled: bool = Field(True, validation_alias=AliasChoices("RATE_LIMIT_ENABLED"))
+    rate_limit_global_per_minute: int = Field(5000, ge=10, le=100000, validation_alias=AliasChoices("RATE_LIMIT_GLOBAL_PER_MINUTE"))
+    rate_limit_ip_burst_per_minute: int = Field(120, ge=5, le=10000, validation_alias=AliasChoices("RATE_LIMIT_IP_BURST_PER_MINUTE"))
+    rate_limit_ip_sustained_per_hour: int = Field(2000, ge=50, le=100000, validation_alias=AliasChoices("RATE_LIMIT_IP_SUSTAINED_PER_HOUR"))
+    rate_limit_visitor_burst_per_minute: int = Field(60, ge=5, le=5000, validation_alias=AliasChoices("RATE_LIMIT_VISITOR_BURST_PER_MINUTE"))
+    rate_limit_auth_per_minute: int = Field(10, ge=1, le=100, validation_alias=AliasChoices("RATE_LIMIT_AUTH_PER_MINUTE"))
+    ai_daily_budget_usd: float = Field(10.0, ge=0.1, le=1000.0, validation_alias=AliasChoices("AI_DAILY_BUDGET_USD"))
+    ai_monthly_budget_usd: float = Field(150.0, ge=1.0, le=10000.0, validation_alias=AliasChoices("AI_MONTHLY_BUDGET_USD"))
+    visitor_daily_token_limit: int = Field(50000, ge=1000, le=1000000, validation_alias=AliasChoices("VISITOR_DAILY_TOKEN_LIMIT"))
+    user_daily_token_limit: int = Field(200000, ge=1000, le=5000000, validation_alias=AliasChoices("USER_DAILY_TOKEN_LIMIT"))
+    max_query_characters: int = Field(1000, ge=50, le=10000, validation_alias=AliasChoices("MAX_QUERY_CHARACTERS"))
+    cloudflare_trusted_ips: str = Field("", validation_alias=AliasChoices("CLOUDFLARE_TRUSTED_IPS"))
+    cloudflare_proxy_secret: str = Field("", validation_alias=AliasChoices("CLOUDFLARE_PROXY_SECRET"))
+    demo_visitor_cookie_name: str = Field("gmail_ai_demo_visitor", validation_alias=AliasChoices("DEMO_VISITOR_COOKIE_NAME"))
+    demo_visitor_ttl_days: int = Field(365, ge=1, le=730, validation_alias=AliasChoices("DEMO_VISITOR_TTL_DAYS"))
+
     # LLM & Embedding provider keys
     nvidia_api_key: str = Field("", validation_alias=AliasChoices("NVIDIA_API_KEY"))
     azure_openai_api_key: str = Field("", validation_alias=AliasChoices("AZURE_OPENAI_API_KEY", "AZURE_API_KEY"))

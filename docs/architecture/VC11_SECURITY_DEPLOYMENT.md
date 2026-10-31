@@ -149,25 +149,23 @@ The Developer Settings feature allows users to provide their own PostgreSQL data
 
 ---
 
-## 7. Rate Limiting, Quotas & Concurrency Locks
+## 7. Multi-Layer Rate Limiting, Quotas & Abuse Prevention
 
-*Source file:* `backend/app/services/chat_quota.py`
+*Source files:* `app/middleware/rate_limit_middleware.py`, `app/services/rate_limiter.py`, `app/services/chat_quota.py`, `app/services/ai_budget.py`, `app/services/gmail_quota.py`, `app/services/ip_trust.py`, `app/services/visitor_service.py`, `app/services/concurrency_manager.py`
 
-VC11 incorporates an atomic, database-backed quota and concurrency control engine:
+VC11 incorporates a comprehensive 10-layer defense-in-depth rate limiting, quota enforcement, and abuse-prevention system:
 
-| User Type | Daily Chat Quota | Concurrent Request Limit | Quota Key |
-|---|---|---|---|
-| **Regular User** | 50 requests / day | 5 concurrent requests | `user:{uuid}` |
-| **Developer (Custom LLM Key)** | 500 requests / day | 5 concurrent requests | `user:{uuid}` |
-| **Demo Visitor** | 10 requests / day (per cookie & per IP) | 4 concurrent requests (per cookie & per IP) | `demo:{visitor_hash}` & `network_quota:ip:{ip_hash}` |
-
-### Reservation Algorithm (`reserve_chat_request`):
-1. Acquires a row-level lock (`SELECT ... FOR UPDATE`) on the identity's `chat_concurrency_locks` row.
-2. Purges expired leases older than 3 minutes.
-3. Checks active leases against the concurrency limit; if exceeded, raises `429 Too Many Requests`.
-4. Checks today's usage in `chat_quotas`; if exceeded, raises `429 Too Many Requests` with a `Retry-After` header.
-5. For demo users, validates that neither the visitor session cookie nor the client IP address (extracted via proxy headers `cf-connecting-ip`/`x-forwarded-for` or direct socket) has exceeded the daily limit (10 queries/day) or concurrent active leases (max 4). Deleting cookies cannot bypass rate limiting because the IP rate limit is checked in parallel with cookie tracking.
-6. Increments daily count and issues a `ChatConcurrencyLease` with a background heartbeat thread extending the lease every 30 seconds until the request completes.
+### 10-Layer Defense Matrix:
+1. **Layer 1 — Cloudflare Edge IP Rate Limiting:** Single strategic WAF rule on `/api/*` (excluding `/health`) on the Cloudflare Free Plan: 100 requests / 1 minute with Managed Challenge.
+2. **Layer 2 — IP-Based Application Rate Limiting:** Dual-window (burst: 120 req/min; sustained: 1000 req/hr) per-IP enforcement with verified Cloudflare CIDRs, direct Heroku bypass detection, keyed HMAC-SHA256 IP hashing (`digest_ip`), and temporary in-memory IP cooldowns.
+3. **Layer 3 — Anonymous Visitor-Based Rate Limiting:** Cryptographically signed visitor cookies (`gmail_ai_demo_visitor`) with HMAC-SHA256, tampering detection, DB registration in `demo_visitors`, abuse scoring, and automatic 15-minute temporary blocks.
+4. **Layer 4 — Global Application Rate Limiting:** Cross-application aggregate traffic throttle (default 600 req/min) using atomic PostgreSQL counters in `rate_limit_buckets` to shield Heroku dynos against distributed load.
+5. **Layer 5 — Endpoint-Specific Rate Limiting:** Tiered quotas per endpoint category (Auth: 10-20/min; RAG chat: 10/min; Outbound email: 10/hr; Gmail sync: 3/hr; LLM classify: 30/min; Status/export: 60/min). Injects RFC-compliant `X-RateLimit-*` and `Retry-After` headers.
+6. **Layer 6 — AI Token and Financial Cost Quotas:** Pre-call query character limits (max 1,000 chars), per-visitor token budgets, and global USD financial spend caps ($10/day, $150/month) backed by post-inference accounting in `ai_usage_logs`.
+7. **Layer 7 — RAG and Embedding Resource Limits:** Capped retrieval chunks, batch size limits (max 500 documents per batch), and cross-dyno operation leases for embedding re-indexing.
+8. **Layer 8 — MCP Tool Execution Limits:** Bounded execution timeouts (15s ceiling), max messages cap (100 msgs), and demo mailbox mutation guards (`protect_demo_mailbox`).
+9. **Layer 9 — Gmail Sync & Outbound Email Send Controls:** Manual sync frequency throttles (max 3/hr), outbound email limits (10/hr, 30/day), max 10 total recipients validation, 60-second duplicate-send protection via content fingerprinting, and 5-minute idempotency caching via `Idempotency-Key` header.
+10. **Layer 10 — Abuse Detection, Mitigation & Security Logging:** Centralized `security_events` audit table tracking brute force, spoofed proxy headers, signature tampering, and quota violations with automated IP cooldowns.
 
 ---
 
@@ -184,9 +182,12 @@ VC11 incorporates an atomic, database-backed quota and concurrency control engin
 | **Chat Quotas & Concurrency** | Row-locked DB leases | ✅ IMPLEMENTED | Protects LLM budget & server threads |
 | **XSS Prevention in HTML Emails** | DOMPurify on frontend | ✅ IMPLEMENTED | Sanitizes HTML before rendering |
 | **SQL Injection Prevention** | SQLAlchemy parameterized queries | ✅ IMPLEMENTED | Zero raw string interpolation queries |
-| **API Rate Limiting (General)** | General endpoint protection | ⚠️ GAP / PLANNED | Quota only applies to AI chat |
-| **CSRF Anti-Forgery Token** | Explicit token header | ⚠️ PARTIAL | Relies on SameSite=Lax cookies |
-| **OAuth Token DB Encryption** | Google refresh tokens encrypted at rest | ⚠️ GAP / PLANNED | Stored in DB; should use Fernet |
+| **API Rate Limiting (Multi-Layer)** | 10-layer middleware & atomic DB buckets | ✅ IMPLEMENTED | Global, IP, Visitor, Endpoint, and AI limits |
+| **AI Token & Cost Accounting** | Pre-call budget + `ai_usage_logs` | ✅ IMPLEMENTED | Daily $10 & monthly $150 global ceilings |
+| **Outbound Email Protection** | Duplicate detection + idempotency replay | ✅ IMPLEMENTED | Max 10/hr, 60s duplicate send window |
+| **Security Event Auditing** | `security_events` table + IP cooldowns | ✅ IMPLEMENTED | Structured telemetry for security anomalies |
+| **CSRF Anti-Forgery Token** | Explicit token header & SameSite cookies | ✅ IMPLEMENTED | Enforced via SameSite=Lax/Strict & HMAC |
+| **OAuth Token DB Encryption** | Google refresh tokens encrypted at rest | ⚠️ PLANNED | Stored in DB; should use Fernet |
 
 ---
 

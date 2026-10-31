@@ -1,3 +1,6 @@
+from app.services.ip_trust import digest_ip, extract_client_ip
+from app.services.security_events import record_security_event
+from app.services.visitor_service import get_or_register_visitor
 import base64
 import hashlib
 import hmac
@@ -77,6 +80,16 @@ def google_callback(request: Request, db: Session = Depends(get_db)):
 	code = request.query_params.get("code")
 	if not state or not code or state != request.query_params.get("state"):
 		logger.error("OAuth callback validation failed: state=%s, code=%s, state_match=%s", bool(state), bool(code), state == request.query_params.get("state"))
+		record_security_event(
+			db=db,
+			ip_hash=digest_ip(extract_client_ip(request)),
+			event_type="AUTH_FAILURE",
+			severity="WARNING",
+			endpoint=request.url.path,
+			http_method=request.method,
+			status_code=400,
+			detail="Invalid OAuth callback state or missing authorization code",
+		)
 		raise HTTPException(status_code=400, detail="Invalid OAuth callback")
 
 	flow = _flow(state, code_verifier)
@@ -140,6 +153,10 @@ def enter_demo(request: Request, db: Session = Depends(get_db)):
 	response.set_cookie(SESSION_COOKIE, _encode_session(user), httponly=True,
 	                    secure=settings.secure_cookies, samesite="lax", max_age=86400)
 	set_demo_visitor_cookie(request, response)
+	try:
+		get_or_register_visitor(db, request, response)
+	except Exception as _reg_exc:
+		logger.warning("Could not persist demo visitor: %s", _reg_exc)
 	return response
 
 

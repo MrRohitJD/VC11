@@ -14,6 +14,10 @@ Provides:
 """
 
 from __future__ import annotations
+from app.services.ai_budget import check_ai_budget, estimate_tokens, log_ai_usage
+from app.services.concurrency_manager import acquire_operation_lease
+from app.services.ip_trust import digest_ip, extract_client_ip
+from app.services.visitor_service import get_visitor_id, visitor_hash
 
 import logging
 import json
@@ -118,7 +122,7 @@ class ChatResponse(BaseModel):
 
 
 class IndexRequest(BaseModel):
-    batch_size: Optional[int] = Field(None, description="Maximum emails to process; omit to process all emails")
+    batch_size: Optional[int] = Field(None, ge=1, le=500, description="Maximum emails to process (capped at 500)")
     full_reindex: bool = Field(False, description="Whether to reprocess all emails")
 
 
@@ -204,6 +208,7 @@ def chat_with_assistant(
     """Execute grounded question answering or agent execution for the user's emails."""
     if not body.query or not body.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    check_ai_budget(db, user, request, body.query.strip())
     lease = reserve_chat_request(db, request, user)
     try:
         return _run_chat(body, user, db, x_timezone)
@@ -278,6 +283,26 @@ def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[s
                         seen_kp.add(norm_b)
                         extracted_key_points.append(b)
 
+        # Record AI token and cost metrics
+        try:
+            p_tok = estimate_tokens(body.query)
+            c_tok = estimate_tokens(agent_res.answer)
+            vid = getattr(user, "_visitor_id", None)
+            v_h = visitor_hash(vid) if vid else None
+            log_ai_usage(
+                db=db,
+                operation_type="chat",
+                model_name=getattr(settings, "developer_openai_model", "gpt-4.1-mini"),
+                provider="azure_openai",
+                prompt_tokens=p_tok,
+                completion_tokens=c_tok,
+                ip_hash=getattr(user, "_ip_hash", "internal"),
+                user_id=user.id if not user.is_demo else None,
+                visitor_hash_val=v_h,
+            )
+        except Exception as _ai_log_exc:
+            logger.warning("Could not persist AI usage log: %s", _ai_log_exc)
+
         return ChatResponse(
             answer=agent_res.answer,
             intent=agent_res.intent,
@@ -315,6 +340,7 @@ def stream_chat(
     """Stream observable progress and one final response; never stream reasoning."""
     if not body.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
+    check_ai_budget(db, user, request, body.query.strip())
     lease = reserve_chat_request(db, request, user)
     user_id = user.id
     events = Queue()
@@ -384,12 +410,13 @@ def trigger_rag_indexing(
 ):
     """Run incremental indexing of user's emails into PostgreSQL pgvector."""
     try:
-        results = default_pipeline.index_user_emails(
-            db=db,
-            user_id=user.id,
-            batch_size=body.batch_size,
-            force=body.full_reindex,
-        )
+        with acquire_operation_lease(db, "rag_index", user.id, user_limit=1, global_limit=2):
+            results = default_pipeline.index_user_emails(
+                db=db,
+                user_id=user.id,
+                batch_size=min(body.batch_size or 500, 500),
+                force=body.full_reindex,
+            )
         return {
             "status": "success",
             "user_id": str(user.id),

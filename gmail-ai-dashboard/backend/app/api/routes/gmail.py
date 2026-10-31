@@ -1,3 +1,6 @@
+from app.services.concurrency_manager import acquire_operation_lease
+from app.services.gmail_quota import check_sync_rate_limit
+from app.services.ip_trust import digest_ip, extract_client_ip
 """Gmail sync routes — trigger sync, poll status, SSE stream for real-time progress."""
 
 import asyncio
@@ -7,7 +10,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
@@ -73,6 +76,16 @@ def _sync_lease_fresh(updated_at: datetime | None) -> bool:
 def _run_sync_in_thread(user_id_str: str, user_id: UUID):
 	"""Run Gmail sync in a background thread (not async — Gmail API is blocking)."""
 	db = SessionLocal()
+	try:
+		with acquire_operation_lease(db, "gmail_sync", user_id, user_limit=1, global_limit=2):
+			_run_sync_body(db, user_id_str, user_id)
+	except Exception as exc:
+		logger.exception("Gmail sync job execution failed for user %s: %s", user_id_str, exc)
+	finally:
+		db.close()
+
+
+def _run_sync_body(db: Session, user_id_str: str, user_id: UUID):
 	try:
 		_sync_state[user_id_str].update({"status": "syncing", "stage": "authenticating"})
 		user = db.get(User, user_id)
@@ -178,12 +191,14 @@ def _run_sync_in_thread(user_id_str: str, user_id: UUID):
 
 @router.post("/sync")
 def start_sync(
+	request: Request,
 	user: User = Depends(get_current_user),
 	db: Session = Depends(get_db),
 ):
 	"""Start Gmail synchronization in the background."""
 	if user.is_demo:
 		raise HTTPException(status_code=403, detail="Gmail sync is unavailable in demo mode")
+	check_sync_rate_limit(db, user, digest_ip(extract_client_ip(request)))
 	user_id_str = str(user.id)
 
 	account = db.scalar(select(GmailAccount).where(GmailAccount.user_id == user.id))
