@@ -20,10 +20,9 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Tuple
+from typing import Any, List, Tuple
 from uuid import UUID
 
-import psycopg
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -65,12 +64,48 @@ def step_prepare_columns(db: Session) -> None:
         logger.info("SQLite database detected; ensuring schema compatibility.")
 
 
-def step_reindex_chunks(db: Session, batch_size: int = 100, max_workers: int = 2) -> int:
+def _process_single_batch(batch_items: list[Any], embedder) -> list[tuple[str, list[float]]]:
+    """Format texts and generate 1536 embeddings for a single batch."""
+    texts = []
+    ids = []
+    for row in batch_items:
+        formatted = format_embedding_text(
+            subject=row[3] or "",
+            chunk_text=row[2] or "",
+            sender_name=row[4],
+            sender_email=row[5],
+            gmail_message_id=row[6],
+            received_at=row[7],
+            recipient_emails=row[8],
+        )
+        texts.append(formatted)
+        ids.append(str(row[0]))
+
+    # Call Azure OpenAI Text Embedding 3 Small with retries
+    vectors = None
+    for attempt in range(4):
+        try:
+            vectors = embedder.embed_documents(texts)
+            break
+        except Exception as exc:
+            if attempt == 3:
+                raise
+            time.sleep(2 ** attempt)
+
+    # Validate dimensions
+    results = []
+    for row_id, v in zip(ids, vectors):
+        if len(v) != 1536:
+            raise ValueError(f"Expected 1536 dimensions, got {len(v)}")
+        results.append((row_id, v))
+    return results
+
+
+def step_reindex_chunks(db: Session, batch_size: int = 100, max_workers: int = 4) -> int:
     """Step 3 & 4: Regenerate embeddings for all email chunks using text-embedding-3-small."""
     logger.info("=== STEP 2: Regenerating 1536-dimensional embeddings (text-embedding-3-small) ===")
     embedder = get_embedding_model()
 
-    # Query rows needing 1536 embeddings
     dialect = db.get_bind().dialect.name
     if dialect == "postgresql":
         query = text("""
@@ -84,7 +119,6 @@ def step_reindex_chunks(db: Session, batch_size: int = 100, max_workers: int = 2
         """)
         pending_rows = db.execute(query).fetchall()
     else:
-        # SQLite
         pending_rows = []
 
     total_pending = len(pending_rows)
@@ -93,54 +127,45 @@ def step_reindex_chunks(db: Session, batch_size: int = 100, max_workers: int = 2
         logger.info("All chunks already have 1536-dimensional embeddings!")
         return 0
 
+    batches = [pending_rows[i : i + batch_size] for i in range(0, total_pending, batch_size)]
+    logger.info("Created %d batches of size %d (workers=%d)", len(batches), batch_size, max_workers)
+
     processed = 0
     t_start = time.perf_counter()
 
-    for i in range(0, total_pending, batch_size):
-        batch = pending_rows[i : i + batch_size]
-        texts = []
-        for row in batch:
-            formatted = format_embedding_text(
-                subject=row[3] or "",
-                chunk_text=row[2] or "",
-                sender_name=row[4],
-                sender_email=row[5],
-                gmail_message_id=row[6],
-                received_at=row[7],
-                recipient_emails=row[8],
-            )
-            texts.append(formatted)
+    # Process batches concurrently
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_batch = {
+            executor.submit(_process_single_batch, b, embedder): idx
+            for idx, b in enumerate(batches)
+        }
 
-        # Call Azure OpenAI
-        t_batch_start = time.perf_counter()
-        vectors = embedder.embed_documents(texts)
-        t_batch_elapsed = time.perf_counter() - t_batch_start
+        for future in as_completed(future_to_batch):
+            batch_idx = future_to_batch[future]
+            try:
+                id_vec_pairs = future.result()
+                # Fast bulk update using raw connection with executemany
+                raw_conn = db.connection().connection
+                with raw_conn.cursor() as cur:
+                    cur.executemany(
+                        "UPDATE email_embeddings SET embedding_1536 = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                        [(str(v), rid) for rid, v in id_vec_pairs]
+                    )
+                db.commit()
 
-        # Validate dimensions
-        for v in vectors:
-            if len(v) != 1536:
-                raise ValueError(f"Expected 1536 dimensions, got {len(v)}")
+                processed += len(id_vec_pairs)
+                elapsed = time.perf_counter() - t_start
+                rate = processed / elapsed if elapsed > 0 else 0
+                pct = (processed / total_pending) * 100
+                logger.info(
+                    "[%5.1f%%] Completed batch %d/%d (%d/%d chunks, rate: %.1f chunks/s)",
+                    pct, batch_idx + 1, len(batches), processed, total_pending, rate
+                )
+            except Exception as exc:
+                logger.error("Batch %d failed with error: %s", batch_idx, exc)
+                raise
 
-        # Update database
-        for (row, vec) in zip(batch, vectors):
-            db.execute(text("""
-                UPDATE email_embeddings
-                SET embedding_1536 = :vec,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = :id;
-            """), {"vec": str(list(vec)), "id": row[0]})
-
-        db.commit()
-        processed += len(batch)
-        overall_elapsed = time.perf_counter() - t_start
-        speed = processed / overall_elapsed if overall_elapsed > 0 else 0
-        percent = (processed / total_pending) * 100
-        logger.info(
-            "[%5.1f%%] Embedded %d/%d chunks (batch: %.2fs, overall: %.1f chunks/s)",
-            percent, processed, total_pending, t_batch_elapsed, speed
-        )
-
-    logger.info("Successfully re-indexed %d chunks into embedding_1536!", processed)
+    logger.info("Successfully re-indexed %d chunks into embedding_1536 in %.2fs!", processed, time.perf_counter() - t_start)
     return processed
 
 
@@ -208,12 +233,18 @@ def step_test_rag_retrieval(db: Session) -> bool:
 
     for query in test_queries:
         q_vec = embedder.embed_query(query)
-        res = db.execute(text("""
+        # Determine whether to query embedding or embedding_1536
+        target_col = "embedding_1536" if db.scalar(text("""
+            SELECT count(*) FROM information_schema.columns 
+            WHERE table_name = 'email_embeddings' AND column_name = 'embedding_1536';
+        """)) else "embedding"
+
+        res = db.execute(text(f"""
             SELECT ee.id, ee.email_subject, ee.sender_email,
-                   (ee.embedding_1536 <=> :q_vec) AS distance
+                   (ee.{target_col} <=> :q_vec) AS distance
             FROM email_embeddings ee
-            WHERE ee.embedding_1536 IS NOT NULL
-            ORDER BY ee.embedding_1536 <=> :q_vec ASC
+            WHERE ee.{target_col} IS NOT NULL
+            ORDER BY ee.{target_col} <=> :q_vec ASC
             LIMIT 3;
         """), {"q_vec": str(list(q_vec))}).fetchall()
 
@@ -240,31 +271,26 @@ def step_switch_production_traffic(db: Session) -> None:
     """))
     db.commit()
 
-    # 2. Swap columns: embedding -> embedding_3072 (backup) and embedding_1536 -> embedding
-    logger.info("Executing zero-downtime column swap...")
-    # Drop old 3072 index
+    # 2. Drop old 3072 index
+    logger.info("Dropping old 3072 HNSW index...")
     db.execute(text("DROP INDEX IF EXISTS ix_email_embeddings_embedding_hnsw;"))
-    # If embedding_3072 column doesn't exist yet, rename embedding to embedding_3072
-    # If embedding_3072 already exists and has data, drop old 3072 embedding column
-    has_3072_col = db.scalar(text("""
-        SELECT count(*) FROM information_schema.columns 
-        WHERE table_name = 'email_embeddings' AND column_name = 'embedding_3072';
-    """)) or 0
+    db.commit()
 
-    if has_3072_col and db.scalar(text("SELECT count(*) FROM email_embeddings WHERE embedding_3072 IS NOT NULL;")):
-        db.execute(text("ALTER TABLE email_embeddings DROP COLUMN embedding;"))
-    else:
-        db.execute(text("ALTER TABLE email_embeddings RENAME COLUMN embedding TO embedding_3072;"))
-
+    # 3. Swap columns
+    logger.info("Executing zero-downtime column swap...")
+    # Drop old 3072 embedding column only because embedding_3072 holds the backup
+    db.execute(text("ALTER TABLE email_embeddings DROP COLUMN IF EXISTS embedding;"))
     db.execute(text("ALTER TABLE email_embeddings RENAME COLUMN embedding_1536 TO embedding;"))
+    db.commit()
 
-    # Rename index
+    # 4. Rename index to production name
     db.execute(text("""
         ALTER INDEX ix_email_embeddings_embedding_1536_hnsw 
         RENAME TO ix_email_embeddings_embedding_hnsw;
     """))
+    db.commit()
 
-    # Update metadata and defaults
+    # 5. Update metadata and defaults
     db.execute(text("""
         ALTER TABLE email_embeddings ALTER COLUMN embedding_dimensions SET DEFAULT 1536;
         ALTER TABLE email_embeddings ALTER COLUMN vector_collection SET DEFAULT 'postgres_halfvec_1536';
@@ -287,7 +313,8 @@ def step_rollback(db: Session) -> None:
 
     db.execute(text("DROP INDEX IF EXISTS ix_email_embeddings_embedding_hnsw;"))
     db.execute(text("ALTER TABLE email_embeddings RENAME COLUMN embedding TO embedding_1536;"))
-    db.execute(text("ALTER TABLE email_embeddings RENAME COLUMN embedding_3072 TO embedding;"))
+    db.execute(text("ALTER TABLE email_embeddings ADD COLUMN embedding halfvec(3072);"))
+    db.execute(text("UPDATE email_embeddings SET embedding = embedding_3072;"))
     db.execute(text("""
         CREATE INDEX IF NOT EXISTS ix_email_embeddings_embedding_hnsw 
         ON email_embeddings USING hnsw (embedding halfvec_cosine_ops);
@@ -310,6 +337,7 @@ def main():
     parser.add_argument("--action", choices=["all", "prepare", "reindex", "validate", "test", "switch", "rollback"],
                         default="all", help="Action to perform")
     parser.add_argument("--batch-size", type=int, default=100, help="Batch size for embedding requests")
+    parser.add_argument("--workers", type=int, default=4, help="Worker threads for concurrent embedding requests")
     args = parser.parse_args()
 
     with SessionLocal() as db:
@@ -317,7 +345,7 @@ def main():
             step_prepare_columns(db)
         elif args.action == "reindex":
             step_prepare_columns(db)
-            step_reindex_chunks(db, batch_size=args.batch_size)
+            step_reindex_chunks(db, batch_size=args.batch_size, max_workers=args.workers)
         elif args.action == "validate":
             step_validate_embeddings(db)
         elif args.action == "test":
@@ -328,7 +356,7 @@ def main():
             step_rollback(db)
         elif args.action == "all":
             step_prepare_columns(db)
-            step_reindex_chunks(db, batch_size=args.batch_size)
+            step_reindex_chunks(db, batch_size=args.batch_size, max_workers=args.workers)
             if not step_validate_embeddings(db):
                 logger.error("Validation failed! Aborting switch.")
                 sys.exit(1)
