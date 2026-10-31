@@ -31,7 +31,7 @@ def _recipient_list(email: Email) -> list[str]:
 
 
 class RAGIndexingPipeline:
-    """Generate and persist 3072-dimensional vectors in PostgreSQL."""
+    """Generate and persist 1536-dimensional vectors in PostgreSQL."""
 
     def __init__(self, vector_store_manager=None, chunker=default_chunker):
         self.vector_store = vector_store_manager

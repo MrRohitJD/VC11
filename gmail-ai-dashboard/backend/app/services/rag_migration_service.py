@@ -58,7 +58,7 @@ class RAGMigrationService:
 
     def __init__(self, embedding_provider: Optional[EmbeddingProvider] = None,
                  target_collection_name: Optional[str] = None):
-        self.target_collection = target_collection_name or "postgres_halfvec_3072"
+        self.target_collection = target_collection_name or "postgres_halfvec_1536"
         self.embedder = embedding_provider or default_embedding_provider
 
     def migrate_all_chunks(self, db: Session, batch_size: int = 50,

@@ -1,8 +1,8 @@
-"""Azure OpenAI text-embedding-3-large embedding provider via LangChain.
+"""Azure OpenAI text-embedding-3-small embedding provider via LangChain.
 
 Uses LangChain's AzureOpenAIEmbeddings with:
 - Configurable deployment and model settings
-- Dimension consistency enforcement (3072 dims)
+- Dimension consistency enforcement (1536 dims)
 - Batch generation and rate-limit retry handling
 - Deterministic test/offline fallback implementing LangChain Embeddings interface
 """
@@ -23,9 +23,11 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-AZURE_OPENAI_DEFAULT_DEPLOYMENT = "text-embedding-3-large"
-AZURE_OPENAI_DEFAULT_MODEL = "text-embedding-3-large"
+AZURE_OPENAI_DEFAULT_DEPLOYMENT = "text-embedding-3-small"
+AZURE_OPENAI_DEFAULT_MODEL = "text-embedding-3-small"
+AZURE_OPENAI_SMALL_DIMENSIONS = 1536
 AZURE_OPENAI_LARGE_DIMENSIONS = 3072
+AZURE_OPENAI_DEFAULT_DIMENSIONS = 1536
 
 
 class DeterministicOfflineEmbeddings(Embeddings):
@@ -35,7 +37,7 @@ class DeterministicOfflineEmbeddings(Embeddings):
     Azure OpenAI endpoints are unconfigured or unreachable.
     """
 
-    def __init__(self, dimensions: int = AZURE_OPENAI_LARGE_DIMENSIONS):
+    def __init__(self, dimensions: int = AZURE_OPENAI_SMALL_DIMENSIONS):
         self.dimensions = dimensions
 
     def embed_query(self, text: str) -> List[float]:
@@ -69,7 +71,7 @@ def get_embedding_model() -> Embeddings:
     Otherwise, returns DeterministicOfflineEmbeddings to ensure reliable local execution.
     In production environments, raises RuntimeError instead of silently falling back.
     """
-    embedding_key = (settings.azure_openai_embedding_api_key or settings.azure_openai_api_key).strip()
+    embedding_key = (settings.azure_openai_embedding_api_key or getattr(settings, "azure_embedding_small_api_key", "") or settings.azure_openai_api_key).strip()
     embedding_endpoint = (settings.azure_openai_embedding_endpoint or settings.azure_openai_endpoint).strip()
     has_key = bool(embedding_key)
     has_endpoint = bool(embedding_endpoint)
@@ -86,7 +88,7 @@ def get_embedding_model() -> Embeddings:
                 azure_endpoint=embedding_endpoint,
                 api_key=embedding_key,
                 api_version=settings.azure_openai_api_version,
-                azure_deployment=settings.azure_openai_embedding_deployment,
+                azure_deployment=(getattr(settings, "embedding_model_deployment", "") or settings.azure_openai_embedding_deployment),
                 model=settings.azure_openai_embedding_model or AZURE_OPENAI_DEFAULT_MODEL,
             )
         except Exception as exc:
@@ -103,8 +105,9 @@ def get_embedding_model() -> Embeddings:
             "Falling back to DeterministicOfflineEmbeddings."
         )
 
-    logger.info("Using DeterministicOfflineEmbeddings (dimensions=%d)", AZURE_OPENAI_LARGE_DIMENSIONS)
-    return DeterministicOfflineEmbeddings(dimensions=AZURE_OPENAI_LARGE_DIMENSIONS)
+    dims = settings.embedding_dimensions or AZURE_OPENAI_SMALL_DIMENSIONS
+    logger.info("Using DeterministicOfflineEmbeddings (dimensions=%d)", dims)
+    return DeterministicOfflineEmbeddings(dimensions=dims)
 
 
 default_embeddings = get_embedding_model()

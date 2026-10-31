@@ -28,10 +28,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 try:
     from pgvector.sqlalchemy import HALFVEC
-    EMBEDDING_COLUMN_TYPE = HALFVEC(3072).with_variant(JSON(), "sqlite")
+    EMBEDDING_COLUMN_TYPE = HALFVEC(1536).with_variant(JSON(), "sqlite")
+    EMBEDDING_3072_COLUMN_TYPE = HALFVEC(3072).with_variant(JSON(), "sqlite")
 except ImportError:
     HALFVEC = None
     EMBEDDING_COLUMN_TYPE = JSON()
+    EMBEDDING_3072_COLUMN_TYPE = JSON()
 
 from app.models.email import Base, Email, User, utcnow
 
@@ -79,6 +81,8 @@ class EmailEmbedding(Base):
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     chunk_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("email_chunks.id", ondelete="CASCADE"), nullable=False)
     embedding: Mapped[list[float] | None] = mapped_column(EMBEDDING_COLUMN_TYPE)
+    embedding_1536: Mapped[list[float] | None] = mapped_column(EMBEDDING_COLUMN_TYPE, nullable=True)
+    embedding_3072: Mapped[list[float] | None] = mapped_column(EMBEDDING_3072_COLUMN_TYPE, nullable=True)
     email_id: Mapped[UUID | None] = mapped_column(Uuid, ForeignKey("emails.id", ondelete="CASCADE"), nullable=True)
     email_subject: Mapped[str | None] = mapped_column(Text)
     sender_email: Mapped[str | None] = mapped_column(Text)
@@ -87,16 +91,16 @@ class EmailEmbedding(Base):
     embedding_text: Mapped[str | None] = mapped_column(Text)
     embedding_type: Mapped[str | None] = mapped_column(String(30), default="email", server_default="email")
     vector_collection: Mapped[str] = mapped_column(
-        String(100), default="postgres_halfvec_3072", server_default="postgres_halfvec_3072", nullable=False
+        String(100), default="postgres_halfvec_1536", server_default="postgres_halfvec_1536", nullable=False
     )
     vector_record_id: Mapped[str] = mapped_column(String(255), nullable=False)
     embedding_provider: Mapped[str] = mapped_column(
         String(50), default="azure_openai", server_default="azure_openai", nullable=False
     )
     embedding_model: Mapped[str] = mapped_column(
-        String(100), default="text-embedding-3-large", server_default="text-embedding-3-large", nullable=False
+        String(100), default="text-embedding-3-small", server_default="text-embedding-3-small", nullable=False
     )
-    embedding_dimensions: Mapped[int] = mapped_column(Integer, default=3072, server_default="3072", nullable=False)
+    embedding_dimensions: Mapped[int] = mapped_column(Integer, default=1536, server_default="1536", nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="INDEXED", server_default="INDEXED", nullable=False)
     created_at: Mapped[datetime] = mapped_column(

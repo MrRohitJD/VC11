@@ -18,6 +18,7 @@ def test_query_embeddings_use_separate_resource_then_shared_fallback(monkeypatch
     monkeypatch.setattr(settings, "azure_openai_api_key", "chat-resource-key")
     monkeypatch.setattr(settings, "azure_openai_embedding_endpoint", "https://embedding-resource.openai.azure.com/")
     monkeypatch.setattr(settings, "azure_openai_embedding_api_key", "embedding-resource-key")
+    monkeypatch.setattr(settings, "azure_embedding_small_api_key", "embedding-resource-key")
     monkeypatch.setattr(embeddings, "AzureOpenAIEmbeddings", lambda **kwargs: kwargs)
 
     separate = embeddings.get_embedding_model()
@@ -26,6 +27,7 @@ def test_query_embeddings_use_separate_resource_then_shared_fallback(monkeypatch
 
     monkeypatch.setattr(settings, "azure_openai_embedding_endpoint", "")
     monkeypatch.setattr(settings, "azure_openai_embedding_api_key", "")
+    monkeypatch.setattr(settings, "azure_embedding_small_api_key", "")
     shared = embeddings.get_embedding_model()
     assert shared["azure_endpoint"] == "https://chat-resource.openai.azure.com/"
     assert shared["api_key"] == "chat-resource-key"
@@ -36,6 +38,7 @@ def test_background_indexer_embeddings_use_separate_resource(monkeypatch):
     monkeypatch.setattr(settings, "azure_openai_api_key", "chat-resource-key")
     monkeypatch.setattr(settings, "azure_openai_embedding_endpoint", "https://embedding-resource.openai.azure.com/")
     monkeypatch.setattr(settings, "azure_openai_embedding_api_key", "embedding-resource-key")
+    monkeypatch.setattr(settings, "azure_embedding_small_api_key", "embedding-resource-key")
     captured = {}
 
     def fake_client(**kwargs):

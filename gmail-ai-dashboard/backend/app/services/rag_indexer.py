@@ -45,7 +45,7 @@ class RAGIndexerService:
     """Compatibility and large-scale indexing API backed entirely by ``email_embeddings``."""
 
     def __init__(self, collection_name=None, embedding_provider=None):
-        self.collection_name = collection_name or "postgres_halfvec_3072"
+        self.collection_name = collection_name or "postgres_halfvec_1536"
         self.embedding_provider = embedding_provider
         self.vector_store = PostgresVectorStoreManager(embedding_function=embedding_provider)
         self.vector_store.collection_name = self.collection_name
@@ -412,7 +412,7 @@ class RAGIndexerService:
 
                             # Cost accounting: ~2000 chars per chunk -> ~500 tokens
                             chunk_tokens = chunks * 500
-                            cost = calculate_cost("text-embedding-3-large", chunk_tokens, 0)
+                            cost = calculate_cost("text-embedding-3-small", chunk_tokens, 0)
                             current_st["estimated_cost_usd"] = round(current_st.get("estimated_cost_usd", 0.0) + cost, 6)
 
                         # Record AI usage log
@@ -420,7 +420,7 @@ class RAGIndexerService:
                             log_ai_usage(
                                 db=db,
                                 operation_type="rag_embedding",
-                                model_name="text-embedding-3-large",
+                                model_name="text-embedding-3-small",
                                 provider=getattr(settings, "embedding_provider", "azure_openai"),
                                 prompt_tokens=chunks * 500,
                                 completion_tokens=0,

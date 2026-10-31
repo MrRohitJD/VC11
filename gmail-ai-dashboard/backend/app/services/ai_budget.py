@@ -21,11 +21,21 @@ logger = logging.getLogger(__name__)
 
 # Model pricing in USD per 1,000,000 tokens
 MODEL_PRICING = {
+    # Azure OpenAI GPT-5-nano
+    "gpt-5-nano": {"input_per_million": 0.05, "output_per_million": 0.20},
+    "openai/gpt-5-nano": {"input_per_million": 0.05, "output_per_million": 0.20},
+    "azure/gpt-5-nano": {"input_per_million": 0.05, "output_per_million": 0.20},
+    # Microsoft-Decision-1
+    "mcro": {"input_per_million": 0.03, "output_per_million": 0.0},
+    "microsoft-decision-1": {"input_per_million": 0.03, "output_per_million": 0.0},
+    "azure/mcro": {"input_per_million": 0.03, "output_per_million": 0.0},
     # Azure OpenAI / OpenAI GPT-4.1-mini
     "gpt-4.1-mini": {"input_per_million": 0.15, "output_per_million": 0.60},
     "openai/gpt-4.1-mini": {"input_per_million": 0.15, "output_per_million": 0.60},
     "azure/gpt-4.1-mini": {"input_per_million": 0.15, "output_per_million": 0.60},
     # Embeddings
+    "text-embedding-3-small": {"input_per_million": 0.02, "output_per_million": 0.0},
+    "azure/text-embedding-3-small": {"input_per_million": 0.02, "output_per_million": 0.0},
     "text-embedding-3-large": {"input_per_million": 0.13, "output_per_million": 0.0},
     "azure/text-embedding-3-large": {"input_per_million": 0.13, "output_per_million": 0.0},
     # Google Gemini 2.5 Flash

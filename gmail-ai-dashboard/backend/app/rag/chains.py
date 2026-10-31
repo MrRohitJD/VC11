@@ -162,18 +162,20 @@ def get_chat_model() -> Any:
     Failures use real provider fallbacks; no dummy credentials or local verdicts.
     """
     models = []
-    has_azure_key = bool(settings.azure_openai_api_key and settings.azure_openai_api_key.strip())
+    azure_key = (getattr(settings, "azure_openai_nano_api_key", "") or settings.azure_openai_api_key or "").strip()
+    has_azure_key = bool(azure_key)
     has_azure_endpoint = bool(settings.azure_openai_endpoint and settings.azure_openai_endpoint.strip())
+    azure_deployment = (getattr(settings, "gpt_model_deployment", "") or getattr(settings, "azure_openai_deployment", "gpt-5-nano")).strip()
 
     if has_azure_key and has_azure_endpoint:
         try:
             models.append(AzureChatOpenAI(
                 azure_endpoint=settings.azure_openai_endpoint,
-                api_key=settings.azure_openai_api_key,
+                api_key=azure_key,
                 api_version=settings.azure_openai_api_version,
-                azure_deployment=getattr(settings, "azure_openai_deployment", "gpt-4.1-mini"),
+                azure_deployment=azure_deployment,
                 temperature=1,
-                max_tokens=settings.llm_max_completion_tokens,
+                max_completion_tokens=settings.llm_max_completion_tokens,
                 timeout=settings.llm_request_timeout_seconds,
                 max_retries=settings.llm_max_retries,
             ))

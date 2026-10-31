@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent  # backend/
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     demo_ip_daily_limit: int = Field(10, ge=1, le=1000, validation_alias=AliasChoices("DEMO_IP_DAILY_LIMIT", "demo_ip_daily_limit"))
     demo_global_daily_limit: int = Field(500, ge=10, le=100000, validation_alias=AliasChoices("DEMO_GLOBAL_DAILY_LIMIT"))
     developer_gemini_model: str = "gemini-2.5-flash"
-    developer_openai_model: str = "gpt-4.1-mini"
+    developer_openai_model: str = "gpt-5-nano"
     developer_daily_chat_limit: int = Field(500, ge=1, le=10000, validation_alias=AliasChoices("DEVELOPER_DAILY_CHAT_LIMIT"))
     secure_cookies: bool = Field(False, validation_alias=AliasChoices("SECURE_COOKIES", "secure_cookies"))
 
@@ -62,26 +62,75 @@ class Settings(BaseSettings):
 
     # LLM & Embedding provider keys
     nvidia_api_key: str = Field("", validation_alias=AliasChoices("NVIDIA_API_KEY"))
-    azure_openai_api_key: str = Field("", validation_alias=AliasChoices("AZURE_OPENAI_API_KEY", "AZURE_API_KEY"))
-    azure_openai_endpoint: str = Field("", validation_alias=AliasChoices("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_BASE", "AZURE_ENDPOINT"))
+    azure_openai_nano_api_key: str = Field(
+        "",
+        validation_alias=AliasChoices("AZURE_OPENAI_NANO_API_KEY", "AZURE_OPENAI_API_KEY", "AZURE_API_KEY"),
+    )
+    azure_decision_api_key: str = Field(
+        "",
+        validation_alias=AliasChoices("AZURE_DECISION_API_KEY", "AZURE_OPENAI_API_KEY", "AZURE_API_KEY"),
+    )
+    azure_embedding_small_api_key: str = Field(
+        "",
+        validation_alias=AliasChoices(
+            "AZURE_EMBEDDING_SMALL_API_KEY",
+            "AZURE_OPENAI_EMBEDDING_API_KEY",
+            "AZURE_OPENAI_API_KEY",
+            "AZURE_API_KEY",
+        ),
+    )
+    azure_openai_api_key: str = Field(
+        "",
+        validation_alias=AliasChoices("AZURE_OPENAI_API_KEY", "AZURE_API_KEY", "AZURE_OPENAI_NANO_API_KEY"),
+    )
+    azure_openai_endpoint: str = Field(
+        "",
+        validation_alias=AliasChoices("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_BASE", "AZURE_ENDPOINT"),
+    )
     # Optional separate resource for query and background email embeddings.
     # When unset, embeddings continue to use the chat resource above.
-    azure_openai_embedding_api_key: str = Field("", validation_alias="AZURE_OPENAI_EMBEDDING_API_KEY")
+    azure_openai_embedding_api_key: str = Field(
+        "",
+        validation_alias=AliasChoices("AZURE_OPENAI_EMBEDDING_API_KEY", "AZURE_EMBEDDING_SMALL_API_KEY"),
+    )
     azure_openai_embedding_endpoint: str = Field("", validation_alias="AZURE_OPENAI_EMBEDDING_ENDPOINT")
     azure_openai_api_version: str = Field("2024-02-01", validation_alias=AliasChoices("AZURE_OPENAI_API_VERSION", "OPENAI_API_VERSION"))
-    azure_openai_deployment: str = Field("gpt-4.1-mini", validation_alias=AliasChoices("AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_CHAT_DEPLOYMENT"))
-    azure_openai_embedding_deployment: str = Field(
-        "text-embedding-3-large",
+
+    gpt_model_deployment: str = Field(
+        "gpt-5-nano",
+        validation_alias=AliasChoices("GPT_MODEL_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_CHAT_DEPLOYMENT"),
+    )
+    classification_model_deployment: str = Field(
+        "MCRO",
+        validation_alias=AliasChoices("CLASSIFICATION_MODEL_DEPLOYMENT", "AZURE_CLASSIFICATION_DEPLOYMENT"),
+    )
+    embedding_model_deployment: str = Field(
+        "text-embedding-3-small",
         validation_alias=AliasChoices(
+            "EMBEDDING_MODEL_DEPLOYMENT",
             "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
             "AZURE_OPENAI_DEPLOYMENT_NAME",
             "AZURE_EMBEDDING_DEPLOYMENT",
             "AZURE_OPENAI_DEPLOYMENT",
         ),
     )
+    azure_openai_deployment: str = Field(
+        "gpt-5-nano",
+        validation_alias=AliasChoices("AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_CHAT_DEPLOYMENT", "GPT_MODEL_DEPLOYMENT"),
+    )
+    azure_openai_embedding_deployment: str = Field(
+        "text-embedding-3-small",
+        validation_alias=AliasChoices(
+            "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
+            "AZURE_OPENAI_DEPLOYMENT_NAME",
+            "AZURE_EMBEDDING_DEPLOYMENT",
+            "AZURE_OPENAI_DEPLOYMENT",
+            "EMBEDDING_MODEL_DEPLOYMENT",
+        ),
+    )
     azure_openai_embedding_model: str = Field(
-        "text-embedding-3-large",
-        validation_alias=AliasChoices("AZURE_OPENAI_EMBEDDING_MODEL", "AZURE_EMBEDDING_MODEL"),
+        "text-embedding-3-small",
+        validation_alias=AliasChoices("AZURE_OPENAI_EMBEDDING_MODEL", "AZURE_EMBEDDING_MODEL", "EMBEDDING_MODEL_DEPLOYMENT"),
     )
     openai_api_key: str = Field("", validation_alias=AliasChoices("OPENAI_API_KEY"))
     explabs_api_key: str = Field("", validation_alias=AliasChoices("EXPLABS_API_KEY"))
@@ -113,8 +162,27 @@ class Settings(BaseSettings):
     )
 
     embedding_provider: str = Field("azure_openai", validation_alias=AliasChoices("RAG_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"))
-    embedding_model_name: str = Field("text-embedding-3-large", validation_alias=AliasChoices("RAG_EMBEDDING_MODEL", "EMBEDDING_MODEL"))
-    embedding_dimensions: int = Field(3072, validation_alias=AliasChoices("RAG_EMBEDDING_DIMENSIONS", "EMBEDDING_DIMENSIONS"))
+    embedding_model_name: str = Field("text-embedding-3-small", validation_alias=AliasChoices("RAG_EMBEDDING_MODEL", "EMBEDDING_MODEL", "EMBEDDING_MODEL_DEPLOYMENT"))
+    embedding_dimensions: int = Field(1536, validation_alias=AliasChoices("RAG_EMBEDDING_DIMENSIONS", "EMBEDDING_DIMENSIONS"))
+    vector_collection: str = Field("postgres_halfvec_1536", validation_alias=AliasChoices("RAG_VECTOR_COLLECTION", "VECTOR_COLLECTION"))
+
+    @model_validator(mode="after")
+    def sync_azure_keys(self) -> "Settings":
+        if not self.azure_openai_nano_api_key and self.azure_openai_api_key:
+            self.azure_openai_nano_api_key = self.azure_openai_api_key
+        if not self.azure_decision_api_key and self.azure_openai_api_key:
+            self.azure_decision_api_key = self.azure_openai_api_key
+        if not self.azure_embedding_small_api_key:
+            self.azure_embedding_small_api_key = self.azure_openai_embedding_api_key or self.azure_openai_api_key
+        if not self.azure_openai_api_key:
+            self.azure_openai_api_key = self.azure_openai_nano_api_key or self.azure_decision_api_key or self.azure_embedding_small_api_key
+        if not self.azure_openai_embedding_api_key:
+            self.azure_openai_embedding_api_key = self.azure_embedding_small_api_key
+        if not self.gpt_model_deployment:
+            self.gpt_model_deployment = self.azure_openai_deployment or "gpt-5-nano"
+        if not self.embedding_model_deployment:
+            self.embedding_model_deployment = self.azure_openai_embedding_deployment or "text-embedding-3-small"
+        return self
 
     @field_validator("vector_backend")
     @classmethod

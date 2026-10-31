@@ -1,4 +1,4 @@
-"""CLI script to migrate existing PostgreSQL email chunks to PostgreSQL pgvector using OpenAI text-embedding-3-large."""
+"""CLI script to migrate existing PostgreSQL email chunks to PostgreSQL pgvector using OpenAI text-embedding-3-small."""
 
 import argparse
 import os
@@ -13,19 +13,19 @@ from app.services.rag_migration_service import RAGMigrationService
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Migrate email chunks to PostgreSQL pgvector with Azure OpenAI text-embedding-3-large")
+    parser = argparse.ArgumentParser(description="Migrate email chunks to PostgreSQL pgvector with Azure OpenAI text-embedding-3-small")
     parser.add_argument("--batch-size", type=int, default=50, help="Batch size for Azure OpenAI embedding requests")
     args = parser.parse_args()
 
     db = SessionLocal()
     try:
         service = RAGMigrationService()
-        deployment = getattr(service.embedder, "deployment_name", "text-embedding-3-large")
-        dims = getattr(service.embedder, "dimensions", 3072)
+        deployment = getattr(service.embedder, "deployment_name", "text-embedding-3-small")
+        dims = getattr(service.embedder, "dimensions", 1536)
         provider = getattr(service.embedder, "provider", "azure_openai")
 
         print("================================================================")
-        print("  GMAIL RAG: MIGRATING TO AZURE OPENAI text-embedding-3-large    ")
+        print("  GMAIL RAG: MIGRATING TO AZURE OPENAI text-embedding-3-small    ")
         print("================================================================")
         print(f"Provider:          {provider}")
         print(f"Azure Deployment:  {deployment}")

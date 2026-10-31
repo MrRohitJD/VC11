@@ -144,7 +144,8 @@ def test_personal_model_uses_only_selected_provider(monkeypatch):
 def test_personal_key_increases_daily_limit_only():
     request = Request({"type": "http", "headers": []})
     owner = SimpleNamespace(id=uuid4(), is_demo=False)
-    assert _identity_and_limits(request, owner)[1:] == (50, 5)
+    from app.services import chat_quota
+    assert _identity_and_limits(request, owner)[1:] == (chat_quota.USER_DAILY_LIMIT, 5)
     token = dev.llm_key_context.set(("openai", "private-key"))
     try:
         assert _identity_and_limits(request, owner)[1:] == (500, 5)

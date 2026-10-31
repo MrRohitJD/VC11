@@ -219,7 +219,7 @@ def test_large_mailbox_successive_batching(db_engine, setup_user_and_account):
         db.commit()
 
     service = RAGIndexerService()
-    service.pipeline.embedding_function = DeterministicOfflineEmbeddings(dimensions=3072)
+    service.pipeline.embedding_function = DeterministicOfflineEmbeddings(dimensions=settings.embedding_dimensions)
 
     # Execute worker loop with batch_size=100
     job_id = str(uuid4())
@@ -276,7 +276,7 @@ def test_indexing_resumes_after_interruption(db_engine, setup_user_and_account):
         db.commit()
 
     service = RAGIndexerService()
-    service.pipeline.embedding_function = DeterministicOfflineEmbeddings(dimensions=3072)
+    service.pipeline.embedding_function = DeterministicOfflineEmbeddings(dimensions=settings.embedding_dimensions)
 
     # 1. Index first 200 emails synchronously (simulating partial run before dyno shutdown)
     with SessionMaker() as db:
@@ -334,7 +334,7 @@ def test_indexing_pause_and_resume(db_engine, setup_user_and_account):
         db.commit()
 
     service = RAGIndexerService()
-    service.pipeline.embedding_function = DeterministicOfflineEmbeddings(dimensions=3072)
+    service.pipeline.embedding_function = DeterministicOfflineEmbeddings(dimensions=settings.embedding_dimensions)
 
     # Request pause
     service.pause_indexing(user.id)
@@ -372,7 +372,7 @@ def test_duplicate_embeddings_prevented(db_engine, setup_user_and_account):
         db.commit()
 
     service = RAGIndexerService()
-    service.pipeline.embedding_function = DeterministicOfflineEmbeddings(dimensions=3072)
+    service.pipeline.embedding_function = DeterministicOfflineEmbeddings(dimensions=settings.embedding_dimensions)
 
     # First indexing
     with SessionMaker() as db:
@@ -425,7 +425,7 @@ def test_ai_financial_budget_enforcement_in_indexing(db_session, setup_user_and_
         user_id=user.id,
         ip_hash="198.51.100.99",
         operation_type="chat",
-        model_name="gpt-4.1-mini",
+        model_name=getattr(settings, "developer_openai_model", "gpt-5-nano"),
         provider="azure_openai",
         prompt_tokens=5000000,
         completion_tokens=5000000,

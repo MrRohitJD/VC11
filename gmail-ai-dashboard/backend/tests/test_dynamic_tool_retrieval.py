@@ -1,3 +1,4 @@
+from app.core.config import settings
 """Focused retrieval contracts that require no network or production mailbox."""
 import json
 from types import SimpleNamespace
@@ -325,7 +326,7 @@ def test_vector_scope_stays_in_sql_for_plain_queries(monkeypatch):
 
     class Embeddings:
         def embed_query(self, query):
-            return [1.0] * 3072
+            return [1.0] * settings.embedding_dimensions
 
     with Session(engine) as db:
         user_id, other_user = uuid4(), uuid4()
@@ -344,7 +345,7 @@ def test_vector_scope_stays_in_sql_for_plain_queries(monkeypatch):
             db.add(EmailChunk(id=chunk_id, email_id=email_id, chunk_index=0,
                               chunk_text="Project details", content_hash=str(email_id)))
             db.add(EmailEmbedding(id=uuid4(), chunk_id=chunk_id, email_id=email_id,
-                                  embedding=[1.0] * 3072, embedding_dimensions=3072,
+                                  embedding=[1.0] * settings.embedding_dimensions, embedding_dimensions=settings.embedding_dimensions,
                                   vector_record_id=str(chunk_id), content_hash=str(email_id),
                                   status="INDEXED"))
         label_id = uuid4()

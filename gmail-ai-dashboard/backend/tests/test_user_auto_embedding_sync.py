@@ -1,3 +1,4 @@
+from app.core.config import settings
 """Tests for user login/signup auto-embedding and complete PG vector population."""
 
 from datetime import datetime, timezone
@@ -23,7 +24,7 @@ class TestUserAutoEmbeddingSync(unittest.TestCase):
 
         # Use deterministic offline embeddings for tests
         self._orig_embed_fn = default_rag_service.pipeline.embedding_function
-        default_rag_service.pipeline.embedding_function = DeterministicOfflineEmbeddings(dimensions=3072)
+        default_rag_service.pipeline.embedding_function = DeterministicOfflineEmbeddings(dimensions=settings.embedding_dimensions)
 
         self.user = User(
             id=uuid4(),
@@ -111,7 +112,7 @@ class TestUserAutoEmbeddingSync(unittest.TestCase):
         for emb in embeddings:
             self.assertEqual(emb.status, "INDEXED")
             self.assertIsNotNone(emb.embedding)
-            self.assertEqual(len(emb.embedding), 3072)
+            self.assertEqual(len(emb.embedding), settings.embedding_dimensions)
             self.assertIsNotNone(emb.email_subject)
             self.assertIsNotNone(emb.sender_email)
             self.assertIsNotNone(emb.embedding_text)

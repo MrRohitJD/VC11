@@ -1,4 +1,4 @@
-"""Azure OpenAI text-embedding-3-large embedding provider via LangChain AzureOpenAIEmbeddings.
+"""Azure OpenAI text-embedding-3-small embedding provider via LangChain AzureOpenAIEmbeddings.
 
 Features:
 - Azure endpoint, API key, API version, and deployment name loaded from environment/settings
@@ -26,19 +26,22 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-AZURE_OPENAI_DEFAULT_DEPLOYMENT = "text-embedding-3-large"
-AZURE_OPENAI_DEFAULT_MODEL = "text-embedding-3-large"
+AZURE_OPENAI_DEFAULT_DEPLOYMENT = "text-embedding-3-small"
+AZURE_OPENAI_DEFAULT_MODEL = "text-embedding-3-small"
+AZURE_OPENAI_SMALL_DIMENSIONS = 1536
 AZURE_OPENAI_LARGE_DIMENSIONS = 3072
 
 # Aliases for backward compatibility
-OPENAI_LARGE_MODEL = AZURE_OPENAI_DEFAULT_MODEL
-OPENAI_LARGE_DIMENSIONS = AZURE_OPENAI_LARGE_DIMENSIONS
+OPENAI_LARGE_MODEL = "text-embedding-3-large"
+OPENAI_LARGE_DIMENSIONS = 3072
+OPENAI_SMALL_MODEL = AZURE_OPENAI_DEFAULT_MODEL
+OPENAI_SMALL_DIMENSIONS = AZURE_OPENAI_SMALL_DIMENSIONS
 
 
 class MockAzureOpenAILargeEmbeddings:
     """Deterministic local vector generator for test suites and offline mode."""
 
-    def __init__(self, dimensions: int = AZURE_OPENAI_LARGE_DIMENSIONS):
+    def __init__(self, dimensions: int = AZURE_OPENAI_SMALL_DIMENSIONS):
         self.dimensions = dimensions
 
     def embed_query(self, text: str) -> List[float]:
@@ -86,12 +89,11 @@ class EmbeddingProvider:
         self.provider = "azure_openai"
         self.endpoint = (azure_endpoint or settings.azure_openai_embedding_endpoint
                          or settings.azure_openai_endpoint).strip()
-        self.api_key = (api_key or settings.azure_openai_embedding_api_key
-                        or settings.azure_openai_api_key).strip()
+        self.api_key = (api_key or settings.azure_openai_embedding_api_key or getattr(settings, "azure_embedding_small_api_key", "") or settings.azure_openai_api_key).strip()
         self.api_version = (api_version or settings.azure_openai_api_version).strip()
-        self.deployment_name = (deployment_name or settings.azure_openai_embedding_deployment).strip()
+        self.deployment_name = (deployment_name or getattr(settings, "embedding_model_deployment", "") or settings.azure_openai_embedding_deployment).strip()
         self.model_name = (model_name or settings.azure_openai_embedding_model).strip()
-        self.dimensions = dimensions or settings.embedding_dimensions or AZURE_OPENAI_LARGE_DIMENSIONS
+        self.dimensions = dimensions or settings.embedding_dimensions or AZURE_OPENAI_SMALL_DIMENSIONS
         self.max_retries = max_retries
 
         # Determine if running in mock/offline mode

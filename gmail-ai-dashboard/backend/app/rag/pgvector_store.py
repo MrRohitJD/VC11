@@ -25,7 +25,7 @@ from app.core.config import settings
 
 
 class PostgresVectorStoreManager:
-    collection_name = "postgres_halfvec_3072"
+    collection_name = "postgres_halfvec_1536"
 
     def __init__(self, embedding_function=None, db_session=None):
         self.embedding_function = embedding_function or get_embedding_model()

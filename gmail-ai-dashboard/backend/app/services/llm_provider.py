@@ -227,6 +227,108 @@ def _try_nvidia(emails: list[dict[str, str]], categories: dict[str, str] | None 
         return None
 
 
+
+def _try_azure_decision(
+    emails: list[dict[str, str]],
+    categories: dict[str, str] | None = None,
+) -> tuple[list[EmailClassificationResult], str] | None:
+    """Attempt email classification using Microsoft-Decision-1 via System One API.
+
+    Uses deployment name from settings.classification_model_deployment (default: 'MCRO')
+    and AZURE_DECISION_API_KEY.
+    """
+    api_key = (getattr(settings, "azure_decision_api_key", "") or settings.azure_openai_api_key or "").strip()
+    endpoint = (settings.azure_openai_endpoint or "").strip()
+    if not api_key or not endpoint:
+        logger.info("Azure Decision provider skipped: AZURE_DECISION_API_KEY/ENDPOINT not configured")
+        return None
+
+    deployment = (getattr(settings, "classification_model_deployment", "") or "MCRO").strip()
+    url = f"{endpoint.rstrip('/')}/providers/microsoft/v1/systemone"
+    category_descriptions = categories or CATEGORY_DESCRIPTIONS
+    allowed_categories = set(category_descriptions.keys())
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import urllib.request
+    import json
+
+    def _classify_single(email: dict[str, str]) -> EmailClassificationResult:
+        email_id = str(email.get("email_id") or "")
+        subject = (email.get("subject") or "").strip()
+        snippet = (email.get("snippet") or "").strip()
+        from_email = (email.get("from_email") or "").strip()
+        body = (email.get("body") or "").strip()
+
+        parts = []
+        if from_email:
+            parts.append(f"From: {from_email}")
+        if subject:
+            parts.append(f"Subject: {subject}")
+        if snippet:
+            parts.append(f"Snippet: {snippet[:1000]}")
+        if body:
+            parts.append(f"Body: {body[:3000]}")
+        state_text = "\n".join(parts) if parts else "(Empty email)"
+
+        payload = {
+            "model": deployment,
+            "state": state_text,
+            "questions": {
+                "category": {
+                    "type": "choice",
+                    "instructions": "Classify this email into exactly one category from the criteria.",
+                    "criteria": category_descriptions,
+                }
+            },
+        }
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "api-key": api_key,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=settings.llm_request_timeout_seconds) as resp:
+            resp_data = json.loads(resp.read().decode("utf-8"))
+            answers = resp_data.get("answers", {}).get("category", {})
+            choice = str(answers.get("choice", "OTHER")).upper().strip()
+            confidence = answers.get("confidence")
+            if choice not in allowed_categories:
+                choice = "OTHER" if "OTHER" in allowed_categories else next(iter(allowed_categories), "")
+            return EmailClassificationResult(
+                email_id=email_id,
+                label=choice,
+                confidence=float(confidence) if confidence is not None else None,
+                reason=f"Microsoft-Decision-1 ({deployment}) choice: {choice}",
+            )
+
+    results: list[EmailClassificationResult] = []
+    max_workers = min(len(emails), 8) or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {executor.submit(_classify_single, e): e for e in emails}
+        for future in as_completed(future_map):
+            try:
+                res = future.result()
+                results.append(res)
+            except Exception as exc:
+                if _is_permanent_error(exc):
+                    raise
+                logger.warning("Single email classification failed in Decision-1: %s", exc)
+                email_item = future_map[future]
+                local_res, _ = _local_classify([email_item], category_descriptions)
+                results.extend(local_res)
+
+    if results:
+        email_order = {e["email_id"]: idx for idx, e in enumerate(emails)}
+        results.sort(key=lambda r: email_order.get(r.email_id, 0))
+        return results, f"azure/{deployment}"
+    return None
+
 def _try_azure(emails: list[dict[str, str]], categories: dict[str, str] | None = None) -> tuple[list[EmailClassificationResult], str] | None:
     """Attempt classification with Azure OpenAI. Returns (results, model_name) or None."""
     if not settings.azure_openai_api_key or not settings.azure_openai_endpoint:
@@ -468,6 +570,7 @@ def classify_emails_batch(
         return _local_classify(emails, categories)
     allowed_categories = set(categories or APPROVED_CATEGORIES)
     providers = (
+        ("azure_decision", _try_azure_decision),
         ("nvidia", _try_nvidia),
         ("azure", _try_azure),
         ("explabs", _try_explabs),
