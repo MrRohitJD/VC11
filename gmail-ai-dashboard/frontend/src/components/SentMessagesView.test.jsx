@@ -65,7 +65,7 @@ describe('SentMessagesView Component', () => {
 			data: {
 				total: 2,
 				page: 1,
-				per_page: 50,
+				per_page: 10,
 				emails: mockSentEmailsPage1,
 			},
 		});
@@ -89,7 +89,7 @@ describe('SentMessagesView Component', () => {
 			expect.objectContaining({
 				sent_only: true,
 				page: 1,
-				per_page: 50,
+				per_page: 10,
 			})
 		);
 	});
@@ -100,7 +100,7 @@ describe('SentMessagesView Component', () => {
 				data: {
 					total: 3,
 					page: 1,
-					per_page: 50,
+					per_page: 10,
 					emails: mockSentEmailsPage1,
 				},
 			})
@@ -108,7 +108,7 @@ describe('SentMessagesView Component', () => {
 				data: {
 					total: 3,
 					page: 2,
-					per_page: 50,
+					per_page: 10,
 					emails: mockSentEmailsPage2,
 				},
 			});
@@ -134,7 +134,7 @@ describe('SentMessagesView Component', () => {
 				expect.objectContaining({
 					sent_only: true,
 					page: 2,
-					per_page: 50,
+					per_page: 10,
 				})
 			);
 		});
@@ -149,7 +149,7 @@ describe('SentMessagesView Component', () => {
 			data: {
 				total: 2,
 				page: 1,
-				per_page: 50,
+				per_page: 10,
 				emails: mockSentEmailsPage1,
 			},
 		});
@@ -177,7 +177,7 @@ describe('SentMessagesView Component', () => {
 			data: {
 				total: 0,
 				page: 1,
-				per_page: 50,
+				per_page: 10,
 				emails: [],
 			},
 		});

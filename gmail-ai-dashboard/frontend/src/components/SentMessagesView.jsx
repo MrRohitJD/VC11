@@ -65,7 +65,7 @@ export default function SentMessagesView({
 			const { data } = await fetchEmails({
 				sent_only: true,
 				page: targetPage,
-				per_page: 50,
+				per_page: 10,
 				search: searchQuery ? searchQuery.trim() : undefined,
 			});
 
