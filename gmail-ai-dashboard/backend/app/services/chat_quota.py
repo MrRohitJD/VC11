@@ -21,8 +21,8 @@ from app.models.email import User
 
 logger = logging.getLogger(__name__)
 
-DEMO_DAILY_LIMIT = 10
-USER_DAILY_LIMIT = 50
+DEMO_DAILY_LIMIT = 3
+USER_DAILY_LIMIT = 15
 DEMO_CONCURRENT_LIMIT = 4
 USER_CONCURRENT_LIMIT = 5
 DEMO_VISITOR_COOKIE = "gmail_ai_demo_visitor"
