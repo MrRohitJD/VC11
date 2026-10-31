@@ -480,7 +480,7 @@ flowchart TD
     CENTRAL --> QUEUE_POOL[QueuePool\npool_size=5, max_overflow=10\npool_pre_ping=True]
     
     GET_CTX -->|URL String| PERSONAL[Use Personal DB Engine]
-    PERSONAL --> LRU_CACHE[@lru_cache maxsize=32\n_personal_engine url]
+    PERSONAL --> LRU_CACHE["@lru_cache maxsize=32\n_personal_engine url"]
     LRU_CACHE --> NULL_POOL[NullPool\nZero connection pooling\nconnect_timeout=5\nhostaddr=pinned_ip]
 ```
 

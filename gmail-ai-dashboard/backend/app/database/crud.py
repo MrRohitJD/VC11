@@ -136,7 +136,7 @@ def delete_user_gmail_data(db: Session, user: User) -> None:
 	db.execute(delete(ChatMessage).where(ChatMessage.chat_session_id.in_(session_ids)))
 	db.execute(delete(ChatSession).where(ChatSession.user_id == user.id))
 	db.execute(delete(EmailSendApproval).where(EmailSendApproval.user_id == user.id))
-	db.execute(delete(ChatQuota).where(ChatQuota.identity == f"user:{user.id}"))
+	# Note: ChatQuota is preserved so mailbox cleanup cannot reset daily rate limits.
 	db.commit()
 
 

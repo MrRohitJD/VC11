@@ -159,14 +159,15 @@ VC11 incorporates an atomic, database-backed quota and concurrency control engin
 |---|---|---|---|
 | **Regular User** | 50 requests / day | 5 concurrent requests | `user:{uuid}` |
 | **Developer (Custom LLM Key)** | 500 requests / day | 5 concurrent requests | `user:{uuid}` |
-| **Demo Visitor** | 10 requests / day | 4 concurrent requests | `demo:{visitor_hash}` |
+| **Demo Visitor** | 10 requests / day (per cookie & per IP) | 4 concurrent requests (per cookie & per IP) | `demo:{visitor_hash}` & `network_quota:ip:{ip_hash}` |
 
 ### Reservation Algorithm (`reserve_chat_request`):
 1. Acquires a row-level lock (`SELECT ... FOR UPDATE`) on the identity's `chat_concurrency_locks` row.
 2. Purges expired leases older than 3 minutes.
 3. Checks active leases against the concurrency limit; if exceeded, raises `429 Too Many Requests`.
 4. Checks today's usage in `chat_quotas`; if exceeded, raises `429 Too Many Requests` with a `Retry-After` header.
-5. Increments daily count and issues a `ChatConcurrencyLease` with a background heartbeat thread extending the lease every 30 seconds until the request completes.
+5. For demo users, validates that neither the visitor session cookie nor the client IP address (extracted via proxy headers `cf-connecting-ip`/`x-forwarded-for` or direct socket) has exceeded the daily limit (10 queries/day) or concurrent active leases (max 4). Deleting cookies cannot bypass rate limiting because the IP rate limit is checked in parallel with cookie tracking.
+6. Increments daily count and issues a `ChatConcurrencyLease` with a background heartbeat thread extending the lease every 30 seconds until the request completes.
 
 ---
 

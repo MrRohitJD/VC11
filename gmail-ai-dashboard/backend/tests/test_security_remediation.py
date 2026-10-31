@@ -240,7 +240,7 @@ def test_corrupted_ciphertext_graceful_handling():
 # =====================================================================
 
 def test_demo_quota_ip_rate_limiting_prevents_cookie_reset(monkeypatch):
-    """Clearing demo cookies cannot bypass the per-IP daily limit (25 requests/day)."""
+    """Clearing demo cookies cannot bypass the per-IP daily limit (10 requests/day)."""
     engine = create_engine("sqlite:///:memory:")
     ChatQuota.__table__.create(engine)
     ChatConcurrencyLock.__table__.create(engine)
@@ -250,18 +250,18 @@ def test_demo_quota_ip_rate_limiting_prevents_cookie_reset(monkeypatch):
     user = SimpleNamespace(id=uuid4(), is_demo=True)
 
     with Session(engine) as db:
-        # Simulate 25 requests from the same IP, each with a different fresh demo cookie
-        for i in range(25):
+        # Simulate 10 requests from the same IP, each with a different fresh demo cookie
+        for i in range(10):
             cookie = _demo_cookie(_request(ip=test_ip))
             req = _request(ip=test_ip, cookie=cookie)
             lease = reserve_chat_request(db, req, user)
             lease.release()
 
-        # 26th request with yet another new cookie must be rejected on IP rate limit
-        cookie26 = _demo_cookie(_request(ip=test_ip))
-        req26 = _request(ip=test_ip, cookie=cookie26)
+        # 11th request with yet another new cookie must be rejected on IP rate limit
+        cookie11 = _demo_cookie(_request(ip=test_ip))
+        req11 = _request(ip=test_ip, cookie=cookie11)
         with pytest.raises(HTTPException) as excinfo:
-            reserve_chat_request(db, req26, user)
+            reserve_chat_request(db, req11, user)
         assert excinfo.value.status_code == 429
         assert "IP network" in excinfo.value.detail
 

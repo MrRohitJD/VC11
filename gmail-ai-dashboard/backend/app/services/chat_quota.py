@@ -43,10 +43,21 @@ def _extract_client_ip(request: Request) -> str:
     trusted_proxies_cfg = getattr(settings, "trusted_proxies", "")
     trusted = [p.strip() for p in trusted_proxies_cfg.split(",") if p.strip()] if isinstance(trusted_proxies_cfg, str) else []
     client_host = request.client.host if request.client else "unknown"
-    if trusted and client_host in trusted:
+    if trusted:
+        if client_host in trusted:
+            cf_ip = request.headers.get("cf-connecting-ip", "").strip()
+            if cf_ip:
+                return cf_ip
+            xff = request.headers.get("x-forwarded-for", "")
+            if xff:
+                return xff.split(",")[0].strip()
+    else:
+        cf_ip = request.headers.get("cf-connecting-ip", "").strip()
+        if cf_ip:
+            return cf_ip
         xff = request.headers.get("x-forwarded-for", "")
         if xff:
-            client_host = xff.split(",")[0].strip()
+            return xff.split(",")[0].strip()
     return client_host
 
 
@@ -118,7 +129,7 @@ def _delete_lease(session_factory: SessionFactory, lease_id: str, identity: str)
             _lock_identity(db, identity)
             db.execute(
                 delete(ChatRequestLeaseRecord)
-                .where(ChatRequestLeaseRecord.lease_id == lease_id)
+                .where(ChatRequestLeaseRecord.lease_id.in_([lease_id, f"{lease_id}:ip"]))
             )
             db.commit()
     except Exception as exc:
@@ -150,7 +161,7 @@ class ChatConcurrencyLease:
                     _lock_identity(db, self.identity)
                     changed = db.execute(
                         update(ChatRequestLeaseRecord)
-                        .where(ChatRequestLeaseRecord.lease_id == self.lease_id)
+                        .where(ChatRequestLeaseRecord.lease_id.in_([self.lease_id, f"{self.lease_id}:ip"]))
                         .values(expires_at=now + CHAT_LEASE_TTL)
                     ).rowcount
                     db.commit()
@@ -223,13 +234,29 @@ def reserve_chat_request(db: Session, request: Request, user: User) -> ChatConcu
                 headers={"Retry-After": str(retry_after)},
             )
 
-        # For demo users, enforce additional IP-level and global daily capacity protections
+        # For demo users, enforce both session cookie and IP-level rate limits & concurrency
         if user.is_demo:
             ip_str = _extract_client_ip(request)
             ip_identity = f"network_quota:ip:{_digest_ip(ip_str)}"
-            ip_limit = getattr(settings, "demo_ip_daily_limit", 25)
+            ip_limit = getattr(settings, "demo_ip_daily_limit", DEMO_DAILY_LIMIT)
 
             _lock_identity(db, ip_identity)
+
+            ip_active_count = db.scalar(
+                select(func.count(ChatRequestLeaseRecord.lease_id)).where(
+                    ChatRequestLeaseRecord.identity == ip_identity,
+                    ChatRequestLeaseRecord.expires_at > now,
+                )
+            ) or 0
+            if ip_active_count >= concurrency_limit:
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"You can have up to {concurrency_limit} assistant requests running "
+                        "at a time from this IP network. Wait for one to finish and try again."
+                    ),
+                )
+
             ip_quota = db.get(ChatQuota, (ip_identity, day))
             if ip_quota is None:
                 ip_quota = ChatQuota(identity=ip_identity, day=day, count=0)
@@ -263,6 +290,12 @@ def reserve_chat_request(db: Session, request: Request, user: User) -> ChatConcu
                     headers={"Retry-After": str(retry_after)},
                 )
             global_quota.count += 1
+
+            db.add(ChatRequestLeaseRecord(
+                lease_id=f"{lease_id}:ip",
+                identity=ip_identity,
+                expires_at=now + CHAT_LEASE_TTL,
+            ))
 
         quota.count += 1
         db.add(ChatRequestLeaseRecord(

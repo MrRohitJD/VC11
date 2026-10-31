@@ -27,18 +27,18 @@ class Settings(BaseSettings):
     oauth_redirect_uri: str = Field("http://localhost:8000/api/auth/callback", validation_alias=AliasChoices("OAUTH_GOOGLE_REDIRECT_URI", "GOOGLE_REDIRECT_URI"))
     backend_url: str = "http://localhost:8000"
     frontend_url: str = "http://localhost:5173"
-    environment: str = Field("development", validation_alias=AliasChoices("ENVIRONMENT", "NODE_ENV", "APP_ENV"))
+    environment: str = Field("development", validation_alias=AliasChoices("ENVIRONMENT", "NODE_ENV", "APP_ENV", "environment"))
     session_secret: str = "change-this-session-secret"
     developer_settings_encryption_key: str = ""
     developer_settings_legacy_encryption_key: str = Field("", validation_alias=AliasChoices("DEVELOPER_SETTINGS_LEGACY_ENCRYPTION_KEY", "LEGACY_ENCRYPTION_KEY"))
     developer_database_allow_private_networking: bool = Field(False, validation_alias=AliasChoices("DEVELOPER_DATABASE_ALLOW_PRIVATE_NETWORKING"))
     trusted_proxies: str = Field("", validation_alias=AliasChoices("TRUSTED_PROXIES"))
-    demo_ip_daily_limit: int = Field(25, ge=1, le=1000, validation_alias=AliasChoices("DEMO_IP_DAILY_LIMIT"))
+    demo_ip_daily_limit: int = Field(25, ge=1, le=1000, validation_alias=AliasChoices("DEMO_IP_DAILY_LIMIT", "demo_ip_daily_limit"))
     demo_global_daily_limit: int = Field(500, ge=10, le=100000, validation_alias=AliasChoices("DEMO_GLOBAL_DAILY_LIMIT"))
     developer_gemini_model: str = "gemini-2.5-flash"
     developer_openai_model: str = "gpt-4.1-mini"
     developer_daily_chat_limit: int = Field(500, ge=1, le=10000, validation_alias=AliasChoices("DEVELOPER_DAILY_CHAT_LIMIT"))
-    secure_cookies: bool = False
+    secure_cookies: bool = Field(False, validation_alias=AliasChoices("SECURE_COOKIES", "secure_cookies"))
 
     # LLM & Embedding provider keys
     nvidia_api_key: str = Field("", validation_alias=AliasChoices("NVIDIA_API_KEY"))
@@ -120,12 +120,30 @@ class Settings(BaseSettings):
     def validate_session_secret(cls, value: str, info) -> str:
         env = str(info.data.get("environment", "")).lower()
         is_production = env in {"production", "prod"}
+        insecure_defaults = {
+            "change-this-session-secret",
+            "replace-this-with-a-long-random-secret",
+            "secret",
+            "password",
+        }
         if is_production:
-            if not value or value == "change-this-session-secret" or len(value.strip()) < 32:
+            if not value or value in insecure_defaults or len(value.strip()) < 32:
                 raise ValueError(
                     "SESSION_SECRET must be explicitly set to a high-entropy string (min 32 chars) in production."
                 )
         return value
+
+    @field_validator("secure_cookies")
+    @classmethod
+    def validate_secure_cookies(cls, value: bool, info) -> bool:
+        if value:
+            return True
+        env = str(info.data.get("environment", "")).lower()
+        backend = str(info.data.get("backend_url", "")).lower()
+        frontend = str(info.data.get("frontend_url", "")).lower()
+        if env in {"production", "prod"} or backend.startswith("https:") or frontend.startswith("https:"):
+            return True
+        return False
 
     @field_validator("developer_settings_encryption_key")
     @classmethod

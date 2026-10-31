@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.security import get_current_user
+from app.core.security import get_current_user, revoke_request_session
 from app.database.connection import get_db, CentralSessionLocal, engine
 from app.database.crud import delete_user_gmail_data, serialize_user, upsert_google_user
 from app.models.email import User
@@ -53,7 +53,7 @@ def _flow(state: str | None = None, code_verifier: str | None = None) -> Flow:
 
 def _encode_session(user: User) -> str:
 	lifetime = timedelta(days=1 if user.is_demo else 7)
-	payload = json.dumps({"user_id": str(user.id), "exp": int((datetime.now(timezone.utc) + lifetime).timestamp())}, separators=(",", ":")).encode()
+	payload = json.dumps({"user_id": str(user.id), "exp": int((datetime.now(timezone.utc) + lifetime).timestamp()), "jti": secrets.token_hex(16)}, separators=(",", ":")).encode()
 	encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
 	signature = hmac.new(settings.session_secret.encode(), encoded.encode(), hashlib.sha256).hexdigest()
 	return f"{encoded}.{signature}"
@@ -146,6 +146,7 @@ def enter_demo(request: Request, db: Session = Depends(get_db)):
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(request: Request):
 	"""End the user's session. Does NOT delete any stored data."""
+	revoke_request_session(request)
 	response = Response(status_code=status.HTTP_204_NO_CONTENT)
 	response.delete_cookie(SESSION_COOKIE)
 	return response
@@ -153,6 +154,7 @@ def logout(request: Request):
 
 @router.delete("/erase", status_code=status.HTTP_204_NO_CONTENT)
 def erase_all_data(
+	request: Request,
 	user: User = Depends(get_current_user),
 	db: Session = Depends(get_db),
 ):
@@ -167,6 +169,7 @@ def erase_all_data(
 			central_user = central.get(User, user.id)
 			if central_user is not None:
 				delete_user_gmail_data(central, central_user)
+	revoke_request_session(request)
 	response = Response(status_code=status.HTTP_204_NO_CONTENT)
 	response.delete_cookie(SESSION_COOKIE)
 	return response

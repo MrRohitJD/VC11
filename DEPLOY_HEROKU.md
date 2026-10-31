@@ -19,7 +19,7 @@ Set these config vars on `ai-powered-gmail`:
 | `DEVELOPER_SETTINGS_ENCRYPTION_KEY` | Required. High-entropy secret (min 32 chars). Distinct from `SESSION_SECRET`. Encrypts BYODB database URLs and personal API keys. |
 | `DEVELOPER_SETTINGS_LEGACY_ENCRYPTION_KEY` | Optional. If rotating keys on an existing deployment, set this to the previous secret to decrypt legacy settings without data loss. |
 | `DEVELOPER_DATABASE_ALLOW_PRIVATE_NETWORKING` | `false` (blocks SSRF to AWS/GCP metadata `169.254.169.254`, loopback, and RFC 1918 private subnets) |
-| `DEMO_IP_DAILY_LIMIT` | `25` (prevents demo quota evasion via cookie clearing) |
+| `DEMO_IP_DAILY_LIMIT` | `10` (enforces demo quota per IP to match cookie limit and prevent evasion via cookie clearing) |
 | `DEMO_GLOBAL_DAILY_LIMIT` | `500` (global daily demo query budget) |
 | `RAG_VECTOR_BACKEND` | `postgres` |
 | `DATABASE_POOL_SIZE` | `2` |

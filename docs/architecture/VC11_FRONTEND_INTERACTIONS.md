@@ -71,7 +71,7 @@ flowchart TD
 
     ASSISTANT -->|Click 'Back to Dashboard'| DASHBOARD
     ASSISTANT -->|Click Settings icon| SETTINGS
-    ASSISTANT -->|Click Citation [1]| CITED_MODAL[EmailDetailsModal]
+    ASSISTANT -->|"Click Citation [1]"| CITED_MODAL[EmailDetailsModal]
     ASSISTANT -->|Click 'Review subject & body'| DRAFT_MODAL[Draft Review Modal]
 
     SETTINGS -->|Click 'Log out'| LOGIN

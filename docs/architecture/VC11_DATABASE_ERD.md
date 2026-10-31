@@ -86,7 +86,7 @@ erDiagram
     gmail_accounts {
         UUID id PK
         UUID user_id FK
-        STRING_320 email_address UK_with_user_id
+        STRING_320 email_address UK "unique with user_id"
         STRING_32 provider "default: gmail"
         STRING_255 gmail_user_id
         TEXT access_token
@@ -106,7 +106,7 @@ erDiagram
     emails {
         UUID id PK
         UUID gmail_account_id FK
-        STRING_255 gmail_message_id UK_with_account
+        STRING_255 gmail_message_id UK "unique with account"
         STRING_255 thread_id
         STRING_320 from_email
         STRING_320 to_email
@@ -129,7 +129,7 @@ erDiagram
     labels {
         UUID id PK
         UUID gmail_account_id FK
-        STRING_255 label_id UK_with_account "Gmail label ID e.g. INBOX, SENT"
+        STRING_255 label_id UK "Gmail label ID e.g. INBOX, SENT"
         STRING_255 name
         STRING_50 type "user|system"
         DATETIME created_at
@@ -226,7 +226,7 @@ erDiagram
         TEXT embedding_text "concatenated subject+body chunk"
         STRING_30 embedding_type "email"
         STRING_100 vector_collection "postgres_halfvec_3072"
-        STRING_255 vector_record_id UK_with_collection
+        STRING_255 vector_record_id UK "unique with collection"
         STRING_50 embedding_provider "azure_openai"
         STRING_100 embedding_model "text-embedding-3-large"
         INTEGER embedding_dimensions "3072"

@@ -59,23 +59,55 @@ def test_signed_in_limit_is_50_per_account_and_survives_session_changes(db):
     _reserve_and_release(db, _request(), other_user)
 
 
-def test_demo_limit_is_per_cookie_and_shared_ip_does_not_share_quota(db):
+def test_demo_limit_enforces_both_cookie_and_ip(db):
     user = SimpleNamespace(id=uuid4(), is_demo=True)
     original = _demo_cookie(_request())
     for _ in range(DEMO_DAILY_LIMIT):
         _reserve_and_release(db, _request(cookie=original), user)
 
+    # 11th request on the same cookie is rejected by daily limit
     with pytest.raises(HTTPException) as error:
         reserve_chat_request(db, _request(cookie=original), user)
     assert error.value.status_code == 429
     assert f"{DEMO_DAILY_LIMIT} requests" in error.value.detail
 
-    # A new visitor cookie gets its own quota even from the same network.
+    # A replacement cookie from the SAME IP is rejected by IP limit (cannot evade by deleting cookies)
     replacement = _demo_cookie(_request())
     assert replacement != original
-    _reserve_and_release(db, _request(cookie=replacement), user)
-    counts = db.scalars(select(ChatQuota.count).where(ChatQuota.identity.like("demo:%"))).all()
-    assert sorted(counts) == [1, DEMO_DAILY_LIMIT]
+    with pytest.raises(HTTPException) as ip_error:
+        reserve_chat_request(db, _request(cookie=replacement), user)
+    assert ip_error.value.status_code == 429
+    assert "IP network" in ip_error.value.detail
+
+    # A fresh cookie from a DIFFERENT IP succeeds
+    diff_ip_cookie = _demo_cookie(_request(ip="198.51.100.99"))
+    _reserve_and_release(db, _request(ip="198.51.100.99", cookie=diff_ip_cookie), user)
+
+    # But the original exhausted cookie on that new IP is still rejected by cookie limit
+    with pytest.raises(HTTPException) as cookie_error:
+        reserve_chat_request(db, _request(ip="198.51.100.99", cookie=original), user)
+    assert cookie_error.value.status_code == 429
+    assert f"{DEMO_DAILY_LIMIT} requests" in cookie_error.value.detail
+
+
+def test_demo_ip_concurrency_blocks_new_cookies_on_same_ip(db):
+    user = SimpleNamespace(id=uuid4(), is_demo=True)
+    # 4 concurrent requests on same IP across different cookies
+    cookies = [_demo_cookie(_request()) for _ in range(4)]
+    leases = [reserve_chat_request(db, _request(cookie=c), user) for c in cookies]
+
+    # 5th concurrent request from same IP is blocked
+    cookie5 = _demo_cookie(_request())
+    with pytest.raises(HTTPException) as error:
+        reserve_chat_request(db, _request(cookie=cookie5), user)
+    assert error.value.status_code == 429
+    assert "IP network" in error.value.detail
+
+    leases[0].release()
+    fifth = reserve_chat_request(db, _request(cookie=cookie5), user)
+    for lease in leases[1:]:
+        lease.release()
+    fifth.release()
 
 
 def test_demo_cookie_is_reused_on_reentry():

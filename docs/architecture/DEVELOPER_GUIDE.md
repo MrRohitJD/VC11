@@ -41,7 +41,7 @@ flowchart LR
     end
 
     subgraph ASSISTANT_LOOP["2. AI Assistant Loop (Interactive)"]
-        PROMPT[User Prompt] --> STREAM_API[/api/rag/chat/stream]
+        PROMPT[User Prompt] --> STREAM_API["/api/rag/chat/stream"]
         STREAM_API --> GRAPH[LangGraph graph_agent.py]
         GRAPH --> RETRIEVE[HybridRetriever: pgvector + BM25]
         RETRIEVE --> CITATIONS[Grounded Citations]

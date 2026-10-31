@@ -149,12 +149,12 @@ flowchart TB
     subgraph BACKEND["⚙️ Backend Layer — FastAPI"]
         direction TB
         MAIN[main.py\nFastAPI app init]
-        EMAIL_R[/api/emails\n/api/analytics\n/api/labels\nemails.py router]
-        GMAIL_R[/api/gmail/sync\n/api/gmail/sync/status\n/api/gmail/sync/stream\ngmail.py router]
-        RAG_R[/api/rag/chat\n/api/rag/chat/stream\n/api/rag/sessions\n/api/rag/approvals\nrag.py router]
-        LLM_R[/api/llm/preference\n/api/llm/classify\nllm.py router]
-        EXPORT_R[/api/export/csv\n/api/export/json\nexport.py router]
-        DEV_R[/api/developer\ndeveloper.py router]
+        EMAIL_R["/api/emails\n/api/analytics\n/api/labels\nemails.py router"]
+        GMAIL_R["/api/gmail/sync\n/api/gmail/sync/status\n/api/gmail/sync/stream\ngmail.py router"]
+        RAG_R["/api/rag/chat\n/api/rag/chat/stream\n/api/rag/sessions\n/api/rag/approvals\nrag.py router"]
+        LLM_R["/api/llm/preference\n/api/llm/classify\nllm.py router"]
+        EXPORT_R["/api/export/csv\n/api/export/json\nexport.py router"]
+        DEV_R["/api/developer\ndeveloper.py router"]
     end
 
     subgraph BIZ["🧠 Business Logic Layer"]
