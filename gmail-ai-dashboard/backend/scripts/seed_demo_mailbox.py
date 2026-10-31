@@ -15,7 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.database.connection import SessionLocal, engine  # noqa: E402
 from app.models.email import Email, EmailClassification, EmailLabel, GmailAccount, Label, User  # noqa: E402
 from app.models.rag import EmailChunk, EmailEmbedding  # noqa: E402
-from app.services.demo_seed import AI_DESCRIPTIONS, DEMO_EMAIL, GMAIL_CATEGORIES, SAMPLE_MAIL, seed_demo_mailbox  # noqa: E402
+from app.services.demo_seed import (
+    AI_DESCRIPTIONS, DEMO_EMAIL, GMAIL_CATEGORIES, SAMPLE_MAIL, SAMPLE_SENT_MAIL, seed_demo_mailbox,
+)  # noqa: E402
 
 
 REQUIRED_TABLES = {
@@ -84,13 +86,22 @@ def main() -> None:
                        "ai_classifications": classification_count,
                        "chunks": chunk_count, "embeddings": embedding_count}
             print(summary)
-            if (message_count != len(SAMPLE_MAIL)
-                    or category_ids != {key for key, _ in GMAIL_CATEGORIES}
-                    or ai_label_count != len(AI_DESCRIPTIONS)
-                    or classification_count != len(SAMPLE_MAIL)
-                    or not account.ai_classification_enabled
-                    or account.provider != "demo" or account.access_token):
-                raise RuntimeError("Demo mailbox verification failed")
+            expected_total = len(SAMPLE_MAIL) + len(SAMPLE_SENT_MAIL)
+            failures = []
+            if message_count != expected_total:
+                failures.append(f"message_count ({message_count}) != expected ({expected_total})")
+            if category_ids != {key for key, _ in GMAIL_CATEGORIES}:
+                failures.append("category_ids mismatch")
+            if ai_label_count != len(AI_DESCRIPTIONS):
+                failures.append(f"ai_label_count ({ai_label_count}) != expected ({len(AI_DESCRIPTIONS)})")
+            if classification_count != expected_total:
+                failures.append(f"classification_count ({classification_count}) != expected ({expected_total})")
+            if not account.ai_classification_enabled:
+                failures.append("ai_classification_enabled is False")
+            if account.provider != "demo" or account.access_token:
+                failures.append(f"account provider ({account.provider}) != demo or access_token present")
+            if failures:
+                raise RuntimeError(f"Demo mailbox verification failed: {', '.join(failures)}")
         except Exception:
             db.rollback()
             raise
