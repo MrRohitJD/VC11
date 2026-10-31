@@ -21,7 +21,7 @@ from app.models.email import User
 
 logger = logging.getLogger(__name__)
 
-DEMO_DAILY_LIMIT = 3
+DEMO_DAILY_LIMIT = 8
 USER_DAILY_LIMIT = 15
 DEMO_CONCURRENT_LIMIT = 4
 USER_CONCURRENT_LIMIT = 5
