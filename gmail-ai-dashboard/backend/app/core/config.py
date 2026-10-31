@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     developer_settings_legacy_encryption_key: str = Field("", validation_alias=AliasChoices("DEVELOPER_SETTINGS_LEGACY_ENCRYPTION_KEY", "LEGACY_ENCRYPTION_KEY"))
     developer_database_allow_private_networking: bool = Field(False, validation_alias=AliasChoices("DEVELOPER_DATABASE_ALLOW_PRIVATE_NETWORKING"))
     trusted_proxies: str = Field("", validation_alias=AliasChoices("TRUSTED_PROXIES"))
-    demo_ip_daily_limit: int = Field(25, ge=1, le=1000, validation_alias=AliasChoices("DEMO_IP_DAILY_LIMIT", "demo_ip_daily_limit"))
+    demo_ip_daily_limit: int = Field(10, ge=1, le=1000, validation_alias=AliasChoices("DEMO_IP_DAILY_LIMIT", "demo_ip_daily_limit"))
     demo_global_daily_limit: int = Field(500, ge=10, le=100000, validation_alias=AliasChoices("DEMO_GLOBAL_DAILY_LIMIT"))
     developer_gemini_model: str = "gemini-2.5-flash"
     developer_openai_model: str = "gpt-4.1-mini"
