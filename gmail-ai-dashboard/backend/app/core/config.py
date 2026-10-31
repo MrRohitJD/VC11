@@ -8,10 +8,10 @@ _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent  # backend/
 
 class Settings(BaseSettings):
     gmail_mcp_enabled: bool = True
-    gmail_mcp_max_messages: int = Field(1000, ge=1, le=10000)
+    gmail_mcp_max_messages: int = Field(500, ge=1, le=10000, validation_alias=AliasChoices("GMAIL_MCP_MAX_MESSAGES"))
     # Keep live discovery bounded so a slow Gmail/API process cannot hold a
     # mailbox answer open for minutes.  The client also applies a hard cap.
-    gmail_mcp_timeout_seconds: int = Field(30, ge=10, le=600)
+    gmail_mcp_timeout_seconds: int = Field(60, ge=10, le=600, validation_alias=AliasChoices("GMAIL_MCP_TIMEOUT_SECONDS"))
     langgraph_checkpoint_path: str = str(_BACKEND_DIR / "data" / "langgraph.sqlite")
     langsmith_tracing: bool = False
     langsmith_api_key: str = ""
@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     rate_limit_ip_sustained_per_hour: int = Field(2000, ge=50, le=100000, validation_alias=AliasChoices("RATE_LIMIT_IP_SUSTAINED_PER_HOUR"))
     rate_limit_visitor_burst_per_minute: int = Field(60, ge=5, le=5000, validation_alias=AliasChoices("RATE_LIMIT_VISITOR_BURST_PER_MINUTE"))
     rate_limit_auth_per_minute: int = Field(10, ge=1, le=100, validation_alias=AliasChoices("RATE_LIMIT_AUTH_PER_MINUTE"))
+    gmail_sync_hourly_limit: int = Field(60, ge=1, le=1000, validation_alias=AliasChoices("GMAIL_SYNC_HOURLY_LIMIT"))
+    llm_classification_per_minute: int = Field(100, ge=1, le=1000, validation_alias=AliasChoices("LLM_CLASSIFICATION_PER_MINUTE"))
+    rag_index_hourly_limit: int = Field(60, ge=1, le=1000, validation_alias=AliasChoices("RAG_INDEX_HOURLY_LIMIT"))
     ai_daily_budget_usd: float = Field(10.0, ge=0.1, le=1000.0, validation_alias=AliasChoices("AI_DAILY_BUDGET_USD"))
     ai_monthly_budget_usd: float = Field(150.0, ge=1.0, le=10000.0, validation_alias=AliasChoices("AI_MONTHLY_BUDGET_USD"))
     visitor_daily_token_limit: int = Field(50000, ge=1000, le=1000000, validation_alias=AliasChoices("VISITOR_DAILY_TOKEN_LIMIT"))
@@ -55,7 +58,7 @@ class Settings(BaseSettings):
     cloudflare_trusted_ips: str = Field("", validation_alias=AliasChoices("CLOUDFLARE_TRUSTED_IPS"))
     cloudflare_proxy_secret: str = Field("", validation_alias=AliasChoices("CLOUDFLARE_PROXY_SECRET"))
     demo_visitor_cookie_name: str = Field("gmail_ai_demo_visitor", validation_alias=AliasChoices("DEMO_VISITOR_COOKIE_NAME"))
-    demo_visitor_ttl_days: int = Field(365, ge=1, le=730, validation_alias=AliasChoices("DEMO_VISITOR_TTL_DAYS"))
+    demo_visitor_ttl_days: int = Field(90, ge=1, le=730, validation_alias=AliasChoices("DEMO_VISITOR_TTL_DAYS"))
 
     # LLM & Embedding provider keys
     nvidia_api_key: str = Field("", validation_alias=AliasChoices("NVIDIA_API_KEY"))

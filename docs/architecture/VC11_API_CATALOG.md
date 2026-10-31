@@ -443,11 +443,50 @@ Whenever an API request executes:
 - **Frontend Caller:** `sendRagChat(data, onProgress)` in `frontend/src/services/api.js`.
 
 #### `POST /api/rag/index`
-- **Description:** Triggers background incremental or full PostgreSQL pgvector re-indexing for the user's emails.
+- **Description:** Triggers asynchronous, resumable background PostgreSQL pgvector re-indexing for the user's emails across large mailboxes (1k to 1M+ emails). Continues processing batches until complete.
 - **Auth Required:** Yes.
-- **Request Body:** `{"batch_size": 100, "full_reindex": false}`.
-- **Services Called:** `app.rag.indexing.default_pipeline.index_user_emails()`.
+- **Rate Limit:** 60 operations/hour per authenticated user.
+- **Request Body:** `{"batch_size": 100, "full_reindex": false, "sync_wait": false}`.
+- **Services Called:** `rag_indexer_service.start_indexing_job()` / `_worker_loop()`.
+- **Concurrency Protection:** PostgreSQL cross-dyno lease (`rag_index:{user_id}`, TTL 180s).
+- **Status:** 202 Accepted (or 200 OK if `sync_wait=True`).
+- **Returns:**
+  ```json
+  {
+    "status": "started",
+    "job_id": "uuid",
+    "total_emails_discovered": 15000,
+    "emails_processed": 500,
+    "emails_pending": 14500,
+    "emails_failed": 0,
+    "chunks_generated": 1250,
+    "embeddings_generated": 1250,
+    "current_batch": 5,
+    "last_checkpoint": "2026-11-01T01:00:00Z",
+    "estimated_cost_usd": 0.0812
+  }
+  ```
 - **Frontend Caller:** `triggerRagIndex()` in `SettingsPage` (`App.jsx`).
+
+#### `GET /api/rag/index/status`
+- **Description:** Returns the live tracking state, batch progress, and cost accounting for the active or most recent indexing job.
+- **Auth Required:** Yes.
+- **Returns:** Full job status dictionary (`total_emails_discovered`, `emails_processed`, `emails_pending`, `emails_failed`, `chunks_generated`, `embeddings_generated`, `current_batch`, `status`, `last_checkpoint`, `estimated_cost_usd`).
+
+#### `POST /api/rag/index/pause`
+- **Description:** Gracefully requests the active background indexing worker to halt processing after completing its current batch.
+- **Auth Required:** Yes.
+- **Returns:** `{"status": "paused", "pause_requested": true, ...}`.
+
+#### `POST /api/rag/index/resume`
+- **Description:** Resumes indexing for remaining unindexed emails from the last successful checkpoint.
+- **Auth Required:** Yes.
+- **Returns:** `{"status": "resumed", ...}`.
+
+#### `POST /api/rag/index/retry`
+- **Description:** Retries failed or unembedded email batches.
+- **Auth Required:** Yes.
+- **Returns:** `{"status": "retrying", ...}`.
 
 #### `GET /api/rag/status`
 - **Description:** Returns diagnostic statistics on chunking and vector indexing.

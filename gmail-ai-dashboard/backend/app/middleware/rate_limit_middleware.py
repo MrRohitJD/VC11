@@ -50,7 +50,7 @@ ENDPOINT_LIMITS = {
     ("DELETE", "/api/auth/erase"): (2, 3600, "auth:erase"),
     ("GET", "/api/auth/me"): (120, 60, "auth:me"),
     # Gmail sync & send
-    ("POST", "/api/gmail/sync"): (5, 3600, "gmail:sync"),
+    ("POST", "/api/gmail/sync"): (getattr(settings, "gmail_sync_hourly_limit", 60), 3600, "gmail:sync"),
     ("POST", "/api/emails/send"): (15, 3600, "email:send"),
     ("POST", "/api/gmail/send"): (15, 3600, "email:send"),
     ("GET", "/api/emails"): (150, 60, "email:list"),
@@ -59,13 +59,13 @@ ENDPOINT_LIMITS = {
     # AI & RAG
     ("POST", "/api/rag/chat"): (15, 60, "rag:chat:burst"),
     ("POST", "/api/rag/chat/stream"): (15, 60, "rag:stream:burst"),
-    ("POST", "/api/rag/index"): (5, 3600, "rag:index"),
-    # LLM classification
-    ("POST", "/api/llm/classify/backfill"): (5, 3600, "llm:backfill"),
-    ("POST", "/api/llm/classify/start"): (5, 3600, "llm:start"),
-    ("POST", "/api/llm/classify/all"): (5, 3600, "llm:all"),
-    ("POST", "/api/llm/train"): (5, 3600, "llm:train"),
-    ("POST", "/api/llm/classify/retry"): (10, 3600, "llm:retry"),
+    ("POST", "/api/rag/index"): (getattr(settings, "rag_index_hourly_limit", 60), 3600, "rag:index"),
+    # LLM classification (100 req/min per user)
+    ("POST", "/api/llm/classify/backfill"): (getattr(settings, "llm_classification_per_minute", 100), 60, "llm:backfill"),
+    ("POST", "/api/llm/classify/start"): (getattr(settings, "llm_classification_per_minute", 100), 60, "llm:start"),
+    ("POST", "/api/llm/classify/all"): (getattr(settings, "llm_classification_per_minute", 100), 60, "llm:all"),
+    ("POST", "/api/llm/train"): (getattr(settings, "llm_classification_per_minute", 100), 60, "llm:train"),
+    ("POST", "/api/llm/classify/retry"): (getattr(settings, "llm_classification_per_minute", 100), 60, "llm:retry"),
     # Developer
     ("POST", "/api/developer/reconnect"): (10, 60, "dev:reconnect"),
     # Export
@@ -77,12 +77,25 @@ ENDPOINT_LIMITS = {
 
 def _match_endpoint_limit(method: str, path: str) -> Optional[Tuple[int, int, str]]:
     key = (method.upper(), path)
-    if key in ENDPOINT_LIMITS:
-        return ENDPOINT_LIMITS[key]
-    # Check prefix matches for classification and export
-    for (m, p), rule in ENDPOINT_LIMITS.items():
-        if m == method.upper() and path.startswith(p):
-            return rule
+    rule = ENDPOINT_LIMITS.get(key)
+    if not rule:
+        # Check prefix matches for classification and export
+        for (m, p), r in ENDPOINT_LIMITS.items():
+            if m == method.upper() and path.startswith(p):
+                rule = r
+                break
+    if not rule and method.upper() == "POST" and path.startswith("/api/llm/classify"):
+        rule = (getattr(settings, "llm_classification_per_minute", 100), 60, "llm:classify")
+
+    if rule:
+        ep_limit, ep_win, ep_prefix = rule
+        if ep_prefix == "gmail:sync":
+            return (getattr(settings, "gmail_sync_hourly_limit", 60), ep_win, ep_prefix)
+        if ep_prefix == "rag:index":
+            return (getattr(settings, "rag_index_hourly_limit", 60), ep_win, ep_prefix)
+        if ep_prefix.startswith("llm:"):
+            return (getattr(settings, "llm_classification_per_minute", 100), ep_win, ep_prefix)
+        return rule
     return None
 
 

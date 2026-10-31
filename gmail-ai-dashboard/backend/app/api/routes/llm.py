@@ -13,14 +13,18 @@ Endpoints:
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.security import get_current_user
 from app.database.connection import get_db
 from app.models.email import GmailAccount, User
 from app.models.llm import LlmClassificationJob
+from app.services.ai_budget import check_global_ai_budget
+from app.services.ip_trust import digest_ip, extract_client_ip
+from app.services.rate_limiter import check_rate_limit
 from app.services.llm_classification_service import (
     enqueue_classification_job,
     get_job_state,
@@ -31,6 +35,28 @@ from app.services.llm_classification_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/llm", tags=["llm"])
+
+
+def check_classification_rate_limit(db: Session, user: User, ip_hash: str = "") -> None:
+    """Enforce LLM classification request rate limit (max 100/min per authenticated user)."""
+    limit = getattr(settings, "llm_classification_per_minute", 100)
+    bucket_key = f"llm:classify:{user.id}"
+    allowed, retry_after, count, lim = check_rate_limit(
+        db=db,
+        bucket_key=bucket_key,
+        limit=limit,
+        window_seconds=60,
+        ip_hash=ip_hash,
+        user_id=user.id,
+        endpoint="/api/llm/classify",
+        http_method="POST",
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Classification rate limit reached ({lim} requests per minute). Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
 
 
 def _get_account(db: Session, user: User) -> GmailAccount:
@@ -83,10 +109,13 @@ def update_preference(
 @router.post("/classify/all", status_code=status.HTTP_202_ACCEPTED)
 @router.post("/train", status_code=status.HTTP_202_ACCEPTED)
 def start_backfill(
+    request: Request,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Schedule background classification for all unclassified emails for the user."""
+    check_classification_rate_limit(db, user, digest_ip(extract_client_ip(request)))
+    check_global_ai_budget(db)
     account = _get_account(db, user)
 
     # Auto-enable classification preference
@@ -119,10 +148,13 @@ def start_backfill(
 
 @router.post("/classify/retry", status_code=status.HTTP_202_ACCEPTED)
 def retry_classification(
+    request: Request,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Retry the last failed or partial classification job."""
+    check_classification_rate_limit(db, user, digest_ip(extract_client_ip(request)))
+    check_global_ai_budget(db)
     account = _get_account(db, user)
 
     if not account.ai_classification_enabled:

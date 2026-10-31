@@ -143,6 +143,15 @@ def check_ai_budget(
             )
 
     # 3. Check global daily and monthly financial budgets (all traffic)
+    check_global_ai_budget(db)
+
+
+def check_global_ai_budget(db: Session) -> None:
+    """Evaluate global daily and monthly financial spend caps across all AI operations."""
+    now = datetime.now(timezone.utc)
+    day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+
     daily_cost = db.scalar(
         select(func.sum(AiUsageLog.estimated_cost_usd)).where(
             AiUsageLog.created_at >= day_start,

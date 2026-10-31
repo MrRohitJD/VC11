@@ -12,6 +12,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.email import User
 from app.services.rate_limiter import check_rate_limit
 from app.services.security_events import record_security_event
@@ -46,15 +47,16 @@ def _clean_caches(now: float) -> None:
 
 
 def check_sync_rate_limit(db: Session, user: User, ip_hash: str) -> None:
-    """Enforce manual Gmail synchronization frequency limit (max 3/hour per user)."""
+    """Enforce manual Gmail synchronization frequency limit (max 60/hour per user)."""
     if user.is_demo:
         raise HTTPException(status_code=403, detail="Gmail sync is unavailable in demo mode")
 
+    sync_limit = getattr(settings, "gmail_sync_hourly_limit", 60)
     bucket_key = f"gmail:sync:{user.id}"
     allowed, retry_after, count, limit = check_rate_limit(
         db=db,
         bucket_key=bucket_key,
-        limit=3,
+        limit=sync_limit,
         window_seconds=3600,
         ip_hash=ip_hash,
         user_id=user.id,

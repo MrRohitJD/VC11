@@ -381,10 +381,19 @@ class RAGIndexingPipeline:
 
     def index_user_emails(self, db: Session, user_id: UUID | str, limit: Optional[int] = None,
                           batch_size: Optional[int] = None, force: bool = False) -> dict[str, int]:
+        from sqlalchemy import exists
         user_uuid = UUID(str(user_id))
         query = (select(Email.id).join(GmailAccount, GmailAccount.id == Email.gmail_account_id)
-                 .where(GmailAccount.user_id == user_uuid)
-                 .order_by(Email.received_at.desc().nullslast()))
+                 .where(GmailAccount.user_id == user_uuid))
+        if not force:
+            indexed = (select(1).select_from(EmailChunk)
+                       .join(EmailEmbedding, EmailEmbedding.chunk_id == EmailChunk.id)
+                       .where(EmailChunk.email_id == Email.id,
+                              EmailEmbedding.status == "INDEXED",
+                              EmailEmbedding.embedding.is_not(None),
+                              EmailEmbedding.embedding_dimensions == settings.embedding_dimensions))
+            query = query.where(~exists(indexed))
+        query = query.order_by(Email.received_at.desc().nullslast())
         effective_limit = limit or batch_size
         if effective_limit:
             query = query.limit(effective_limit)

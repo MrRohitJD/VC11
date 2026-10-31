@@ -124,6 +124,7 @@ class ChatResponse(BaseModel):
 class IndexRequest(BaseModel):
     batch_size: Optional[int] = Field(None, ge=1, le=500, description="Maximum emails to process (capped at 500)")
     full_reindex: bool = Field(False, description="Whether to reprocess all emails")
+    sync_wait: bool = Field(False, description="Whether to wait synchronously for batch completion")
 
 
 class ApprovalActionResponse(BaseModel):
@@ -404,31 +405,107 @@ def stream_chat(
 
 @router.post("/index")
 def trigger_rag_indexing(
+    request: Request,
     body: IndexRequest = IndexRequest(),
     user: User = Depends(get_user_for_rag),
     db: Session = Depends(get_db),
 ):
-    """Run incremental indexing of user's emails into PostgreSQL pgvector."""
-    try:
-        with acquire_operation_lease(db, "rag_index", user.id, user_limit=1, global_limit=2):
-            results = default_pipeline.index_user_emails(
-                db=db,
-                user_id=user.id,
-                batch_size=min(body.batch_size or 500, 500),
-                force=body.full_reindex,
-            )
-        return {
-            "status": "success",
-            "user_id": str(user.id),
-            "results": results,
-            "message": (
-                f"Indexing finished: {results['emails_indexed']} indexed, "
-                f"{results['emails_skipped']} skipped, {results['chunks_created']} chunks stored."
-            ),
-        }
-    except Exception as exc:
-        logger.error("Indexing error: %s", type(exc).__name__)
-        raise HTTPException(status_code=500, detail="Indexing failed. Please try again.")
+    """Trigger background incremental indexing or run synchronous batch processing."""
+    from app.services.rate_limiter import check_rate_limit
+    ip_h = digest_ip(extract_client_ip(request))
+    allowed, retry_after, count, limit = check_rate_limit(
+        db=db,
+        bucket_key=f"rag:index:{user.id}",
+        limit=getattr(settings, "rag_index_hourly_limit", 60),
+        window_seconds=3600,
+        ip_hash=ip_h,
+        user_id=user.id,
+        endpoint="/api/rag/index",
+        http_method="POST",
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"RAG indexing rate limit reached ({limit} operations per hour). Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    if body.sync_wait:
+        try:
+            with acquire_operation_lease(db, "rag_index", user.id, user_limit=1, global_limit=2):
+                results = default_pipeline.index_user_emails(
+                    db=db,
+                    user_id=user.id,
+                    batch_size=min(body.batch_size or 500, 500),
+                    force=body.full_reindex,
+                )
+            return {
+                "status": "success",
+                "user_id": str(user.id),
+                "results": results,
+                "message": (
+                    f"Indexing finished: {results['emails_indexed']} indexed, "
+                    f"{results['emails_skipped']} skipped, {results['chunks_created']} chunks stored."
+                ),
+            }
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("Indexing error: %s", type(exc).__name__)
+            raise HTTPException(status_code=500, detail="Indexing failed. Please try again.")
+
+    from app.services.rag_indexer import default_rag_service
+    batch_sz = min(body.batch_size or 100, 500)
+    job = default_rag_service.start_indexing_job(user.id, batch_size=batch_sz, force=body.full_reindex)
+    return {
+        "status": "success",
+        "user_id": str(user.id),
+        "job_id": job.get("job_id"),
+        "job": job,
+        "results": {
+            "emails_indexed": job.get("emails_processed", 0),
+            "emails_skipped": 0,
+            "chunks_created": job.get("chunks_generated", 0),
+        },
+        "message": f"Background indexing started. {job.get('emails_pending', 0)} emails pending.",
+    }
+
+
+@router.get("/index/status")
+def get_indexing_job_status(
+    user: User = Depends(get_user_for_rag),
+    db: Session = Depends(get_db),
+):
+    """Return live status and progress metrics for user's RAG indexing job."""
+    from app.services.rag_indexer import default_rag_service
+    return default_rag_service.get_job_state(user.id, db=db)
+
+
+@router.post("/index/pause")
+def pause_indexing(
+    user: User = Depends(get_user_for_rag),
+):
+    """Pause the user's active background indexing job."""
+    from app.services.rag_indexer import default_rag_service
+    return default_rag_service.pause_indexing(user.id)
+
+
+@router.post("/index/resume")
+def resume_indexing(
+    user: User = Depends(get_user_for_rag),
+):
+    """Resume the user's paused background indexing job."""
+    from app.services.rag_indexer import default_rag_service
+    return default_rag_service.resume_indexing(user.id)
+
+
+@router.post("/index/retry")
+def retry_indexing(
+    user: User = Depends(get_user_for_rag),
+):
+    """Retry indexing unindexed or failed emails for the user."""
+    from app.services.rag_indexer import default_rag_service
+    return default_rag_service.retry_indexing(user.id)
 
 
 @router.get("/status")
@@ -436,8 +513,10 @@ def get_rag_system_status(
     user: User = Depends(get_user_for_rag),
     db: Session = Depends(get_db),
 ):
-    """Return live status of the PostgreSQL pgvector index and pending approvals."""
+    """Return live status of the PostgreSQL pgvector index, pending approvals, and indexing job."""
+    from app.services.rag_indexer import default_rag_service
     vector_count = default_vectorstore.count(user.id)
+    job_state = default_rag_service.get_job_state(user.id, db=db)
 
     total_chunks = db.scalar(
         select(func.count(EmailChunk.id))
@@ -467,6 +546,7 @@ def get_rag_system_status(
 
     return {
         "status": "operational",
+        "indexing_job": job_state,
         "vector_store": {
             "collection_name": default_vectorstore.collection_name,
             "backend": settings.vector_backend,
@@ -480,7 +560,7 @@ def get_rag_system_status(
             "pending_emails": max(0, user_email_count - (db.scalar(select(func.count(func.distinct(Email.id))).join(EmailChunk, EmailChunk.email_id == Email.id).join(EmailEmbedding, EmailEmbedding.chunk_id == EmailChunk.id).join(GmailAccount, GmailAccount.id == Email.gmail_account_id).where(GmailAccount.user_id == user.id, EmailEmbedding.status == "INDEXED")) or 0)),
             "pending_approvals": pending_approvals,
         },
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 

@@ -41,8 +41,44 @@ Set these config vars on `ai-powered-gmail`:
 | `AI_MONTHLY_BUDGET_USD` | `150.0` (Global monthly AI cost ceiling in USD) |
 | `CLOUDFLARE_TRUSTED_IPS` | Optional comma-separated CIDRs; defaults to official Cloudflare IPv4/IPv6 ranges |
 | `VISITOR_COOKIE_NAME` | `gmail_ai_demo_visitor` (HMAC-signed visitor cookie) |
+| `DEMO_VISITOR_TTL_DAYS` | `90` (Visitor cookie lifetime in days: 90 days = 7,776,000s) |
+| `GMAIL_SYNC_HOURLY_LIMIT` | `60` (Manual Gmail sync operations per hour per user) |
+| `LLM_CLASSIFICATION_PER_MINUTE` | `100` (LLM classification quota per minute per user) |
+| `RAG_INDEX_HOURLY_LIMIT` | `60` (RAG indexing endpoint operations per hour per user) |
+| `GMAIL_MCP_TIMEOUT_SECONDS` | `60` (Gmail MCP subprocess execution deadline in seconds) |
+| `GMAIL_MCP_MAX_MESSAGES` | `500` (Maximum messages processed by Gmail MCP tools) |
 
 Keep `SESSION_SECRET`, `DEVELOPER_SETTINGS_ENCRYPTION_KEY`, `AZURE_OPENAI_API_KEY`, `OAUTH_GOOGLE_CLIENT_ID`, and `OAUTH_GOOGLE_CLIENT_SECRET` as Heroku config vars. Do not commit them.
+
+
+### Configuring Operational Limits & Quotas via Heroku CLI
+
+Run the following command to apply or customize the operational quotas and limits on `ai-powered-gmail`:
+
+```bash
+heroku config:set \
+  GMAIL_SYNC_HOURLY_LIMIT=60 \
+  LLM_CLASSIFICATION_PER_MINUTE=100 \
+  RAG_INDEX_HOURLY_LIMIT=60 \
+  GMAIL_MCP_TIMEOUT_SECONDS=60 \
+  GMAIL_MCP_MAX_MESSAGES=500 \
+  DEMO_VISITOR_TTL_DAYS=90 \
+  -a ai-powered-gmail
+```
+
+### Large-Mailbox RAG Indexing Architecture
+
+VC11 decouples RAG indexing job initiation from internal batch processing to support complete mailbox indexing across 1,000 to 1,000,000+ emails without timeouts:
+
+- **Asynchronous Execution:** `POST /api/rag/index` initiates a resumable background worker loop (`rag_indexer.py`). The HTTP response returns immediately (`202 Accepted`) with an initial job status tracking dictionary.
+- **Automatic Batch Continuation:** The worker queries unindexed emails via `Email.id NOT IN (SELECT email_id FROM email_embeddings)` in successive batches of 100 emails (50 chunks per bulk embedding API call) until all emails are embedded.
+- **Cross-Dyno Concurrency Leases:** Backed by PostgreSQL `acquire_operation_lease` (`rag_index:{user_id}`, TTL 180s, heartbeated every 30s) to prevent concurrent runs on the same mailbox while allowing 1 active job per user and 2 globally.
+- **Dyno Restart & Crash Recovery:** If a Heroku dyno restarts, the lease expires automatically; subsequent indexing calls resume cleanly from the exact last unindexed email without re-embedding or duplicating vectors.
+- **Job Lifecycle & Monitoring Endpoints:**
+  - `GET /api/rag/index/status` & `GET /api/rag/status`: Track live metrics (`total_emails_discovered`, `emails_processed`, `emails_pending`, `emails_failed`, `chunks_generated`, `embeddings_generated`, `current_batch`, `status`, `last_checkpoint`, `estimated_cost_usd`).
+  - `POST /api/rag/index/pause`: Gracefully halts worker loop after the current batch finishes and preserves checkpoint.
+  - `POST /api/rag/index/resume`: Resumes processing remaining unindexed emails.
+  - `POST /api/rag/index/retry`: Retries failed or unembedded email batches.
 
 ### Generating High-Entropy Secrets
 

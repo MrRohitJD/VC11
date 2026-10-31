@@ -69,6 +69,7 @@ def set_visitor_cookie(response: Response, visitor_id: Optional[str] = None) -> 
         httponly=True,
         secure=settings.secure_cookies,
         samesite="lax",
+        path="/",
         max_age=settings.demo_visitor_ttl_days * 86400,
     )
     return vid

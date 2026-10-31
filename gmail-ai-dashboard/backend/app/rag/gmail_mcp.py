@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 from app.rag.search_plan import gmail_search_query
 
 
-MAX_LIVE_GMAIL_SECONDS = 15
-MAX_LIVE_GMAIL_MESSAGES = 100
+MAX_LIVE_GMAIL_SECONDS = 60
+MAX_LIVE_GMAIL_MESSAGES = 500
 
 
 async def _search(user_id, query, *, full_scan=False):

@@ -81,7 +81,8 @@ def set_demo_visitor_cookie(request: Request, response: Response) -> None:
     response.set_cookie(
         DEMO_VISITOR_COOKIE, f"{visitor}.{_digest(visitor)}",
         httponly=True, secure=settings.secure_cookies, samesite="lax",
-        max_age=365 * 86400,
+        path="/",
+        max_age=settings.demo_visitor_ttl_days * 86400,
     )
 
 

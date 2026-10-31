@@ -136,6 +136,10 @@ def test_visitor_cookie_generation_and_validation():
     cookie_header = resp.headers.get("set-cookie", "")
     assert settings.demo_visitor_cookie_name in cookie_header
     assert "HttpOnly" in cookie_header
+    # 90-day Max-Age (7,776,000 seconds), Path=/, SameSite=Lax
+    assert "max-age=7776000" in cookie_header.lower()
+    assert "path=/" in cookie_header.lower()
+    assert "samesite=lax" in cookie_header.lower()
 
     # Extract value
     cookie_val = cookie_header.split(";")[0].split("=", 1)[1]
@@ -287,16 +291,38 @@ def test_gmail_sync_frequency_limit(mem_db):
     user = SimpleNamespace(id=uuid4(), is_demo=False)
     ip_h = digest_ip("192.0.2.77")
 
-    # Max 3 syncs per hour
-    check_sync_rate_limit(mem_db, user, ip_h)
-    check_sync_rate_limit(mem_db, user, ip_h)
-    check_sync_rate_limit(mem_db, user, ip_h)
+    # Max 60 syncs per hour
+    for _ in range(60):
+        check_sync_rate_limit(mem_db, user, ip_h)
 
-    # 4th sync is rejected
+    # 61st sync is rejected
     with pytest.raises(HTTPException) as excinfo:
         check_sync_rate_limit(mem_db, user, ip_h)
     assert excinfo.value.status_code == 429
     assert "sync rate limit reached" in excinfo.value.detail
+
+
+def test_llm_classification_frequency_limit(mem_db):
+    from app.api.routes.llm import check_classification_rate_limit
+    user = SimpleNamespace(id=uuid4(), is_demo=False)
+    ip_h = digest_ip("192.0.2.88")
+
+    # Max 100 requests per minute
+    for _ in range(100):
+        check_classification_rate_limit(mem_db, user, ip_h)
+
+    # 101st request is rejected
+    with pytest.raises(HTTPException) as excinfo:
+        check_classification_rate_limit(mem_db, user, ip_h)
+    assert excinfo.value.status_code == 429
+    assert "Classification rate limit reached" in excinfo.value.detail
+
+
+def test_mcp_timeout_and_message_limits():
+    from app.rag import gmail_mcp
+    assert gmail_mcp.MAX_LIVE_GMAIL_SECONDS == 60
+    assert gmail_mcp.MAX_LIVE_GMAIL_MESSAGES == 500
+    assert settings.gmail_mcp_timeout_seconds >= 60
 
 
 def test_outbound_email_recipient_limit(mem_db):

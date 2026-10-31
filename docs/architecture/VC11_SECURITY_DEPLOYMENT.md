@@ -158,13 +158,13 @@ VC11 incorporates a comprehensive 10-layer defense-in-depth rate limiting, quota
 ### 10-Layer Defense Matrix:
 1. **Layer 1 — Cloudflare Edge IP Rate Limiting:** Single strategic WAF rule on `/api/*` (excluding `/health`) on the Cloudflare Free Plan: 100 requests / 1 minute with Managed Challenge.
 2. **Layer 2 — IP-Based Application Rate Limiting:** Dual-window (burst: 120 req/min; sustained: 1000 req/hr) per-IP enforcement with verified Cloudflare CIDRs, direct Heroku bypass detection, keyed HMAC-SHA256 IP hashing (`digest_ip`), and temporary in-memory IP cooldowns.
-3. **Layer 3 — Anonymous Visitor-Based Rate Limiting:** Cryptographically signed visitor cookies (`gmail_ai_demo_visitor`) with HMAC-SHA256, tampering detection, DB registration in `demo_visitors`, abuse scoring, and automatic 15-minute temporary blocks.
+3. **Layer 3 — Anonymous Visitor-Based Rate Limiting:** Cryptographically signed visitor cookies (`gmail_ai_demo_visitor`) with HMAC-SHA256, 90-day lifetime (Max-Age=7,776,000s; HttpOnly, Secure, SameSite=Lax, Path=/), tampering detection, DB registration in `demo_visitors`, abuse scoring, and automatic 15-minute temporary blocks.
 4. **Layer 4 — Global Application Rate Limiting:** Cross-application aggregate traffic throttle (default 600 req/min) using atomic PostgreSQL counters in `rate_limit_buckets` to shield Heroku dynos against distributed load.
-5. **Layer 5 — Endpoint-Specific Rate Limiting:** Tiered quotas per endpoint category (Auth: 10-20/min; RAG chat: 10/min; Outbound email: 10/hr; Gmail sync: 3/hr; LLM classify: 30/min; Status/export: 60/min). Injects RFC-compliant `X-RateLimit-*` and `Retry-After` headers.
+5. **Layer 5 — Endpoint-Specific Rate Limiting:** Tiered quotas per endpoint category (Auth: 10-20/min; RAG chat: 10/min; Outbound email: 10/hr; Gmail sync: 60/hr; LLM classify: 100/min; RAG index: 60/hr; Status/export: 60/min). Injects RFC-compliant `X-RateLimit-*` and `Retry-After` headers.
 6. **Layer 6 — AI Token and Financial Cost Quotas:** Pre-call query character limits (max 1,000 chars), per-visitor token budgets, and global USD financial spend caps ($10/day, $150/month) backed by post-inference accounting in `ai_usage_logs`.
-7. **Layer 7 — RAG and Embedding Resource Limits:** Capped retrieval chunks, batch size limits (max 500 documents per batch), and cross-dyno operation leases for embedding re-indexing.
-8. **Layer 8 — MCP Tool Execution Limits:** Bounded execution timeouts (15s ceiling), max messages cap (100 msgs), and demo mailbox mutation guards (`protect_demo_mailbox`).
-9. **Layer 9 — Gmail Sync & Outbound Email Send Controls:** Manual sync frequency throttles (max 3/hr), outbound email limits (10/hr, 30/day), max 10 total recipients validation, 60-second duplicate-send protection via content fingerprinting, and 5-minute idempotency caching via `Idempotency-Key` header.
+7. **Layer 7 — RAG and Embedding Resource Limits:** Capped retrieval chunks, decoupled job initiation (60 ops/hr) from internal batch processing, automatic background continuation with 100 emails/batch (50 chunks per bulk embed call), persistent state checkpoints, crash recovery, pause/resume/retry lifecycle, and cross-dyno operation leases (`rag_index:{user_id}`, TTL 180s).
+8. **Layer 8 — MCP Tool Execution Limits:** Bounded execution timeouts (60s ceiling), max messages cap (500 msgs), and demo mailbox mutation guards (`protect_demo_mailbox`).
+9. **Layer 9 — Gmail Sync & Outbound Email Send Controls:** Manual sync frequency throttles (max 60/hr per authenticated user), outbound email limits (10/hr, 30/day), max 10 total recipients validation, 60-second duplicate-send protection via content fingerprinting, and 5-minute idempotency caching via `Idempotency-Key` header.
 10. **Layer 10 — Abuse Detection, Mitigation & Security Logging:** Centralized `security_events` audit table tracking brute force, spoofed proxy headers, signature tampering, and quota violations with automated IP cooldowns.
 
 ---
@@ -268,6 +268,12 @@ flowchart LR
 | `LANGSMITH_TRACING` | No | `false` | Enables LangSmith telemetry |
 | `LANGSMITH_API_KEY` | No | — | LangSmith authentication key |
 | `LANGSMITH_PROJECT` | No | `mailbox-devLG` | LangSmith project workspace |
+| `GMAIL_SYNC_HOURLY_LIMIT` | No | `60` | Manual Gmail sync operations per hour per user |
+| `LLM_CLASSIFICATION_PER_MINUTE` | No | `100` | LLM classification quota per minute per user |
+| `RAG_INDEX_HOURLY_LIMIT` | No | `60` | RAG indexing endpoint operations per hour per user |
+| `GMAIL_MCP_TIMEOUT_SECONDS` | No | `60` | Gmail MCP subprocess execution timeout in seconds |
+| `GMAIL_MCP_MAX_MESSAGES` | No | `500` | Maximum messages processed by Gmail MCP tools |
+| `DEMO_VISITOR_TTL_DAYS` | No | `90` | Visitor cookie lifetime in days (90 days = 7,776,000s) |
 
 ### 9.5 Production Verification & Health Checks
 - **Health Check:** `GET /health` returns `{"status": "ok"}` with HTTP 200.
