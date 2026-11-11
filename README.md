@@ -203,6 +203,26 @@ The production Docker and Heroku entrypoints already use
 `newrelic-admin run-program`. If no license key is configured, the application
 continues to run without sending telemetry.
 
+#### Optional two-container New Relic build
+
+The repository also includes the separate base-container pattern from the New
+Relic Docker setup. Build the agent base image first, then build the backend
+container using that image:
+
+```bash
+docker build -f newrelic/Dockerfile -t python_newrelic:latest .
+docker build -t vc11-python-api:latest gmail-ai-dashboard/backend
+docker run --rm -it \
+  -e NEW_RELIC_LICENSE_KEY=your-license-key \
+  -e NEW_RELIC_APP_NAME="Gmail AI Dashboard" \
+  -p 8000:8000 \
+  --name vc11-python-api \
+  vc11-python-api:latest
+```
+
+The license key is supplied at runtime and is never stored in the Dockerfiles
+or configuration committed to the repository.
+
 ### 3. Frontend Setup
 ```bash
 cd ../frontend
