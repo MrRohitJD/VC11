@@ -227,6 +227,25 @@ Do not put `license_key` or `app_name` into `newrelic.ini`: New Relic gives
 those file values precedence over runtime environment variables. Set both
 values as container or platform secrets instead.
 
+To test the connection after setting the rotated secret, run the agent’s
+environment-based validation command:
+
+```bash
+# Heroku: uses NEW_RELIC_LICENSE_KEY from the app's Config Vars
+heroku run newrelic-admin validate-config - stdout --app ai-powered-gmail
+
+# Docker: pass the secret only at runtime; do not paste it into this file
+docker run --rm \
+  -e NEW_RELIC_LICENSE_KEY="your-rotated-license-key" \
+  -e NEW_RELIC_APP_NAME="Gmail AI Dashboard" \
+  vc11-python-api:latest \
+  newrelic-admin validate-config - stdout
+```
+
+After a successful validation, restart or redeploy the application and send a
+request to `/health`. Allow a few minutes for the `Gmail AI Dashboard` APM
+service to appear in New Relic.
+
 ### 3. Frontend Setup
 ```bash
 cd ../frontend
