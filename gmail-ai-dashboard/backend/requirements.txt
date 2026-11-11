@@ -1,4 +1,5 @@
 fastapi
+newrelic>=10,<11
 mcp>=1.28,<2
 langchain-nvidia-ai-endpoints>=1.4,<2
 uvicorn[standard]

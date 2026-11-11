@@ -6,4 +6,4 @@ release:
   command:
     - sh scripts/heroku_release.sh
 run:
-  web: sh -c 'export LANGSMITH_TRACING=false LANGCHAIN_TRACING_V2=false; exec uvicorn app.api.app:app --host 0.0.0.0 --port ${PORT:-8000}'
+  web: sh -c 'export LANGSMITH_TRACING=false LANGCHAIN_TRACING_V2=false; exec newrelic-admin run-program uvicorn app.api.app:app --host 0.0.0.0 --port ${PORT:-8000}'
