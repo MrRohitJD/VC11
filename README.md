@@ -186,6 +186,23 @@ uvicorn app.api.app:app --reload --port 8000
 ```
 Backend API will be running at `http://localhost:8000`.
 
+### New Relic APM (optional)
+
+The backend includes the New Relic Python agent and a checked-in configuration
+template at `gmail-ai-dashboard/backend/newrelic.ini`. To enable APM locally,
+set `NEW_RELIC_LICENSE_KEY` in your environment and start Uvicorn through the
+agent wrapper:
+
+```bash
+set NEW_RELIC_LICENSE_KEY=your-license-key
+set NEW_RELIC_CONFIG_FILE=./newrelic.ini
+newrelic-admin run-program uvicorn app.api.app:app --reload --port 8000
+```
+
+The production Docker and Heroku entrypoints already use
+`newrelic-admin run-program`. If no license key is configured, the application
+continues to run without sending telemetry.
+
 ### 3. Frontend Setup
 ```bash
 cd ../frontend
