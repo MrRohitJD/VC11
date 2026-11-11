@@ -231,8 +231,8 @@ To test the connection after setting the rotated secret, run the agent’s
 environment-based validation command:
 
 ```bash
-# Heroku: uses NEW_RELIC_LICENSE_KEY from the app's Config Vars
-heroku run newrelic-admin validate-config - stdout --app ai-powered-gmail
+# Heroku PowerShell: quote the command so the standalone '-' is preserved
+heroku run "newrelic-admin validate-config - stdout" --app ai-powered-gmail
 
 # Docker: pass the secret only at runtime; do not paste it into this file
 docker run --rm \
