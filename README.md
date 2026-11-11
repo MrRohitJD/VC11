@@ -223,6 +223,10 @@ docker run --rm -it \
 The license key is supplied at runtime and is never stored in the Dockerfiles
 or configuration committed to the repository.
 
+Do not put `license_key` or `app_name` into `newrelic.ini`: New Relic gives
+those file values precedence over runtime environment variables. Set both
+values as container or platform secrets instead.
+
 ### 3. Frontend Setup
 ```bash
 cd ../frontend
