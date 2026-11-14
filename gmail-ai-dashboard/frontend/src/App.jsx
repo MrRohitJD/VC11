@@ -16,7 +16,7 @@ import AiAssistant from './pages/AiAssistant';
 import { PublicHome, PrivacyPolicy, TermsOfService, ContactPage } from './pages/PublicPages';
 import ComposeModal from './components/ComposeModal';
 const SentMessagesView = lazy(() => import('./components/SentMessagesView'));
-import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex, enterDemo, getDeveloperSettings, updateDeveloperSettings, reconnectDeveloperDatabase, getDeveloperSchemaUrl } from './services/api';
+import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex, enterDemo, getDeveloperSettings, updateDeveloperSettings, reconnectDeveloperDatabase, getDeveloperSchemaUrl, sendRagChat } from './services/api';
 
 const navItems = [
 	{ label: 'Inbox', icon: Inbox }, { label: 'Starred', icon: Star },
@@ -51,7 +51,7 @@ function Sidebar({ active, onNavigate, onClose, unreadCount, sentCount, onCompos
 	</aside>;
 }
 
-function Header({ search, setSearch, onMenu, user, onLogout, onNavigateSettings }) {
+function Header({ search, setSearch, onMenu, user, onLogout, onNavigateSettings, onAiSearch, aiSearch, aiSearching, aiSearchError, onSelectSearchResult, onDismissSearch }) {
 	const [profileOpen, setProfileOpen] = useState(false);
 	const initials = user?.name ? user.name.split(' ').map((n) => n[0]).join('').slice(0, 2).toUpperCase() : user?.email?.[0]?.toUpperCase() || '?';
 	const displayName = user?.name || user?.email || 'User';
@@ -59,11 +59,24 @@ function Header({ search, setSearch, onMenu, user, onLogout, onNavigateSettings 
 	return (
 		<header className="topbar">
 			<button className="menu-button" onClick={onMenu}><Menu size={21} /></button>
-			<div className="search-box">
+			<form className="search-box" role="search" onSubmit={(event) => { event.preventDefault(); onAiSearch(search); }}>
 				<Search size={18} />
-				<input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search emails, people, or keywords..." />
-				<kbd>⌘ K</kbd>
-			</div>
+				<input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Ask AI about your emails..." aria-label="Search your mailbox with AI" />
+				<button type="submit" aria-label="Search mailbox with AI" disabled={aiSearching || !search.trim()}><Sparkles size={15} /></button>
+				{(aiSearching || aiSearch || aiSearchError) && <button className="search-dismiss" type="button" onClick={onDismissSearch} aria-label="Close search results"><X size={14} /></button>}
+				{(aiSearching || aiSearch || aiSearchError) && <div className="ai-search-popover" role="status" aria-live="polite">
+					<div className="ai-search-heading"><Sparkles size={14} /><strong>{aiSearching ? 'Searching your mailbox…' : aiSearchError ? 'Search could not finish' : 'AI email search'}</strong></div>
+					{aiSearchError ? <p className="ai-search-error">{aiSearchError}</p> : aiSearching ? <p>Looking across message content and available mailbox context.</p> : <>
+						{aiSearch?.answer && <p className="ai-search-answer">{aiSearch.answer}</p>}
+						<div className="ai-search-results">
+							{aiSearch?.citations?.map((mail) => <button type="button" key={mail.email_id} className="ai-search-result" onClick={() => onSelectSearchResult(mail.email_id)}>
+								<strong>{mail.subject || '(No subject)'}</strong><span>{mail.sender} · {mail.date}</span><small>{mail.snippet}</small>
+							</button>)}
+							{!aiSearch?.citations?.length && <p>No related emails were found.</p>}
+						</div>
+					</>}
+				</div>}
+			</form>
 			<div className="top-actions">
 				<button className="icon-button notification"><Bell size={19} /><i /></button>
 				<div className="profile-menu">
@@ -973,6 +986,9 @@ function SettingsPage() {
 function Dashboard() {
 	const [active, setActive] = useState('Dashboard');
 	const [search, setSearch] = useState('');
+	const [aiSearch, setAiSearch] = useState(null);
+	const [aiSearching, setAiSearching] = useState(false);
+	const [aiSearchError, setAiSearchError] = useState('');
 	const [selectedId, setSelectedId] = useState(null);
 	const [selectedIds, setSelectedIds] = useState([]);
 	const [mobileOpen, setMobileOpen] = useState(false);
@@ -1230,6 +1246,29 @@ function Dashboard() {
 		setExpandedPreview(true);
 	};
 
+	const handleAiSearch = async (query) => {
+		const cleanQuery = query.trim();
+		if (!cleanQuery || aiSearching) return;
+		setAiSearching(true);
+		setAiSearch(null);
+		setAiSearchError('');
+		try {
+			const { data } = await sendRagChat({
+				query: `Find emails relevant to this request. Search across message subject, sender, body, dates, folder or label metadata, and attachment names or extracted attachment text when available. This is a read-only search; do not perform email actions. Request: ${cleanQuery}`,
+				top_k: 8,
+				use_multi_query: true,
+				use_gmail_mcp: true,
+			});
+			setAiSearch(data);
+		} catch (error) {
+			setAiSearchError(error.response?.data?.detail || error.message || 'Please try searching again.');
+		} finally {
+			setAiSearching(false);
+		}
+	};
+	const dismissAiSearch = () => { setAiSearch(null); setAiSearchError(''); };
+	const openAiSearchResult = (emailId) => { dismissAiSearch(); handleEmailClick(emailId); };
+
 	useEffect(() => {
 		if (!selectedId) {
 			return undefined;
@@ -1309,7 +1348,7 @@ function Dashboard() {
 					<Sidebar active={active} onNavigate={setActive} onClose={() => {}} unreadCount={unreadCount} sentCount={sentTotal} onCompose={() => handleOpenCompose()} />
 				</div>
 				<div className="main-shell">
-					<Header search={search} setSearch={setSearch} onMenu={() => {}} onLogout={handleLogout} user={user} onNavigateSettings={() => navigate('/settings')} />
+					<Header search={search} setSearch={setSearch} onMenu={() => {}} onLogout={handleLogout} user={user} onNavigateSettings={() => navigate('/settings')} onAiSearch={handleAiSearch} aiSearch={aiSearch} aiSearching={aiSearching} aiSearchError={aiSearchError} onSelectSearchResult={openAiSearchResult} onDismissSearch={dismissAiSearch} />
 					<main className="content">
 						{backgroundSync?.background_status === 'syncing' && <p role="status">{backgroundSync.background_scanned ? `Syncing the rest of your Inbox: ${backgroundSync.background_scanned.toLocaleString()} older messages checked.` : 'Syncing the rest of your Inbox...'}</p>}
 						{backgroundSync?.background_status === 'error' && <p role="alert">Inbox sync paused. <button type="button" onClick={handleSync} disabled={isSyncing}>Retry sync</button></p>}
@@ -1369,7 +1408,7 @@ function Dashboard() {
 				<Sidebar active={active} onNavigate={(label) => { setActive(label); setMobileOpen(false); }} onClose={() => setMobileOpen(false)} unreadCount={unreadCount} sentCount={sentTotal} onCompose={() => { handleOpenCompose(); setMobileOpen(false); }} />
 			</div>
 			<div className="main-shell">
-				<Header search={search} setSearch={setSearch} onMenu={() => setMobileOpen(true)} onLogout={handleLogout} user={user} onNavigateSettings={() => navigate('/settings')} />
+				<Header search={search} setSearch={setSearch} onMenu={() => setMobileOpen(true)} onLogout={handleLogout} user={user} onNavigateSettings={() => navigate('/settings')} onAiSearch={handleAiSearch} aiSearch={aiSearch} aiSearching={aiSearching} aiSearchError={aiSearchError} onSelectSearchResult={openAiSearchResult} onDismissSearch={dismissAiSearch} />
 				<main className="content">
 					<section className="welcome">
 						<div>

@@ -40,6 +40,7 @@ except ImportError:
 
 
 from app.models.email import AiCategory, Email, EmailClassification, EmailLabel, GmailAccount, Label
+from app.models.rag import Attachment
 from app.core.config import settings
 from app.rag.mailbox_scope import mailbox_email_condition, mailbox_email_ids, primary_email_condition, restrict_to_email_ids
 from app.rag.query_constraints import received_date_bounds
@@ -676,6 +677,10 @@ class GmailCustomHybridRetriever(BaseRetriever):
                         Email.subject.ilike(search_pat),
                         Email.snippet.ilike(search_pat),
                         Email.body.ilike(search_pat),
+                        Email.attachments.any(or_(
+                            Attachment.filename.ilike(search_pat),
+                            Attachment.extracted_text.ilike(search_pat),
+                        )),
                     )
 
                     # Extract individual significant words for multi-word or rewritten queries
@@ -699,6 +704,10 @@ class GmailCustomHybridRetriever(BaseRetriever):
                                 Email.subject.ilike(f"%{w}%"),
                                 Email.snippet.ilike(f"%{w}%"),
                                 Email.body.ilike(f"%{w}%"),
+                                Email.attachments.any(or_(
+                                    Attachment.filename.ilike(f"%{w}%"),
+                                    Attachment.extracted_text.ilike(f"%{w}%"),
+                                )),
                             )
                             for w in sig_words
                         ]
@@ -853,6 +862,10 @@ class GmailCustomHybridRetriever(BaseRetriever):
                         Email.snippet.ilike(f"%{escaped}%", escape="\\"),
                         Email.body.ilike(f"%{escaped}%", escape="\\"),
                         Email.body_html.ilike(f"%{escaped}%", escape="\\"),
+                        Email.attachments.any(or_(
+                            Attachment.filename.ilike(f"%{escaped}%", escape="\\"),
+                            Attachment.extracted_text.ilike(f"%{escaped}%", escape="\\"),
+                        )),
                     )
                 )
 
