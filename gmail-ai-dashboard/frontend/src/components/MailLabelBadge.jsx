@@ -28,5 +28,5 @@ export default function MailLabelBadge({ email }) {
 	const offset = CATEGORY_OFFSETS[key] ?? 0;
 	const categoryHue = (hue + offset) % 360;
 	const displayLabel = label.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase());
-	return <em className="label-badge category-label" style={{ backgroundColor: `hsl(${categoryHue} 78% 88%)`, color: `hsl(${categoryHue} 63% 27%)`, border: `1px solid hsl(${categoryHue} 65% 81%)` }}>{displayLabel}</em>;
+	return <em className="label-badge category-label" style={{ backgroundColor: `hsl(${categoryHue} 45% 97%)`, color: `hsl(${categoryHue} 32% 48%)`, border: `1px solid hsl(${categoryHue} 30% 91%)` }}>{displayLabel}</em>;
 }
