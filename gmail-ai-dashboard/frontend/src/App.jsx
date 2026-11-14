@@ -12,7 +12,7 @@ import { useAuth } from './context/AuthContext';
 import GmailConsent from './pages/GmailConsent';
 import SyncPage from './pages/SyncPage';
 import AiAssistant from './pages/AiAssistant';
-import { PublicHome, PrivacyPolicy, TermsOfService } from './pages/PublicPages';
+import { PublicHome, PrivacyPolicy, TermsOfService, ContactPage } from './pages/PublicPages';
 import ComposeModal from './components/ComposeModal';
 const SentMessagesView = lazy(() => import('./components/SentMessagesView'));
 import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex, enterDemo, getDeveloperSettings, updateDeveloperSettings, reconnectDeveloperDatabase, getDeveloperSchemaUrl } from './services/api';
@@ -1476,6 +1476,7 @@ export default function App() {
 
 	if (location.pathname === '/privacy') return <PrivacyPolicy />;
 	if (location.pathname === '/terms') return <TermsOfService />;
+	if (location.pathname === '/contact') return <ContactPage />;
 	if (location.pathname === '/') return <PublicHome />;
 	if (location.pathname === '/login') return <AuthPage signup={false} />;
 	if (location.pathname === '/signup') return <AuthPage signup={true} />;
