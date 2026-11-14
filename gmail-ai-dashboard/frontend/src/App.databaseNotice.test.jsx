@@ -55,7 +55,7 @@ it('shows a success pop-up after the database is connected', async () => {
 
 	const dialog = await screen.findByRole('alertdialog', { name: 'Database connected' });
 	expect(within(dialog).getByText('Connected to postgresql+psycopg://db.example.com:5432/mail.')).toBeInTheDocument();
-	expect(await screen.findByRole('status')).toHaveTextContent('Connected to postgresql+psycopg://db.example.com:5432/mail');
+	expect(await screen.findByRole('status')).toHaveTextContent('Saved personal database: postgresql+psycopg://db.example.com:5432/mail');
 	expect(updateDeveloperSettings).toHaveBeenCalledWith({ database_url: 'postgresql://owner:secret@db.example.com/mail' });
 	fireEvent.click(within(dialog).getByRole('button', { name: 'OK' }));
 	expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
@@ -89,7 +89,7 @@ it('disconnects the personal database and returns to the default without transfe
 	const dialog = await screen.findByRole('alertdialog', { name: 'Database disconnected' });
 	expect(within(dialog).getByText('You are connected to the app database. No data was transferred.')).toBeInTheDocument();
 	expect(updateDeveloperSettings).toHaveBeenCalledWith({ clear_database: true });
-	expect(screen.getByRole('status')).toHaveTextContent('You are connected to the app database.');
+	expect(screen.getByRole('status')).toHaveTextContent('You are using the default central application database.');
 	expect(screen.queryByRole('button', { name: 'Disconnect & Use App Database' })).not.toBeInTheDocument();
 });
 

@@ -147,6 +147,8 @@ d:\Project\VC11/
 
 ## ⚡ Quick Start & Local Setup
 
+GitHub Actions testing and Heroku deployment setup: [CI/CD guide](docs/GITHUB_ACTIONS.md).
+
 ### Prerequisites
 - Python 3.12+
 - Node.js 20+ & npm
