@@ -1,3 +1,4 @@
+import MailLabelBadge from './components/MailLabelBadge';
 import { useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
 import { useLocation, useNavigate, Navigate } from 'react-router-dom';
 import {
@@ -304,7 +305,7 @@ function RecentEmails({ emailsToShow, selectedId, onSelectEmail, selected, onTog
 									<small>{email.preview}</small>
 								</span>
 								<span>
-									<em className={`label-badge ${(email.label || '').toLowerCase()}`}>{email.label}</em>
+									<MailLabelBadge email={email} />
 								</span>
 								<span className="date-cell">{email.date}</span>
 								<span
@@ -390,8 +391,7 @@ function InboxView({ emails, selectedId, onSelectEmail, selectedIds, onToggleSel
 									<small>{email.preview}</small>
 								</span>
 								<span>
-									<em className={`label-badge ${(email.label || '').toLowerCase()}`}>{email.label}</em>
-									{email.gmail_category && <small className="gmail-category-badge">{email.gmail_category}</small>}
+									<MailLabelBadge email={email} />
 								</span>
 								<span className="date-cell">{email.date}</span>
 								<span className="star"><Star size={17} /></span>
@@ -423,8 +423,7 @@ function EmailPreview({ email, onClose, onExpand, onReply, onForward, isModal = 
 				<div>
 					<div className="preview-header-meta">
 						<span className="preview-label">{isModal ? 'EMAIL DETAILS' : 'EMAIL PREVIEW'}</span>
-						{email.label && <em className={`label-badge ${(email.label || '').toLowerCase()}`}>{email.label}</em>}
-						{email.gmail_category && <small className="gmail-category-badge">{email.gmail_category}</small>}
+						<MailLabelBadge email={email} />
 					</div>
 					<h2>{email.subject || '(No subject)'}</h2>
 				</div>
@@ -453,7 +452,6 @@ function EmailPreview({ email, onClose, onExpand, onReply, onForward, isModal = 
 				<span className="preview-date">{email.date || ''}</span>
 			</div>
 				<div className="preview-body">
-				{email.labels?.length > 0 && <p className="preview-labels">Labels: {email.labels.filter((label) => label.name !== email.gmail_category).map((label) => label.name).join(', ')}</p>}
 				{sanitizedHtml ? (
 					<div className="email-html-body" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />
 				) : email.body ? (
@@ -1066,7 +1064,7 @@ function Dashboard() {
 						initials: initials || '?',
 						avatarColor: '#e1dcff',
 						preview: email.snippet || '',
-						label: email.ai_label || email.labels?.find((l) => l.is_ai)?.name || email.labels?.find((l) => !['INBOX', 'UNREAD', 'STARRED', 'IMPORTANT'].includes(l.name))?.name || email.labels?.[0]?.name || 'Uncategorized',
+						label: email.ai_label || email.labels?.find((l) => l.is_ai)?.name || '',
 						date: email.received_at ? new Date(email.received_at).toLocaleDateString() : '',
 						starred: false,
 					};
@@ -1207,7 +1205,7 @@ function Dashboard() {
 					initials: initials || '?',
 					avatarColor: '#e1dcff',
 					preview: email.snippet || '',
-					label: email.ai_label || email.labels?.find((l) => l.is_ai)?.name || email.labels?.find((l) => !['INBOX', 'UNREAD', 'STARRED', 'IMPORTANT'].includes(l.name))?.name || email.labels?.[0]?.name || 'Uncategorized',
+					label: email.ai_label || email.labels?.find((l) => l.is_ai)?.name || '',
 					date: email.received_at ? new Date(email.received_at).toLocaleDateString() : '',
 					starred: false,
 				};

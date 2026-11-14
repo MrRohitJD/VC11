@@ -1,3 +1,4 @@
+import MailLabelBadge from './MailLabelBadge';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Paperclip, Send, Star } from 'lucide-react';
 import { fetchEmails } from '../services/api';
@@ -249,12 +250,7 @@ export default function SentMessagesView({
 										<small>{email.preview}</small>
 									</span>
 									<span>
-										<em className={`label-badge ${(email.label || 'sent').toLowerCase()}`}>
-											{email.label}
-										</em>
-										{email.gmail_category && (
-											<small className="gmail-category-badge">{email.gmail_category}</small>
-										)}
+										<MailLabelBadge email={email} />
 									</span>
 									<span className="date-cell">{email.date}</span>
 									<span className="star" aria-label={email.starred ? 'Starred' : 'Not starred'}>
