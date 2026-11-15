@@ -35,7 +35,12 @@ Heroku builds the root Dockerfile again using `heroku.yml`; the CI image is a
 build check, not a promoted artifact. Dependencies are not fully pinned, so the
 two builds are not guaranteed to be identical. The existing release phase runs
 database reconciliation, Alembic migrations, and demo mailbox seeding. A failed
-release command blocks activation. GitHub then checks the public `/health` URL.
+release command blocks activation. GitHub then checks `/health` on the direct
+Heroku hostname and requires a JSON response with `status: ok`. The custom domain
+is behind Cloudflare and can reject GitHub-hosted runners with HTTP 403 even when
+the app is healthy. This check does not change the custom domain's access controls.
+To override the direct health endpoint, set the GitHub Actions variable
+`HEROKU_HEALTH_URL` to the target app's HTTPS health URL.
 That endpoint checks HTTP availability, not all database or provider connections.
 
 Workflow runs on the same branch are serialized. GitHub can replace pending
@@ -51,7 +56,7 @@ Deployment uses a temporary Git authentication helper and never force-pushes Her
   existing Heroku history. Do not add an automatic force push to the workflow.
 - Deployment or health failure: inspect `heroku logs --tail --app ai-powered-gmail`.
   A failed health check marks the workflow failed but does not roll back a release.
-- To change the target app or public URL, update the deployment job and confirm
+- To change the target app or health URL, update the deployment job and confirm
   the target app's stack and runtime configuration first.
 
 References: [GitHub Python CI](https://docs.github.com/en/actions/tutorials/build-and-test-code/python),

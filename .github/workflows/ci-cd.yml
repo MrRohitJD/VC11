@@ -117,8 +117,21 @@ jobs:
           GIT_ASKPASS="$credential_dir/askpass" GIT_TERMINAL_PROMPT=0 git push \
             "https://git.heroku.com/${HEROKU_APP_NAME}.git" HEAD:refs/heads/main
       - name: Check application health
+        env:
+          HEROKU_HEALTH_URL: ${{ vars.HEROKU_HEALTH_URL || 'https://ai-powered-gmail-0007703734bc.herokuapp.com/health' }}
         run: |
+          response_file=$(mktemp)
+          trap 'rm -f "$response_file"' EXIT
           curl --fail --silent --show-error --location \
             --retry 12 --retry-delay 10 --retry-all-errors \
             --connect-timeout 10 --max-time 30 \
-            https://mail-assistant.rohit-jadhav.dev/health
+            --output "$response_file" "$HEROKU_HEALTH_URL"
+          python3 - "$response_file" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as response:
+              payload = json.load(response)
+          if not isinstance(payload, dict) or payload.get("status") != "ok":
+              raise SystemExit("Heroku health response did not report status=ok")
+          print("Heroku application is healthy")
+          PY
