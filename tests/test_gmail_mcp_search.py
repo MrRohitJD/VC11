@@ -61,7 +61,7 @@ class Gmail:
 def test_live_search_pages_and_never_crosses_accounts(mailbox, monkeypatch):
     db, users = mailbox
     gmail = Gmail()
-    monkeypatch.setattr(server, "build_gmail_service_for_user", lambda db, user: gmail)
+    monkeypatch.setattr(server, "build_gmail_service_for_user", lambda db, user, **kwargs: gmail)
     result = server.search_primary(db, users[0].id, gmail_search_query("received today"), 10)
     assert result["complete"]
     assert len(result["email_ids"]) == 2
@@ -74,7 +74,7 @@ def test_live_search_pages_and_never_crosses_accounts(mailbox, monkeypatch):
 
 def test_limit_is_reported_as_incomplete(mailbox, monkeypatch):
     db, users = mailbox
-    monkeypatch.setattr(server, "build_gmail_service_for_user", lambda db, user: Gmail())
+    monkeypatch.setattr(server, "build_gmail_service_for_user", lambda db, user, **kwargs: Gmail())
     result = server.search_primary(db, users[0].id, "category:primary", 1)
     assert not result["complete"]
     assert len(result["email_ids"]) == 1
@@ -89,16 +89,16 @@ def test_server_rechecks_labels_even_if_query_is_broad(mailbox, monkeypatch):
         response["labelIds"] = ["INBOX", "CATEGORY_UPDATES"]
         return SimpleNamespace(execute=lambda: response)
     monkeypatch.setattr(gmail, "get", get)
-    monkeypatch.setattr(server, "build_gmail_service_for_user", lambda db, user: gmail)
+    monkeypatch.setattr(server, "build_gmail_service_for_user", lambda db, user, **kwargs: gmail)
     result = server.search_primary(db, users[0].id, "", 10)
     assert result["email_ids"] == []
 
 
-def test_query_keeps_primary_scope_and_has_epoch_boundaries():
+def test_query_keeps_safe_mailbox_scope_and_has_epoch_boundaries():
     query = gmail_search_query("Find all interview emails from last 3 months")
-    assert "-category:updates" in query
+    assert "-in:spam" in query and "-in:trash" in query and "-in:drafts" in query
     assert "after:" in query and "before:" in query
-    assert "{category:primary in:inbox}" in query
+    assert "category:primary" not in query
     assert "newer_than:1y" not in query
 
 
@@ -127,7 +127,7 @@ def test_later_page_failure_preserves_committed_results(mailbox, monkeypatch):
             raise TimeoutError()
         return original(**kwargs)
     gmail.list = failing_list
-    monkeypatch.setattr(server, 'build_gmail_service_for_user', lambda *a: gmail)
+    monkeypatch.setattr(server, 'build_gmail_service_for_user', lambda *a, **kwargs: gmail)
     result = server.search_primary(db, users[0].id, 'category:primary', 10)
     assert not result['complete']
     assert result['error_code'] == 'timeout'
@@ -144,7 +144,7 @@ def test_excluded_messages_still_count_towards_fetch_limit(mailbox, monkeypatch)
         message['labelIds'] = ['CATEGORY_UPDATES']
         return SimpleNamespace(execute=lambda: message)
     gmail.get = excluded
-    monkeypatch.setattr(server, 'build_gmail_service_for_user', lambda *a: gmail)
+    monkeypatch.setattr(server, 'build_gmail_service_for_user', lambda *a, **kwargs: gmail)
     result = server.search_primary(db, users[0].id, '', 1)
     assert not result['complete']
     assert result['email_ids'] == []
@@ -171,6 +171,7 @@ def test_stdio_mcp_server_exposes_only_read_only_search():
                 async with ClientSession(reader, writer) as session:
                     await session.initialize()
                     result = await session.list_tools()
-                    assert [tool.name for tool in result.tools] == ["search_primary_emails"]
-                    assert "user_id" not in result.tools[0].inputSchema.get("properties", {})
+                    assert {tool.name for tool in result.tools} == {"search_mailbox_emails", "search_primary_emails"}
+                    for tool in result.tools:
+                        assert "user_id" not in tool.inputSchema.get("properties", {})
     asyncio.run(check())

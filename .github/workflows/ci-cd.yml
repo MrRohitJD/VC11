@@ -2,8 +2,9 @@ name: VC11 CI/CD
 
 on:
   pull_request:
+    branches: [heroku_deploy_dev_lg]
   push:
-    branches: [devLG, heroku_deploy_dev_lg]
+    branches: [heroku_deploy_dev_lg]
   workflow_dispatch:
 
 permissions:
@@ -22,6 +23,8 @@ jobs:
     env:
       ENVIRONMENT: test
       DATABASE_URL: "sqlite:///:memory:"
+      SESSION_SECRET: "ci-only-session-secret-never-use-in-production-2026"
+      DEVELOPER_SETTINGS_ENCRYPTION_KEY: "ci-only-encryption-key-never-use-in-production-2026"
       LANGSMITH_TRACING: "false"
       LANGCHAIN_TRACING_V2: "false"
     steps:

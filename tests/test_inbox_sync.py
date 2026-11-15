@@ -155,6 +155,8 @@ def test_first_100_inbox_messages_then_every_remaining_page(monkeypatch):
 
 def test_sync_reservation_blocks_overlap_and_recovers_stale_worker(monkeypatch):
     from app.api.routes import gmail as gmail_routes
+    from fastapi import Request
+    request = Request({"type": "http", "headers": [], "client": ("203.0.113.1", 1234)})
 
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
@@ -177,13 +179,13 @@ def test_sync_reservation_blocks_overlap_and_recovers_stale_worker(monkeypatch):
             db.add_all([user, account])
             db.commit()
 
-            first = gmail_routes.start_sync(user=user, db=db)
+            first = gmail_routes.start_sync(request=request, user=user, db=db)
             assert first["message"] == "Sync started"
             assert len(started) == 1
 
             # Simulate another web process with no local in-memory state.
             gmail_routes._sync_state.clear()
-            second = gmail_routes.start_sync(user=user, db=db)
+            second = gmail_routes.start_sync(request=request, user=user, db=db)
             assert second["message"] == "Sync already in progress"
             assert len(started) == 1
 
@@ -192,7 +194,7 @@ def test_sync_reservation_blocks_overlap_and_recovers_stale_worker(monkeypatch):
             db.commit()
             assert gmail_routes._get_sync_state(str(user.id), db)["status"] == "idle"
 
-            resumed = gmail_routes.start_sync(user=user, db=db)
+            resumed = gmail_routes.start_sync(request=request, user=user, db=db)
             assert resumed["message"] == "Sync started"
             assert len(started) == 2
     finally:

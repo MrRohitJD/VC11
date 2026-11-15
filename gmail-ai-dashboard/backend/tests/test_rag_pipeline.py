@@ -247,11 +247,20 @@ class TestRAGApiEndpoints(unittest.TestCase):
         from fastapi.testclient import TestClient
         from app.api.app import app
         from app.api.routes.rag import get_user_for_rag
-        from app.database.connection import engine
+        from app.database.connection import get_db
+        from sqlalchemy.pool import StaticPool
         from app.models.email import Base
         from app.models.rag import Base as RagBase
-        Base.metadata.create_all(bind=engine)
-        RagBase.metadata.create_all(bind=engine)
+        self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        Base.metadata.create_all(bind=self.engine)
+        RagBase.metadata.create_all(bind=self.engine)
+        self.db = sessionmaker(bind=self.engine)()
+        self.vector_sessions = patch("app.rag.pgvector_store.SessionLocal", sessionmaker(bind=self.engine))
+        self.vector_sessions.start()
+        self.addCleanup(self.vector_sessions.stop)
+        def override_db():
+            yield self.db
+        app.dependency_overrides[get_db] = override_db
         self.mock_user = User(id=uuid4(), google_id="mock_g", email="mock@example.com", name="Mock User", is_demo=False)
         app.dependency_overrides[get_user_for_rag] = lambda: self.mock_user
         self.client = TestClient(app)
@@ -259,7 +268,12 @@ class TestRAGApiEndpoints(unittest.TestCase):
     def tearDown(self):
         from app.api.app import app
         from app.api.routes.rag import get_user_for_rag
+        from app.database.connection import get_db
         app.dependency_overrides.pop(get_user_for_rag, None)
+        app.dependency_overrides.pop(get_db, None)
+        self.client.close()
+        self.db.close()
+        self.engine.dispose()
 
     def test_rag_status_endpoint(self):
         res = self.client.get("/api/rag/status")

@@ -41,7 +41,7 @@ def db_session():
 
 @pytest.fixture()
 def mock_embedder():
-    return EmbeddingProvider(mock_mode=True)
+    return EmbeddingProvider(mock_mode=True, dimensions=OPENAI_LARGE_DIMENSIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +62,9 @@ def test_openai_embedding_dimensions_3072(mock_embedder):
     assert len(doc_vectors[1]) == 3072
 
 
-def test_postgres_migration_is_resumable_and_preserves_metadata(db_session, mock_embedder):
+def test_postgres_migration_is_resumable_and_preserves_metadata(db_session, mock_embedder, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "embedding_dimensions", OPENAI_LARGE_DIMENSIONS)
     user = User(google_id="pg-migration", email="migration@example.com")
     db_session.add(user)
     db_session.flush()
@@ -78,7 +80,7 @@ def test_postgres_migration_is_resumable_and_preserves_metadata(db_session, mock
                        chunk_text=email.body, content_hash="migration-content")
     db_session.add(chunk)
     db_session.commit()
-    service = RAGMigrationService(embedding_provider=mock_embedder)
+    service = RAGMigrationService(embedding_provider=mock_embedder, target_collection_name="postgres_halfvec_3072")
     progress = []
     first = service.migrate_all_chunks(db_session, batch_size=1, progress_callback=progress.append)
     assert first.migrated == 1 and first.failed == 0

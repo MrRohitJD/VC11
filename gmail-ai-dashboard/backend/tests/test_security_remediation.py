@@ -227,8 +227,9 @@ def test_legacy_ciphertext_backward_compatibility(monkeypatch):
     assert decrypted == original_text
 
 
-def test_corrupted_ciphertext_graceful_handling():
+def test_corrupted_ciphertext_graceful_handling(monkeypatch):
     """Corrupted ciphertext raises ValueError rather than crashing."""
+    monkeypatch.setattr(dev.settings, "developer_settings_encryption_key", "unit-test-encryption-key-for-corrupt-ciphertext-only")
     with pytest.raises(ValueError, match="Developer credential cannot be decrypted"):
         dev.decrypt("v2.not-a-valid-fernet-token")
     with pytest.raises(ValueError, match="Developer credential cannot be decrypted"):

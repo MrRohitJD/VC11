@@ -2,8 +2,13 @@
 
 The workflow at `.github/workflows/ci-cd.yml` runs backend tests from all three
 test directories, frontend tests and the Vite build, then builds the root Dockerfile.
-Pull requests and pushes to `devLG` and `heroku_deploy_dev_lg` run these checks.
+Only pull requests targeting `heroku_deploy_dev_lg` and pushes to that branch run
+these checks automatically. `devLG` does not trigger this workflow.
 Manual runs perform checks only.
+
+Backend tests use an in-memory SQLite database and public, CI-only dummy session
+and encryption keys. No production application credentials are supplied to tests.
+The full test suite remains required; failures are not ignored or skipped.
 
 ## One-time setup
 

@@ -56,6 +56,7 @@ def azure_mock_embedder():
         api_key="test-azure-key",
         api_version="2024-02-01",
         deployment_name="text-embedding-3-large",
+        dimensions=AZURE_OPENAI_LARGE_DIMENSIONS,
         mock_mode=True,
     )
 

@@ -1,16 +1,18 @@
-"""Regression coverage for Primary-only assistant answers and tool access."""
+"""Regression coverage for mailbox-wide answers, explicit Primary filters, and account isolation."""
 
 import json
 from datetime import datetime, timezone
 from uuid import uuid4
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.documents import Document
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 import app.models.llm  # Register all related ORM models.
 from app.models.email import Base, Email, EmailLabel, GmailAccount, Label, User
@@ -18,13 +20,13 @@ from app.models.rag import Attachment
 from app.rag.agent import GmailAIAssistant
 from app.rag.chains import GroundedRAGChain
 from app.rag.embeddings import DeterministicOfflineEmbeddings
-from app.rag.mailbox_scope import NON_PRIMARY_LABELS, primary_email_ids
+from app.rag.mailbox_scope import NON_PRIMARY_LABELS, primary_email_ids, mailbox_email_ids
 from app.rag.retrieval import PostgresSemanticRetriever, GmailCustomHybridRetriever
 from app.rag.tools import create_gmail_tools
 from app.rag.pgvector_store import PostgresVectorStoreManager
 
 
-def test_all_date_summary_uses_every_primary_record_without_embedding_or_relevance(mailbox, monkeypatch):
+def test_all_date_summary_uses_every_safe_mailbox_record_without_embedding_or_relevance(mailbox, monkeypatch):
     from app.core.config import settings
     import app.rag.chains as chains
     from app.rag.query_constraints import mailbox_time_context
@@ -35,8 +37,8 @@ def test_all_date_summary_uses_every_primary_record_without_embedding_or_relevan
     chain = GroundedRAGChain(model=FakeListChatModel(responses=["Summary."]))
     with mailbox_time_context("Asia/Kolkata"):
         result = chain.answer_query(db, "Summarize all incoming emails this month", user_id, top_k=1)
-    assert result["context_count"] == 2
-    assert result["retrieval_strategy"] == "exhaustive_primary"
+    assert result["context_count"] == len(mailbox_email_ids(db, user_id))
+    assert result["retrieval_strategy"] == "exhaustive_mailbox"
 
 
 def planning_model():
@@ -58,7 +60,9 @@ def planning_model():
 
 @pytest.fixture
 def mailbox(tmp_path, monkeypatch):
-    engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr("app.rag.query_constraints.mailbox_now", lambda: datetime(2026, 10, 19, tzinfo=timezone.utc))
+    monkeypatch.setattr("app.core.config.settings.gmail_mcp_enabled", False)
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(engine)
     db = Session(engine)
     users = [User(google_id=f"g{i}", email=f"user{i}@example.com") for i in range(2)]
@@ -131,18 +135,20 @@ def test_vector_search_filters_before_ranking_and_honors_relabeling(mailbox, sea
     )
     docs = retriever.invoke("Planning details for CATEGORY_PROMOTIONS.")
     assert len(docs) == 1
-    assert docs[0].metadata["email_id"] in primary_email_ids(db, user_id)
+    assert docs[0].metadata["email_id"] in mailbox_email_ids(db, user_id)
 
     # Changing synced labels must take effect without regenerating embeddings.
-    for name in ("personal", "inbox"):
-        for link in list(emails[name].labels):
-            db.delete(link)
+    selected = next(email for email in emails.values() if str(email.id) == docs[0].metadata["email_id"])
+    for link in list(selected.labels):
+        db.delete(link)
+    junk = db.scalar(select(Label).where(Label.gmail_account_id == selected.gmail_account_id, Label.label_id == "SPAM"))
+    db.add(EmailLabel(email_id=selected.id, label_id=junk.id, gmail_account_id=selected.gmail_account_id))
     db.commit()
-    assert retriever.invoke("Planning") == []
+    assert str(selected.id) not in {d.metadata["email_id"] for d in retriever.invoke("Planning details for CATEGORY_PROMOTIONS.")}
 
 
 @pytest.mark.parametrize("vector_available", [True, False])
-def test_hybrid_and_sql_fallback_remain_primary_only(mailbox, monkeypatch, vector_available):
+def test_hybrid_and_sql_fallback_remain_in_safe_mailbox(mailbox, monkeypatch, vector_available):
     db, user_id, emails, vstore = mailbox
     if not vector_available:
         def unavailable(**kwargs):
@@ -152,11 +158,11 @@ def test_hybrid_and_sql_fallback_remain_primary_only(mailbox, monkeypatch, vecto
         user_id=str(user_id), db_session=db, primary_only=True, vector_manager=vstore, top_k=20,
     )
     docs = retriever.invoke("Planning")
-    assert {d.metadata["email_id"] for d in docs} == {str(emails[n].id) for n in ("personal", "inbox")}
+    assert {d.metadata["email_id"] for d in docs} == set(mailbox_email_ids(db, user_id))
 
 
 @pytest.mark.parametrize("multi_query", [False, True])
-def test_answer_chain_only_cites_primary_even_with_override_attempt(mailbox, multi_query):
+def test_answer_chain_only_cites_authorized_mailbox_even_with_override_attempt(mailbox, multi_query):
     db, user_id, emails, _ = mailbox
     chain = GroundedRAGChain(model=planning_model())
     result = chain.answer_query(
@@ -164,7 +170,7 @@ def test_answer_chain_only_cites_primary_even_with_override_attempt(mailbox, mul
         filter_dict={"primary_only": False},
     )
     assert result["citations"]
-    assert {c.email_id for c in result["citations"]} <= {str(emails[n].id) for n in ("personal", "inbox")}
+    assert {c.email_id for c in result["citations"]} <= set(mailbox_email_ids(db, user_id))
 
 
 def test_no_match_does_not_broaden_search(mailbox):
@@ -176,21 +182,23 @@ def test_no_match_does_not_broaden_search(mailbox):
         filter_dict={"gmail_message_id": emails["CATEGORY_PROMOTIONS"].gmail_message_id},
     )
     assert result["citations"] == []
-    assert "Primary" in result["answer"]
+    assert "could not validate" in result["answer"]
 
 
-def test_agent_sql_fallback_remains_primary_only(mailbox, monkeypatch):
+def test_agent_sql_fallback_remains_in_safe_mailbox(mailbox, monkeypatch):
     db, user_id, emails, _ = mailbox
     agent = GmailAIAssistant(model=FakeListChatModel(responses=["Planning details."]))
     monkeypatch.setattr(agent, "execute_react_agent", lambda *args: ("", [], []))
-    _, citations, _ = agent.execute_with_fallback("Planning", db, user_id, [])
-    assert {c.email_id for c in citations} == {str(emails[n].id) for n in ("personal", "inbox")}
+    _, citations, steps = agent.execute_with_fallback("Planning", db, user_id, [])
+    assert len(citations) == 5
+    assert {c.email_id for c in citations} <= set(mailbox_email_ids(db, user_id))
+    assert steps[0]["action"] == "sql_search"
 
 
-def test_tools_cannot_read_non_primary_content(mailbox):
+def test_tools_cannot_read_junk_or_other_user_content(mailbox):
     db, user_id, emails, _ = mailbox
     tool_map = {t.name: t for t in create_gmail_tools(db, user_id)}
-    for name in ("CATEGORY_PROMOTIONS", "other-user"):
+    for name in ("SPAM", "TRASH", "DRAFT", "other-user"):
         eid = str(emails[name].id)
         assert "not found" in tool_map["get_email_by_id"].invoke({"email_id": eid})
         assert "not found" in tool_map["get_email_summary"].invoke({"email_id": eid})
@@ -209,15 +217,18 @@ def test_tools_cannot_read_non_primary_content(mailbox):
         ("retrieve_email_context", {"query": "Planning"}),
         ("search_emails_multi_query", {"query": "Planning"}),
     ]:
-        rows = json.loads(tool_map[tool_name].invoke(args))
+        response = tool_map[tool_name].invoke(args)
+        assert response.startswith("["), (tool_name, response)
+        rows = json.loads(response)
         assert rows
-        assert {r["email_id"] for r in rows} <= {str(emails[n].id) for n in ("personal", "inbox")}
-    assert json.loads(tool_map["filter_emails_by_label"].invoke({"label": "CATEGORY_PROMOTIONS"})) == []
+        assert {r["email_id"] for r in rows} <= set(mailbox_email_ids(db, user_id))
+    assert json.loads(tool_map["filter_emails_by_label"].invoke({"label": "CATEGORY_PROMOTIONS"}))
+    assert json.loads(tool_map["filter_emails_by_label"].invoke({"label": "SPAM"})) == []
 
 
-def test_primary_scope_requires_authoritative_labels():
-    retriever = PostgresSemanticRetriever(user_id=str(uuid4()), primary_only=True)
-    with pytest.raises(ValueError, match="database session"):
+def test_vector_scope_requires_user_identity():
+    retriever = PostgresSemanticRetriever(user_id="", primary_only=True)
+    with pytest.raises(ValueError, match="user_id is mandatory"):
         retriever.invoke("Planning")
 
 
@@ -231,17 +242,16 @@ def test_billing_question_cannot_retrieve_pending_interview_documents(mailbox):
     chain = GroundedRAGChain(model=FakeListChatModel(responses=["Unrelated response must not be generated."]))
     result = chain.answer_query(db=db, query=query, user_id=user_id)
     assert result["citations"] == []
-    assert "could not verify" in result["answer"]
+    assert "could not validate" in result["answer"]
     assert "interview" not in result["answer"]
     assert result["rewritten_query"] == query
 
 
 @pytest.mark.parametrize("vector_available", [True, False])
 def test_bills_use_due_month_not_received_month(mailbox, monkeypatch, vector_available):
-    from app.rag.query_constraints import MAILBOX_TIMEZONE
-    from app.rag.retrieval import default_retriever
+    from app.rag.query_constraints import mailbox_now
     db, user_id, emails, vstore = mailbox
-    now = datetime.now(MAILBOX_TIMEZONE)
+    now = mailbox_now()
     due_date = f"{now.year}-{now.month:02d}-25"
     bill = emails["personal"]
     bill.subject = "Electricity invoice"
@@ -258,15 +268,23 @@ def test_bills_use_due_month_not_received_month(mailbox, monkeypatch, vector_ava
             raise RuntimeError("Vector service unavailable")
         monkeypatch.setattr(vstore, "search_with_scores", unavailable)
     query = "What are my pending bills and invoices due this month?"
-    retriever = GmailCustomHybridRetriever(
-        user_id=str(user_id), db_session=db, primary_only=True, vector_manager=vstore,
-    )
-    docs = retriever.invoke(query)
-    assert {doc.metadata["email_id"] for doc in docs} == {str(bill.id)}
-    assert docs[0].metadata["sender"] == bill.from_email
-    assert docs[0].metadata["received_at"].startswith(str(now.year - 1))
-    citations = default_retriever.retrieve_structured_sql(db, user_id, keyword=query, primary_only=True)
-    assert [c.email_id for c in citations] == [str(bill.id)]
+    observed = []
+    def validate_due_date(value):
+        messages = value.to_messages() if hasattr(value, "to_messages") else value
+        try:
+            payload = json.loads(messages[-1].content)
+        except ValueError:
+            return AIMessage(content="The current electricity bill is due this month.")
+        observed.extend(payload.get("candidates", []))
+        return AIMessage(content=json.dumps({"decisions": [{
+            "email_id": c["email_id"], "relevant": due_date in c["body"],
+            "reason": "Due date checked against the requested month.",
+            "key_points": [f"Payment due on {due_date}."] if due_date in c["body"] else [],
+        } for c in payload.get("candidates", [])]}))
+    result = GroundedRAGChain(model=RunnableLambda(validate_due_date)).answer_query(db, query, user_id)
+    assert [c.email_id for c in result["citations"]] == [str(bill.id)]
+    candidate = next(c for c in observed if c["email_id"] == str(bill.id))
+    assert candidate["received_at"].startswith(str(now.year - 1))
 
 
 def test_source_endpoint_returns_full_envelope_and_html(mailbox):
@@ -304,7 +322,7 @@ def test_html_only_source_has_readable_text_fallback(mailbox):
     assert "HTML-only message body." in result["body"]
 
 
-def test_agent_new_bills_question_ignores_prior_interview_session(mailbox):
+def test_agent_new_bills_question_ignores_prior_interview_session(mailbox, monkeypatch):
     from app.rag.memory import get_or_create_chat_session
     from app.models.rag import ChatMessage
     db, user_id, _, _ = mailbox
@@ -313,6 +331,7 @@ def test_agent_new_bills_question_ignores_prior_interview_session(mailbox):
     db.commit()
     query = "What are my pending bills and invoices due this month?"
     agent = GmailAIAssistant(model=FakeListChatModel(responses=["RAG_QUERY"]))
+    monkeypatch.setattr(agent, "interpret_request", lambda query, history: SimpleNamespace(intent="RAG_QUERY", effective_query=query, draft=None, clarification_question=None))
     result = agent.run(query, db, user_id, session_id=session.id)
     assert result.citations == []
     assert "interview" not in result.answer.lower()
@@ -359,9 +378,8 @@ def test_interview_month_scope_and_llm_selection_reject_old_and_generic_mail(mai
     db.add(EmailLabel(email_id=old.id, label_id=invitation.labels[0].label_id,
                       gmail_account_id=old.gmail_account_id))
     db.commit()
-    vstore.add_documents([Document(page_content=old.body, metadata={
-        "user_id": str(user_id), "email_id": str(old.id), "subject": old.subject,
-    })])
+    from app.rag.indexing import RAGIndexingPipeline
+    RAGIndexingPipeline(vector_store_manager=vstore).index_email(db, old.id)
     observed = []
     chain = GroundedRAGChain(model=interview_model(observed))
     result = chain.answer_query(db, "Find all interview related emails of this month", user_id,
@@ -421,7 +439,7 @@ def test_partial_validation_returns_citations_with_incomplete_notice(mailbox, mo
     import app.rag.chains as chains
     from app.rag.relevance import RelevanceResult
     db, user_id, emails, _ = mailbox
-    def partial(docs, *args):
+    def partial(docs, *args, **kwargs):
         doc = docs[0]
         doc.metadata['key_points'] = ['Verified planning details.']
         return RelevanceResult(documents=[doc], evaluated=1, failed=True, error_type='timeout')

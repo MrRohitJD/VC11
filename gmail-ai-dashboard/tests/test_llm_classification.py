@@ -349,7 +349,7 @@ def test_two_workers_same_batch(db):
 # ---------------------------------------------------------------------------
 
 def test_provider_fallback_order():
-    """NVIDIA fails → Azure → ExperientialLabs succeeds. Correct model name recorded."""
+    """Azure decision, NVIDIA and Azure fail; ExperientialLabs succeeds."""
     emails = [{"email_id": "abc-123", "subject": "Test subject"}]
 
     mock_result = MagicMock()
@@ -358,6 +358,7 @@ def test_provider_fallback_order():
     ]
 
     with patch("app.services.llm_provider.settings") as mock_settings, \
+         patch("app.services.llm_provider._try_azure_decision", return_value=None) as mock_decision, \
          patch("app.services.llm_provider._try_nvidia", return_value=None) as mock_nv, \
          patch("app.services.llm_provider._try_azure", return_value=None) as mock_az, \
          patch("app.services.llm_provider._try_explabs") as mock_el:
@@ -373,6 +374,7 @@ def test_provider_fallback_order():
     assert model_name == "explabs/deepseek-v4-flash"
     assert len(results) == 1
     assert results[0].label == "TRAVEL"
+    mock_decision.assert_called_once()
     mock_nv.assert_called_once()
     mock_az.assert_called_once()
     mock_el.assert_called_once()
