@@ -633,6 +633,7 @@ def get_session_details(
             "id": str(msg.id),
             "role": msg.role,
             "content": msg.content,
+            "presentation": msg.presentation,
             "created_at": msg.created_at.isoformat() if msg.created_at else "",
             "citations": cits,
         })

@@ -1358,6 +1358,7 @@ class GmailAIAssistant:
             chat_session_id=session.id,
             role="assistant",
             content=answer,
+            presentation=presentation,
         )
         db.add(asst_msg)
         db.commit()

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import DOMPurify from 'dompurify';
 import {
 	AlertCircle, ArrowDown, Bot, CalendarDays, Check, CircleDot, Cpu, Database, ExternalLink,
 	FileText, History, Inbox, LayoutDashboard, ListChecks, Mail, Maximize2, Menu, Minimize2, MoreHorizontal, PanelLeftClose,
@@ -129,39 +130,45 @@ const renderAnswerPresentation = (presentation, onCitation) => {
 	);
 };
 
-function AnswerWithSources({ text, emails, onCitation }) {
-	const [showAll, setShowAll] = useState(false);
-	const visibleEmails = showAll ? emails : emails.slice(0, 3);
+const escapeEmbeddedCode = (code, tag) => code.replace(new RegExp(`</${tag}`, 'gi'), `<\\/${tag}`);
 
-	return (
-		<section className="answer-with-sources" aria-label="Assistant answer">
-			<div className="answer-with-sources-copy">
-				<div className="answer-with-sources-heading">
-					<span className="answer-with-sources-icon"><Sparkles size={16} /></span>
-					<span>Answer</span>
-					<span className="answer-with-sources-count">{emails.length} {emails.length === 1 ? 'source' : 'sources'}</span>
-				</div>
-				<div className="assistant-lead-text">{renderAnswer(text, onCitation)}</div>
-			</div>
-			<div className="answer-source-preview">
-				<h4>Emails behind this answer</h4>
-				<div className="answer-source-grid">
-					{visibleEmails.map((email, index) => (
-						<button className="answer-source-card" type="button" key={`${email.id}-${index}`} onClick={() => onCitation(index)} aria-label={`Open email: ${email.subject}`}>
-							<span className="answer-source-card-top"><span className="answer-source-number">{String(index + 1).padStart(2, '0')}</span><ExternalLink size={15} /></span>
-							<strong>{email.subject}</strong>
-							<span className="answer-source-meta">{email.sender}{email.date && <> · {email.date}</>}</span>
-							{(email.key_points?.[0] || email.snippet) && <span className="answer-source-excerpt">{email.key_points?.[0] || email.snippet}</span>}
-						</button>
-					))}
-				</div>
-				{emails.length > 3 && <button className="answer-source-show-all" type="button" onClick={() => setShowAll((value) => !value)} aria-expanded={showAll}>
-					{showAll ? 'Show fewer emails' : `Show all ${emails.length} emails`}
-					<ArrowDown size={14} aria-hidden="true" />
-				</button>}
-			</div>
-		</section>
-	);
+function GeneratedAnswer({ presentation, sourceCount, onCitation }) {
+	const messageToken = useMemo(() => Array.from(window.crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join(''), []);
+	const [height, setHeight] = useState(260);
+	const srcDoc = useMemo(() => {
+		const html = DOMPurify.sanitize(presentation.html, {
+			FORBID_TAGS: ['script', 'style', 'iframe', 'form', 'object', 'embed', 'link', 'meta', 'base'],
+			FORBID_ATTR: ['srcdoc'],
+		});
+		const css = escapeEmbeddedCode(presentation.css || '', 'style');
+		const javascript = escapeEmbeddedCode(presentation.javascript || '', 'script');
+		const bridge = `(() => { const token = '${messageToken}';
+			const report = () => parent.postMessage({ type: 'answer-ui-height', token, height: document.documentElement.scrollHeight }, '*');
+			if ('ResizeObserver' in window) new ResizeObserver(report).observe(document.body);
+			document.addEventListener('click', event => { const source = event.target.closest('[data-source]'); if (source) {
+				const index = Number(source.getAttribute('data-source')); if (Number.isInteger(index)) parent.postMessage({ type: 'answer-ui-source', token, index }, '*');
+			} }); report(); })();`;
+		return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+			<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'; frame-src 'none'; navigate-to 'none'">
+			<style>html{overflow-x:hidden}body{margin:0;font:14px/1.5 system-ui,sans-serif;color:#1e293b}*{box-sizing:border-box}</style>
+			<style>${css}</style></head><body>${html}<script>${bridge}</script><script>${javascript}</script></body></html>`;
+	}, [presentation, messageToken]);
+
+	useLayoutEffect(() => {
+		const receiveMessage = (event) => {
+			if (event.data?.token !== messageToken) return;
+			if (event.data?.type === 'answer-ui-height' && Number.isFinite(event.data.height)) {
+				setHeight(Math.min(1200, Math.max(160, Math.ceil(event.data.height))));
+			} else if (event.data?.type === 'answer-ui-source') {
+				const index = event.data.index;
+				if (Number.isInteger(index) && index >= 1 && index <= sourceCount) onCitation(index - 1);
+			}
+		};
+		window.addEventListener('message', receiveMessage);
+		return () => window.removeEventListener('message', receiveMessage);
+	}, [onCitation, sourceCount, messageToken]);
+
+	return <iframe className="generated-answer-frame" title="LLM designed answer" sandbox="allow-scripts" srcDoc={srcDoc} style={{ height }} />;
 }
 
 const PALETTE = [
@@ -293,7 +300,8 @@ export default function AiAssistant({ user: propUser }) {
 					if (message.role === 'user') return { id: message.id, role: 'user', text: message.content, time };
 					const emails = mapCitations(message.citations);
 					return { id: message.id, role: 'assistant', time, response: {
-						type: 'summary', text: message.content, emails, source_count: emails.length, steps: [], entities: [],
+						type: 'summary', text: message.content, presentation: message.presentation,
+						emails, source_count: emails.length, steps: [], entities: [],
 					} };
 				});
 			setSessionId(chatId);
@@ -827,7 +835,17 @@ export default function AiAssistant({ user: propUser }) {
 											/>
 										</div>
 									)}
-											{message.response.presentation ? (
+											{message.response.presentation?.html ? (
+												<>
+													<GeneratedAnswer presentation={message.response.presentation} sourceCount={message.response.emails?.length || 0} onCitation={(index) => {
+														const source = message.response.emails?.[index];
+														if (source) handleOpenEmailModal(source);
+													}} />
+													<details className="answer-text-version"><summary>Full answer as text</summary>
+														<div className="assistant-lead-text">{renderAnswer(message.response.text)}</div>
+													</details>
+												</>
+											) : message.response.presentation ? (
 												<>
 													{renderAnswerPresentation(message.response.presentation, (index) => {
 														const source = message.response.emails?.[index];
@@ -843,13 +861,11 @@ export default function AiAssistant({ user: propUser }) {
 														</div>
 													</details>
 												</>
-											) : message.response.emails?.length ? (
-												<AnswerWithSources text={message.response.text} emails={message.response.emails} onCitation={(index) => {
-													const source = message.response.emails[index];
-													if (source) handleOpenEmailModal(source);
-												}} />
 											) : (
-												<div className="assistant-lead-text">{renderAnswer(message.response.text)}</div>
+												<div className="assistant-lead-text">{renderAnswer(message.response.text, (index) => {
+													const source = message.response.emails?.[index];
+													if (source) handleOpenEmailModal(source);
+												})}</div>
 											)}
 
 													{/* Key Interviews Found List */}

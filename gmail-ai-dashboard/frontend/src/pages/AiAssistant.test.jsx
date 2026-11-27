@@ -68,12 +68,17 @@ it('opens the complete message when View email is clicked on a citation', async 
     }), expect.any(Function));
 });
 
-it('shows an interactive email layout when an answer has sources but no presentation', async () => {
+it('renders the LLM-designed answer in an isolated frame and opens cited email', async () => {
     Element.prototype.scrollIntoView = vi.fn();
     getRagStatus.mockResolvedValue({ data: {} });
     sendRagChat.mockResolvedValue({ data: {
         answer: 'Here are the billing emails.\n\nThe due date is in the first message.',
         session_id: 'billing-session',
+        presentation: {
+            html: '<section><h2>Billing overview</h2><button data-source="4">Open bill four</button><script>window.evil = true</script></section>',
+            css: 'section { background: lavender; }',
+            javascript: 'document.querySelector("h2").textContent += "!";',
+        },
         citations: Array.from({ length: 4 }, (_, index) => ({
             email_id: `bill-${index + 1}`, subject: `Billing email ${index + 1}`,
             sender: `sender${index + 1}@example.com`, date: '2026-11-21T09:00:00+00:00',
@@ -88,15 +93,21 @@ it('shows an interactive email layout when an answer has sources but no presenta
     fireEvent.change(screen.getByPlaceholderText(/Ask about all your emails/), { target: { value: 'Search emails regarding billing' } });
     fireEvent.click(screen.getByRole('button', { name: /^Send$/ }));
 
-    const answer = await screen.findByRole('region', { name: 'Assistant answer' });
-    expect(within(answer).getByText('The due date is in the first message.')).toBeInTheDocument();
-    expect(within(answer).getByText('4 sources')).toBeInTheDocument();
-    expect(within(answer).getAllByRole('button', { name: /Open email: Billing email/ })).toHaveLength(3);
+    const frame = await screen.findByTitle('LLM designed answer');
+    expect(frame).toHaveAttribute('sandbox', 'allow-scripts');
+    expect(frame.srcdoc).toContain('<h2>Billing overview</h2>');
+    expect(frame.srcdoc).toContain('background: lavender');
+    expect(frame.srcdoc).toContain('textContent +=');
+    expect(frame.srcdoc).toContain("connect-src 'none'");
+    expect(frame.srcdoc).not.toContain('window.evil');
+    expect(screen.getByText('Full answer as text')).toBeInTheDocument();
 
-    fireEvent.click(within(answer).getByRole('button', { name: 'Show all 4 emails' }));
-    expect(within(answer).getAllByRole('button', { name: /Open email: Billing email/ })).toHaveLength(4);
-    fireEvent.click(within(answer).getByRole('button', { name: 'Open email: Billing email 4' }));
-    expect(await within(screen.getByRole('dialog')).findByText('Full fourth email')).toBeInTheDocument();
+    const token = frame.srcdoc.match(/const token = '([a-f0-9]+)'/)[1];
+    fireEvent(window, new MessageEvent('message', { data: { type: 'answer-ui-source', token: 'wrong-frame', index: 4 } }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    fireEvent(window, new MessageEvent('message', { data: { type: 'answer-ui-source', token, index: 4 } }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('Full fourth email')).toBeInTheDocument();
     expect(getRagSourceEmail).toHaveBeenCalledWith('bill-4');
 });
 
@@ -238,6 +249,7 @@ it('lists saved chats in the planner and reopens a conversation with its citatio
     getRagSession.mockResolvedValue({ data: { id: 'recent-one', messages: [
         { id: 'user-old', role: 'user', content: 'What is due?', created_at: '2026-10-28T08:59:00' },
         { id: 'assistant-old', role: 'assistant', content: 'The invoice is due soon.', created_at: '2026-10-28T09:00:00',
+            presentation: { html: '<section><h2>Saved invoice answer</h2></section>', css: 'section { padding: 1rem; }', javascript: '' },
             citations: [{ email_id: 'invoice-old', subject: 'Invoice', sender: 'billing@example.com', date: '2026-10-27T09:00:00', snippet: 'Amount due' }] },
     ] } });
     sendRagChat.mockResolvedValue({ data: { answer: 'Follow-up answer', session_id: 'recent-one', citations: [] } });
@@ -247,6 +259,7 @@ it('lists saved chats in the planner and reopens a conversation with its citatio
     expect(await screen.findByRole('heading', { name: 'Recent chats' })).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: /Invoice follow-up/ }));
     expect(await screen.findByText('The invoice is due soon.')).toBeInTheDocument();
+    expect(screen.getByTitle('LLM designed answer').srcdoc).toContain('Saved invoice answer');
     expect(screen.getByText('What is due?')).toBeInTheDocument();
     expect(screen.getByText('Related emails (1)')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Invoice follow-up/ })).toHaveAttribute('aria-current', 'true');
