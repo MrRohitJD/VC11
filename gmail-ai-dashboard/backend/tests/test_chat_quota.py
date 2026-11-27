@@ -60,13 +60,16 @@ def test_signed_in_limit_is_50_per_account_and_survives_session_changes(db, monk
     _reserve_and_release(db, _request(), other_user)
 
 
-def test_demo_limit_enforces_both_cookie_and_ip(db):
+def test_demo_limit_enforces_both_cookie_and_ip(db, monkeypatch):
+    # Exercise the visitor quota independently of the configured network cap.
+    # In production the per-IP limit can be lower than the per-visitor limit.
+    monkeypatch.setattr("app.core.config.settings.demo_ip_daily_limit", DEMO_DAILY_LIMIT)
     user = SimpleNamespace(id=uuid4(), is_demo=True)
     original = _demo_cookie(_request())
     for _ in range(DEMO_DAILY_LIMIT):
         _reserve_and_release(db, _request(cookie=original), user)
 
-    # 11th request on the same cookie is rejected by daily limit
+    # The next request on the same cookie is rejected by its daily limit.
     with pytest.raises(HTTPException) as error:
         reserve_chat_request(db, _request(cookie=original), user)
     assert error.value.status_code == 429
@@ -89,6 +92,22 @@ def test_demo_limit_enforces_both_cookie_and_ip(db):
         reserve_chat_request(db, _request(ip="198.51.100.99", cookie=original), user)
     assert cookie_error.value.status_code == 429
     assert f"{DEMO_DAILY_LIMIT} requests" in cookie_error.value.detail
+
+
+def test_demo_ip_daily_limit_blocks_new_cookies(db, monkeypatch):
+    monkeypatch.setattr("app.services.chat_quota.DEMO_DAILY_LIMIT", 35)
+    monkeypatch.setattr("app.core.config.settings.demo_ip_daily_limit", 10)
+    user = SimpleNamespace(id=uuid4(), is_demo=True)
+    cookie = _demo_cookie(_request())
+    for _ in range(10):
+        _reserve_and_release(db, _request(cookie=cookie), user)
+
+    replacement = _demo_cookie(_request())
+    with pytest.raises(HTTPException) as error:
+        reserve_chat_request(db, _request(cookie=replacement), user)
+    assert error.value.status_code == 429
+    assert "10 requests per day" in error.value.detail
+    assert "IP network" in error.value.detail
 
 
 def test_demo_ip_concurrency_blocks_new_cookies_on_same_ip(db, monkeypatch):
@@ -169,4 +188,5 @@ def test_visitor_service_cookie_compatibility_with_chat_quota(db):
     lease = reserve_chat_request(db, req, user)
     assert lease is not None
     lease.release()
+
 
