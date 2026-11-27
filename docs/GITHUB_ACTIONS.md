@@ -52,10 +52,11 @@ Deployment uses a temporary Git authentication helper and never force-pushes Her
 - Failed tests or Docker builds: inspect the failed Actions step; no deployment
   occurs. Backend JUnit results are attached as an artifact when available.
 - Missing secret: set `HEROKU_API_KEY` in the environment or repository.
-- Heroku Git authentication failed: verify that the `production` environment
-  secret is a current API token from `heroku auth:token` for an account allowed
-  to deploy `ai-powered-gmail`. Heroku Git uses an empty username and the API
-  token as its password. After updating the secret, rerun the failed deploy job.
+- Heroku Git authentication failed: the workflow verifies the `production`
+  API token and access to `ai-powered-gmail` through Heroku's API, then uses the
+  account email and token for Git. If an API check fails, replace the secret
+  with a current `heroku auth:token` for an account allowed to deploy. If Git
+  fails after both API checks pass, inspect the Git credentials and deploy rights.
 - Git push rejected as non-fast-forward: reconcile the deployment branch with
   existing Heroku history. Do not add an automatic force push to the workflow.
 - Deployment or health failure: inspect `heroku logs --tail --app ai-powered-gmail`.
