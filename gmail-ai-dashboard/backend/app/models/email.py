@@ -33,6 +33,9 @@ JSONType = JSON().with_variant(JSONB, "postgresql")
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint("mail_sync_limit >= 1 AND mail_sync_limit <= 50000", name="ck_users_mail_sync_limit"),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     google_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
@@ -40,6 +43,7 @@ class User(Base):
     name: Mapped[str | None] = mapped_column(String(255))
     picture: Mapped[str | None] = mapped_column(String(500))
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    mail_sync_limit: Mapped[int] = mapped_column(Integer, default=5000, server_default="5000", nullable=False)
     developer_database_url: Mapped[str | None] = mapped_column(Text)
     developer_llm_provider: Mapped[str | None] = mapped_column(String(20))
     developer_llm_api_key: Mapped[str | None] = mapped_column(Text)

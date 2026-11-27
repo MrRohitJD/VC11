@@ -204,6 +204,7 @@ class AgentStep:
 class AgentResponse:
     answer: str
     intent: str
+    presentation: Optional[Dict[str, Any]] = None
     citations: List[RetrievedCitation] = field(default_factory=list)
     steps: List[Dict[str, Any]] = field(default_factory=list)
     plan: Optional[List[str]] = None
@@ -1244,6 +1245,7 @@ class GmailAIAssistant:
         steps: List[Dict[str, Any]] = []
         plan: Optional[List[str]] = None
         answer: str = ""
+        presentation: Optional[Dict[str, Any]] = None
         approval_required: bool = False
         approval_id: Optional[str] = None
         approval_preview: Optional[Dict[str, Any]] = None
@@ -1310,6 +1312,7 @@ class GmailAIAssistant:
                 use_gmail_mcp=use_gmail_mcp,
             )
             answer = rag_res["answer"]
+            presentation = rag_res.get("presentation")
             citations = rag_res["citations"]
             steps = [{
                 "step": 1,
@@ -1330,6 +1333,7 @@ class GmailAIAssistant:
                 use_gmail_mcp=use_gmail_mcp,
             )
             answer = rag_res["answer"]
+            presentation = rag_res.get("presentation")
             citations = rag_res["citations"]
             steps = [{
                 "step": 1,
@@ -1371,6 +1375,7 @@ class GmailAIAssistant:
         return AgentResponse(
             answer=answer,
             intent=intent,
+            presentation=presentation,
             citations=citations,
             steps=steps,
             plan=plan,

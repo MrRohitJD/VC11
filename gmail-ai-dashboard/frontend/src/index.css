@@ -207,6 +207,8 @@ button { border: 0; cursor: pointer; }
 .settings-section h2 { color: #30394f; font-size: 13px; margin: 0 0 8px; }
 .developer-settings label { color: #30394f; display: block; font-size: 12px; font-weight: 600; margin: 16px 0 6px; }
 .developer-settings input, .developer-settings select { background: var(--surface, #fff); border: 1px solid var(--line); border-radius: 7px; box-sizing: border-box; color: var(--text, #30394f); font: inherit; max-width: 100%; padding: 10px 12px; width: 100%; }
+.mail-limit-settings label { color: #30394f; display: block; font-size: 12px; font-weight: 600; margin: 16px 0 6px; }
+.mail-limit-settings input { background: var(--surface, #fff); border: 1px solid var(--line); border-radius: 7px; box-sizing: border-box; color: var(--text, #30394f); font: inherit; max-width: 100%; padding: 10px 12px; width: 100%; }
 .developer-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 20px; }
 .developer-settings .import-result-msg.success { color: #18794e; }
 .developer-settings .import-result-msg.error { color: #b42318; }

@@ -354,9 +354,15 @@ def ensure_personal_identity(central_user, url: str, *, refresh_authorization: b
                 if user is None:
                     user = User(id=central_user.id, google_id=central_user.google_id,
                                 email=central_user.email, name=central_user.name,
-                                picture=central_user.picture, is_demo=central_user.is_demo)
+                                picture=central_user.picture, is_demo=central_user.is_demo,
+                                mail_sync_limit=central_user.mail_sync_limit)
                     target.add(user)
                     target.flush()
+                else:
+                    # Mailbox preferences live in the central account record.
+                    # Keep a personal-database mirror current before requests
+                    # such as Gmail sync use the user's settings.
+                    user.mail_sync_limit = central_user.mail_sync_limit
                 for source_account in central_user.gmail_accounts:
                     account = target.get(GmailAccount, source_account.id)
                     if account is None:

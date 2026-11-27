@@ -16,7 +16,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from functools import lru_cache
 from time import perf_counter
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from langchain_core.language_models import BaseChatModel
@@ -145,6 +145,27 @@ For bills or invoices, distinguish unpaid balances from receipts and paid
 confirmations. A message received this month is not evidence that its payment
 is due this month. Use explicit payment due dates and preserve their year.
 If payment status or the due date is unclear, state the uncertainty.
+
+Return the final response as one valid JSON object, with no Markdown fences, using
+this shape:
+{{"answer":"the complete user-facing answer in Markdown",
+ "presentation":{{"layout":"summary|cards|list|timeline|table|plain",
+ "title":"short title or empty string","summary":"brief overview or empty string",
+ "metrics":[{{"label":"short label","value":"value copied from the answer"}}],
+ "sections":[{{"title":"section heading","type":"text|list|cards|timeline|table",
+ "items":[{{"label":"short label","value":"fact copied from the answer",
+ "detail":"optional supporting text copied from the answer",
+ "source":1}}]}}]}}}}
+The presentation is data for the application's own React components, not code.
+Do not put HTML, CSS, JavaScript, URLs, or executable instructions in it. Use
+only facts already present in the answer and the supplied mailbox evidence. Keep
+source as the one-based citation number from the evidence, or null when there is
+no matching citation. Make the presentation the complete visual form of the
+answer: include every substantive statement in its sections, preserving dates,
+amounts, uncertainty, and citations. The answer field is the complete text
+fallback. Use a plain layout with empty sections for short conversational replies.
+Keep the presentation concise: at most 4 metrics, 6 sections, and 8 items per
+section. Omit empty fields and sections.
 """ + USER_RESPONSE_STYLE
 
 RAG_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
@@ -334,6 +355,78 @@ from app.rag.retrieval import (
 def generate_grounded_answer(chain: Any, context_str: str, question: str) -> str:
     """Invoke the LangChain RAG runnable chain to synthesize a grounded answer."""
     return str(chain.invoke({"context": context_str, "question": question}))
+
+
+def parse_grounded_answer_output(raw_answer: str, citation_count: int) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Extract the answer and a bounded, non-executable UI presentation schema."""
+    raw = str(raw_answer or "").strip()
+    candidate = raw
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.IGNORECASE).strip()
+    try:
+        payload = json.loads(candidate)
+    except (TypeError, ValueError):
+        return raw, None
+    if not isinstance(payload, dict) or not isinstance(payload.get("answer"), str):
+        return raw, None
+
+    answer = payload["answer"].strip()
+    if not answer:
+        return raw, None
+    raw_view = payload.get("presentation")
+    if not isinstance(raw_view, dict):
+        return answer, None
+
+    layouts = {"summary", "cards", "list", "timeline", "table", "plain"}
+    section_types = {"text", "list", "cards", "timeline", "table"}
+    raw_layout = raw_view.get("layout")
+    layout = raw_layout if isinstance(raw_layout, str) and raw_layout in layouts else "plain"
+
+    def clean_text(value: Any, limit: int) -> str:
+        return value.strip()[:limit] if isinstance(value, str) else ""
+
+    metrics = []
+    for metric in raw_view.get("metrics", [])[:4] if isinstance(raw_view.get("metrics"), list) else []:
+        if not isinstance(metric, dict):
+            continue
+        label, value = clean_text(metric.get("label"), 80), clean_text(metric.get("value"), 160)
+        if label and value:
+            metrics.append({"label": label, "value": value})
+
+    sections = []
+    for section in raw_view.get("sections", [])[:6] if isinstance(raw_view.get("sections"), list) else []:
+        if not isinstance(section, dict):
+            continue
+        raw_section_type = section.get("type")
+        section_type = raw_section_type if isinstance(raw_section_type, str) and raw_section_type in section_types else "list"
+        items = []
+        raw_items = section.get("items")
+        for item in raw_items[:8] if isinstance(raw_items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            label = clean_text(item.get("label"), 120)
+            value = clean_text(item.get("value"), 500)
+            detail = clean_text(item.get("detail"), 300)
+            if not (label or value or detail):
+                continue
+            source = item.get("source")
+            if not isinstance(source, int) or isinstance(source, bool) or source < 1 or source > citation_count:
+                source = None
+            items.append({"label": label, "value": value, "detail": detail, "source": source})
+        title = clean_text(section.get("title"), 100)
+        if title or items:
+            sections.append({"title": title, "type": section_type, "items": items})
+
+    presentation = {
+        "layout": layout,
+        "title": clean_text(raw_view.get("title"), 120),
+        "summary": clean_text(raw_view.get("summary"), 400),
+        "metrics": metrics,
+        "sections": sections,
+    }
+    if not presentation["title"] and not presentation["summary"] and not metrics and not sections:
+        return answer, None
+    return answer, presentation
 
 
 def format_grounded_key_points_summary(citations: List[RetrievedCitation], query: str) -> str:
@@ -891,6 +984,7 @@ class GroundedRAGChain:
         )
 
         # 6. Step 5: Generate grounded answer through traced LangChain runnable
+        presentation = None
         if validation.failed:
             answer_text = (f"Search is incomplete: checked {validation.evaluated} of {candidate_count} candidate emails in the mailbox. "
                            + error_hint(validation.error_type))
@@ -906,9 +1000,11 @@ class GroundedRAGChain:
         else:
             emit_activity("compose_answer", "Writing an answer from the matching email evidence", status="running")
             try:
-                answer_text = generate_grounded_answer(self.chain, context_str, effective_query)
+                raw_answer = generate_grounded_answer(self.chain, context_str, effective_query)
+                answer_text, presentation = parse_grounded_answer_output(raw_answer, len(citations))
             except Exception as exc:
                 logger.warning("LLM invocation error: %s. Using verified source details.", error_code(exc))
+                presentation = None
                 if date_only:
                     previews = [f"- **{c.subject}** — {c.sender} ({c.date}): {c.snippet}" for c in citations]
                     answer_text = (f"I found {len(citations)} matching mailbox emails. The AI summary service is unavailable; "
@@ -933,6 +1029,7 @@ class GroundedRAGChain:
         emit_activity("answer_ready", f"Answer ready with {len(citations)} supporting emails", count=len(citations))
         return {
             "answer": answer_text,
+            "presentation": presentation if citations and not validation.failed else None,
             "citations": citations,
             "context_count": len(citations),
             "rewritten_query": effective_query,

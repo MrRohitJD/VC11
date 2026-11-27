@@ -34,6 +34,8 @@ def _get_sync_state(user_id: str, db: Session | None = None) -> dict:
 	if db is not None:
 		account = db.scalar(select(GmailAccount).where(GmailAccount.user_id == UUID(user_id)))
 		if account is not None:
+			user = db.get(User, UUID(user_id))
+			initial_limit = min(100, max(1, getattr(user, "mail_sync_limit", 5000) or 5000))
 			fresh = _sync_lease_fresh(account.inbox_sync_heartbeat_at)
 			if account.sync_status == "INITIAL" and fresh:
 				if state and state.get("status") == "syncing":
@@ -42,13 +44,13 @@ def _get_sync_state(user_id: str, db: Session | None = None) -> dict:
 			if account.sync_status == "BACKFILL" and fresh:
 				if state and state.get("background_status") == "syncing":
 					return state.copy()
-				return {"status": "completed", "stage": "completed", "background_status": "syncing", "background_scanned": 0, "background_synced": 0, "emails_found": 100, "emails_synced": 100, "labels_synced": 0, "error": None}
+				return {"status": "completed", "stage": "completed", "background_status": "syncing", "background_scanned": 0, "background_synced": 0, "emails_found": initial_limit, "emails_synced": initial_limit, "labels_synced": 0, "error": None}
 			if account.sync_status == "ERROR":
 				return {"status": "error", "stage": "error", "background_status": "error", "emails_found": 0, "emails_synced": 0, "labels_synced": 0, "error": "Inbox sync failed. Please retry."}
 			if account.sync_status == "BACKFILL_ERROR":
 				if state and state.get("status") == "completed":
 					return state.copy()
-				return {"status": "completed", "stage": "completed", "background_status": "error", "background_error": "Inbox sync paused. Please retry.", "emails_found": 100, "emails_synced": 100, "labels_synced": 0, "error": None}
+				return {"status": "completed", "stage": "completed", "background_status": "error", "background_error": "Inbox sync paused. Please retry.", "emails_found": initial_limit, "emails_synced": initial_limit, "labels_synced": 0, "error": None}
 			if account.sync_status in ("INITIAL", "BACKFILL") and not fresh:
 				state = None
 	state = state or {

@@ -26,6 +26,25 @@ it('decodes activity and a final answer across split Unicode stream chunks', asy
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/chat/stream'), expect.objectContaining({ credentials: 'include' }));
 });
 
+it('returns the answer even if the server keeps the stream open', async () => {
+    const cancel = vi.fn();
+    vi.stubGlobal('TextDecoder', TextDecoder);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+        ok: true,
+        body: new ReadableStream({
+            start(controller) {
+                controller.enqueue(new TextEncoder().encode('event: result\ndata: {"answer":"Found it"}\n\n'));
+            },
+            cancel,
+        }),
+    }));
+
+    await expect(sendRagChat({ query: 'Find mail' }, vi.fn())).resolves.toEqual({
+        data: { answer: 'Found it' },
+    });
+    expect(cancel).toHaveBeenCalledOnce();
+});
+
 it('reports stream failure without replaying a potentially mutating request', async () => {
     vi.stubGlobal('TextDecoder', TextDecoder);
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamResponse('event: error\ndata: {"message":"Request failed"}\n\n')));

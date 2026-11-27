@@ -496,15 +496,16 @@ def _sync_remaining_emails_worker(
 	account_id: UUID,
 	page_token: str,
 	*,
+	max_messages: int,
 	progress_callback=None,
 	batch_chunk_size: int = 100,
 ):
-	"""Walk every remaining Inbox page while keeping memory use bounded."""
+	"""Walk Inbox pages up to the remaining account limit."""
 	seen = 0
 	stored = 0
 	cursor_reset = False
 	try:
-		while page_token:
+		while page_token and seen < max_messages:
 			worker_db = SessionLocal()
 			try:
 				worker_user = worker_db.get(User, user_id)
@@ -523,8 +524,11 @@ def _sync_remaining_emails_worker(
 					if account:
 						account.inbox_sync_page_token = None
 						worker_db.commit()
-					_, page_token = _list_inbox_page(service, page_size=100)
+					_, page_token = _list_inbox_page(
+						service, page_size=min(100, max_messages - seen))
 					continue
+				if len(message_ids) > max_messages - seen:
+					message_ids = message_ids[:max_messages - seen]
 				label_cache = {
 					label.label_id: label
 					for label in worker_db.scalars(
@@ -553,10 +557,12 @@ def _sync_remaining_emails_worker(
 						pass
 				account = worker_db.get(GmailAccount, account_id)
 				if account:
-					account.inbox_sync_page_token = next_page_token
+					account.inbox_sync_page_token = (
+						next_page_token if seen < max_messages else None
+					)
 					account.inbox_sync_heartbeat_at = datetime.now(timezone.utc)
 					worker_db.commit()
-				page_token = next_page_token
+				page_token = next_page_token if seen < max_messages else None
 			finally:
 				worker_db.close()
 
@@ -604,7 +610,7 @@ def sync_all_emails(
 	progress_callback=None,
 	background_callback=None,
 ) -> dict:
-	"""Store the first 100 Inbox messages, then page through the rest in background."""
+	"""Store a quick first page, then sync up to the user's configured Inbox limit."""
 	import threading
 
 	account = db.scalar(
@@ -612,6 +618,8 @@ def sync_all_emails(
 	)
 	if account is None:
 		raise ValueError("No Gmail account linked to this user")
+	mail_limit = max(1, min(50000, int(getattr(user, "mail_sync_limit", 5000) or 5000)))
+	initial_limit = min(max(1, initial_limit), mail_limit)
 	account.sync_status = "INITIAL"
 	account.inbox_sync_heartbeat_at = datetime.now(timezone.utc)
 	db.commit()
@@ -628,7 +636,11 @@ def sync_all_emails(
 	if progress_callback:
 		progress_callback("listing", 0, 0)
 	message_ids, next_page_token = _list_inbox_page(service, page_size=initial_limit)
-	resume_token = account.inbox_sync_page_token or next_page_token
+	remaining_limit = mail_limit - len(message_ids)
+	resume_token = (
+		(account.inbox_sync_page_token or next_page_token)
+		if remaining_limit > 0 else None
+	)
 	if progress_callback:
 		progress_callback("listing", len(message_ids), 0)
 		progress_callback("fetching", len(message_ids), 0)
@@ -650,7 +662,7 @@ def sync_all_emails(
 		bg_thread = threading.Thread(
 			target=run_in_context,
 			args=(user.id, account.id, resume_token),
-			kwargs={"progress_callback": background_callback},
+			kwargs={"max_messages": remaining_limit, "progress_callback": background_callback},
 			name=f"inbox-sync-{str(account.id)[:8]}",
 			daemon=True,
 		)

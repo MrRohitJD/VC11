@@ -16,7 +16,7 @@ import AiAssistant from './pages/AiAssistant';
 import { PublicHome, PrivacyPolicy, TermsOfService, ContactPage } from './pages/PublicPages';
 import ComposeModal from './components/ComposeModal';
 const SentMessagesView = lazy(() => import('./components/SentMessagesView'));
-import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex, enterDemo, getDeveloperSettings, updateDeveloperSettings, reconnectDeveloperDatabase, getDeveloperSchemaUrl, sendRagChat } from './services/api';
+import { fetchAnalyticsCharts, fetchAnalyticsSummary, fetchEmail, fetchEmails, getExportStats, getExportCSVUrl, getExportJSONUrl, importEmailsFile, startSync, getSyncStatus, trainModel, getRagStatus, triggerRagIndex, enterDemo, getAccountSettings, updateAccountSettings, getDeveloperSettings, updateDeveloperSettings, reconnectDeveloperDatabase, getDeveloperSchemaUrl, sendRagChat } from './services/api';
 
 const navItems = [
 	{ label: 'Inbox', icon: Inbox }, { label: 'Starred', icon: Star },
@@ -572,6 +572,11 @@ function SettingsPage() {
 	const [developerMessage, setDeveloperMessage] = useState('');
 	const [developerMessageType, setDeveloperMessageType] = useState('');
 	const [databaseNotice, setDatabaseNotice] = useState(null);
+	const [mailSyncLimit, setMailSyncLimit] = useState('5000');
+	const [mailSyncLimitLoaded, setMailSyncLimitLoaded] = useState(false);
+	const [mailSyncLimitSaving, setMailSyncLimitSaving] = useState(false);
+	const [mailSyncLimitMessage, setMailSyncLimitMessage] = useState('');
+	const [mailSyncLimitMessageType, setMailSyncLimitMessageType] = useState('');
 	const developerSettingsRevision = useRef(0);
 
 	const loadStats = () => {
@@ -583,6 +588,16 @@ function SettingsPage() {
 	useEffect(() => {
 		if (user?.is_demo) return;
 		loadStats();
+		getAccountSettings()
+			.then(({ data }) => {
+				setMailSyncLimit(String(data.mail_sync_limit ?? 5000));
+				setMailSyncLimitLoaded(true);
+			})
+			.catch(() => {
+				setMailSyncLimitMessage('Mail settings are unavailable right now.');
+				setMailSyncLimitMessageType('error');
+				setMailSyncLimitLoaded(true);
+			});
 		getRagStatus()
 			.then(({ data }) => setRagStatus(data))
 			.catch(() => setEmbeddingStatus('Embedding status is unavailable right now.'));
@@ -595,6 +610,29 @@ function SettingsPage() {
 			})
 			.catch(() => setDeveloperMessage('Developer settings are unavailable right now.'));
 	}, [user?.id, user?.is_demo]);
+
+	const saveMailSyncLimit = async () => {
+		const limit = Number(mailSyncLimit);
+		if (!Number.isInteger(limit) || limit < 1 || limit > 50000) {
+			setMailSyncLimitMessage('Enter a whole number from 1 to 50,000.');
+			setMailSyncLimitMessageType('error');
+			return;
+		}
+		setMailSyncLimitSaving(true);
+		setMailSyncLimitMessage('');
+		setMailSyncLimitMessageType('');
+		try {
+			const { data } = await updateAccountSettings({ mail_sync_limit: limit });
+			setMailSyncLimit(String(data.mail_sync_limit));
+			setMailSyncLimitMessage('Mail download limit saved.');
+			setMailSyncLimitMessageType('success');
+		} catch (error) {
+			setMailSyncLimitMessage(error.response?.data?.detail || 'Could not save the mail download limit.');
+			setMailSyncLimitMessageType('error');
+		} finally {
+			setMailSyncLimitSaving(false);
+		}
+	};
 
 	const handleReconnectDatabase = async () => {
 		developerSettingsRevision.current += 1;
@@ -761,6 +799,29 @@ function SettingsPage() {
 						<span>{user?.email}</span>
 					</div>
 				</div>
+			</section>
+
+			<section className="settings-section mail-limit-settings">
+				<h2>Inbox download limit</h2>
+				<p className="settings-desc">Choose the maximum number of Inbox messages to sync from Gmail. Synced messages are available in the dashboard and AI search. New accounts start at 5,000.</p>
+				<label htmlFor="mail-sync-limit">Maximum Inbox messages</label>
+				<input
+					id="mail-sync-limit"
+					type="number"
+					min="1"
+					max="50000"
+					step="1"
+					inputMode="numeric"
+					value={mailSyncLimit}
+					onChange={(event) => setMailSyncLimit(event.target.value)}
+				/>
+				<p className="settings-desc">Enter a whole number from 1 to 50,000. The limit applies on the next Gmail sync.</p>
+				<div className="developer-actions">
+					<button type="button" className="settings-btn" disabled={!mailSyncLimitLoaded || mailSyncLimitSaving || !Number.isInteger(Number(mailSyncLimit)) || Number(mailSyncLimit) < 1 || Number(mailSyncLimit) > 50000} onClick={saveMailSyncLimit}>
+						{mailSyncLimitSaving ? 'Saving...' : 'Save mail limit'}
+					</button>
+				</div>
+				{mailSyncLimitMessage && <p role={mailSyncLimitMessageType === 'error' ? 'alert' : 'status'} className={`import-result-msg ${mailSyncLimitMessageType}`}>{mailSyncLimitMessage}</p>}
 			</section>
 
 			<section className="settings-section developer-settings">

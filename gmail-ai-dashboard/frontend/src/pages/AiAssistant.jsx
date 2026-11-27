@@ -71,6 +71,64 @@ const renderAnswer = (text = '', onCitation) => {
 	return blocks;
 };
 
+const renderAnswerPresentation = (presentation, onCitation) => {
+	if (!presentation || !(presentation.summary || presentation.sections?.length || presentation.metrics?.length)) return null;
+	const layout = ['summary', 'cards', 'list', 'timeline', 'table', 'plain'].includes(presentation.layout)
+		? presentation.layout
+		: 'plain';
+	const renderSource = (source) => Number.isInteger(source) && source > 0 && onCitation
+		? <button type="button" className="answer-citation-link" onClick={() => onCitation(source - 1)} aria-label={`Open source ${source}`}>[{source}]</button>
+		: null;
+	return (
+		<div className={`answer-presentation answer-presentation-${layout}`}>
+			{(presentation.title || presentation.summary) && (
+				<header className="answer-presentation-header">
+					{presentation.title && <h3>{presentation.title}</h3>}
+					{presentation.summary && <p>{renderFormattedLeadText(presentation.summary, onCitation)}</p>}
+				</header>
+			)}
+			{presentation.metrics?.length > 0 && (
+				<div className="answer-presentation-metrics">
+					{presentation.metrics.map((metric, index) => (
+						<div className="answer-presentation-metric" key={`${metric.label}-${index}`}>
+							<span>{metric.label}</span><strong>{metric.value}</strong>
+						</div>
+					))}
+				</div>
+			)}
+			{presentation.sections?.map((section, sectionIndex) => (
+				<section className={`answer-presentation-section answer-presentation-section-${section.type || 'list'}`} key={`${section.title || 'section'}-${sectionIndex}`}>
+					{section.title && <h4>{section.title}</h4>}
+					{section.type === 'table' ? (
+						<div className="answer-presentation-table-wrap">
+							<table>
+								<thead><tr><th scope="col">Item</th><th scope="col">Details</th></tr></thead>
+								<tbody>{section.items?.map((item, index) => (
+									<tr key={`${item.label || 'item'}-${index}`}>
+										<th scope="row">{item.label}</th>
+										<td>{renderFormattedLeadText(item.value || item.detail, onCitation)} {item.detail && item.value && <span className="answer-presentation-detail">{renderFormattedLeadText(item.detail, onCitation)}</span>} {renderSource(item.source)}</td>
+									</tr>
+								))}</tbody>
+							</table>
+						</div>
+					) : (
+						<div className={section.type === 'cards' ? 'answer-presentation-items answer-presentation-items-cards' : section.type === 'timeline' ? 'answer-presentation-items answer-presentation-items-timeline' : 'answer-presentation-items'}>
+							{section.items?.map((item, index) => (
+								<article className="answer-presentation-item" key={`${item.label || 'item'}-${index}`}>
+									{item.label && <h5>{item.label}</h5>}
+									{item.value && <p>{renderFormattedLeadText(item.value, onCitation)}</p>}
+									{item.detail && <p className="answer-presentation-detail">{renderFormattedLeadText(item.detail, onCitation)}</p>}
+									{renderSource(item.source)}
+								</article>
+							))}
+						</div>
+					)}
+				</section>
+			))}
+		</div>
+	);
+};
+
 const PALETTE = [
 	{ bg: '#ffedd5', color: '#ea580c' },
 	{ bg: '#f3e8ff', color: '#9333ea' },
@@ -368,6 +426,7 @@ export default function AiAssistant({ user: propUser }) {
 				response: {
 					type: 'summary',
 					text: data.answer,
+					presentation: data.presentation,
 					// The stream has the observable timings/statuses; keep it for the
 					// completed trace instead of replacing it with the compact step log.
 					steps: requestSteps.length ? requestSteps : (data.steps || []),
@@ -733,12 +792,30 @@ export default function AiAssistant({ user: propUser }) {
 											/>
 										</div>
 									)}
-													<div className="assistant-lead-text">
-										{renderAnswer(message.response.text, (index) => {
-											const source = message.response.emails?.[index];
-											if (source) handleOpenEmailModal(source);
-										})}
-													</div>
+											{message.response.presentation ? (
+												<>
+													{renderAnswerPresentation(message.response.presentation, (index) => {
+														const source = message.response.emails?.[index];
+														if (source) handleOpenEmailModal(source);
+													})}
+													<details className="answer-text-version">
+														<summary>Full answer</summary>
+														<div className="assistant-lead-text">
+															{renderAnswer(message.response.text, (index) => {
+																const source = message.response.emails?.[index];
+																if (source) handleOpenEmailModal(source);
+															})}
+														</div>
+													</details>
+												</>
+											) : (
+												<div className="assistant-lead-text">
+													{renderAnswer(message.response.text, (index) => {
+														const source = message.response.emails?.[index];
+														if (source) handleOpenEmailModal(source);
+													})}
+												</div>
+											)}
 
 													{/* Key Interviews Found List */}
 													{message.response.entities?.length > 0 && (

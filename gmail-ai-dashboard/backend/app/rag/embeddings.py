@@ -90,6 +90,9 @@ def get_embedding_model() -> Embeddings:
                 api_version=settings.azure_openai_api_version,
                 azure_deployment=(getattr(settings, "embedding_model_deployment", "") or settings.azure_openai_embedding_deployment),
                 model=settings.azure_openai_embedding_model or AZURE_OPENAI_DEFAULT_MODEL,
+                dimensions=settings.embedding_dimensions,
+                request_timeout=settings.llm_request_timeout_seconds,
+                max_retries=settings.llm_max_retries,
             )
         except Exception as exc:
             logger.warning("Could not initialize live AzureOpenAIEmbeddings (%s).", exc)

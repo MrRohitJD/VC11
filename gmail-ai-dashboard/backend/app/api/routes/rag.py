@@ -104,6 +104,7 @@ class CitationItem(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
+    presentation: Optional[Dict[str, Any]] = None
     intent: str
     citations: List[CitationItem]
     steps: List[Dict[str, Any]]
@@ -287,7 +288,11 @@ def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[s
         # Record AI token and cost metrics
         try:
             p_tok = estimate_tokens(body.query)
-            c_tok = estimate_tokens(agent_res.answer)
+            completion_text = agent_res.answer
+            presentation = getattr(agent_res, "presentation", None)
+            if presentation:
+                completion_text += json.dumps(presentation, ensure_ascii=False)
+            c_tok = estimate_tokens(completion_text)
             vid = getattr(user, "_visitor_id", None)
             v_h = visitor_hash(vid) if vid else None
             log_ai_usage(
@@ -306,6 +311,7 @@ def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[s
 
         return ChatResponse(
             answer=agent_res.answer,
+            presentation=getattr(agent_res, "presentation", None),
             intent=agent_res.intent,
             citations=citation_items,
             steps=agent_res.steps,

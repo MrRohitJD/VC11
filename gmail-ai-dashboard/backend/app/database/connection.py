@@ -72,7 +72,7 @@ REQUIRED_TABLES = frozenset({
 })
 
 REQUIRED_COLUMNS = {
-    "users": frozenset({"developer_database_url", "developer_llm_provider", "developer_llm_api_key"}),
+    "users": frozenset({"developer_database_url", "developer_llm_provider", "developer_llm_api_key", "mail_sync_limit"}),
     "gmail_accounts": frozenset({
         "inbox_sync_page_token", "inbox_sync_heartbeat_at",
     }),

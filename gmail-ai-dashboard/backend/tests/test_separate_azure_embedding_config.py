@@ -24,6 +24,9 @@ def test_query_embeddings_use_separate_resource_then_shared_fallback(monkeypatch
     separate = embeddings.get_embedding_model()
     assert separate["azure_endpoint"] == "https://embedding-resource.openai.azure.com/"
     assert separate["api_key"] == "embedding-resource-key"
+    assert separate["dimensions"] == settings.embedding_dimensions
+    assert separate["request_timeout"] == settings.llm_request_timeout_seconds
+    assert separate["max_retries"] == settings.llm_max_retries
 
     monkeypatch.setattr(settings, "azure_openai_embedding_endpoint", "")
     monkeypatch.setattr(settings, "azure_openai_embedding_api_key", "")

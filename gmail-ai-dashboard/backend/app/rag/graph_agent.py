@@ -93,6 +93,7 @@ class MailboxState(TypedDict, total=False):
     intent: str
     messages: list[Any]
     answer: str
+    presentation: dict[str, Any] | None
     iterations: int
     steps: list[dict[str, Any]]
     approval_id: str | None
@@ -130,6 +131,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                 use_gmail_mcp=use_gmail_mcp,
             )
             return json.dumps({"answer": result["answer"],
+                               "presentation": result.get("presentation"),
                                "citations": [citation.__dict__ for citation in result["citations"]],
                                "search_plan": result.get("search_plan", {})}, ensure_ascii=False)
 
@@ -210,7 +212,8 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
             fallback_plan = state.get("search_plan", {})
             if fallback_plan.get("strategy") == "llm_selected":
                 fallback_plan = {"strategy": "grounded_chain", "providers": []}
-            return {"answer": result["answer"], "search_plan": result.get("search_plan", fallback_plan),
+            return {"answer": result["answer"], "presentation": result.get("presentation"),
+                    "search_plan": result.get("search_plan", fallback_plan),
                     "evidence_validated": result.get("relevance_validated", True), "steps": [{
                 "action": "retrieve_mailbox", "observation": f"Retrieved {len(citations)} sources."
             }]}
@@ -322,6 +325,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
         steps = list(state["steps"])
         approval_id = state.get("approval_id")
         grounded_answer = None
+        grounded_presentation = None
         grounded_plan = None
         grounded_citations = []
         # Execute sequentially: SQLAlchemy sessions cannot be shared by parallel tools.
@@ -355,6 +359,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                     payload = json.loads(output)
                     grounded_citations = [RetrievedCitation(**citation) for citation in payload["citations"]]
                     grounded_answer = payload["answer"]
+                    grounded_presentation = payload.get("presentation")
                     grounded_plan = payload.get("search_plan")
                 except (TypeError, ValueError, KeyError):
                     logger.warning("Grounded answer tool returned an invalid result")
@@ -372,6 +377,7 @@ def build_mailbox_graph(assistant, *, db, user_id, history, top_k,
                 citations.extend(grounded_citations)
         return {"messages": messages, "steps": steps, "approval_id": approval_id,
                 "answer": grounded_answer if direct_answer else state.get("answer", ""),
+                "presentation": grounded_presentation if direct_answer else state.get("presentation"),
                 "grounded_answer_ready": direct_answer,
                 "search_plan": (grounded_plan or {"strategy": "grounded_chain", "providers": []}) if direct_answer else
                 {"strategy": "llm_selected", "providers": providers} if providers else state.get("search_plan", {})}
@@ -572,6 +578,7 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
                     "status": approval.status,
                 }
         return AgentResponse(answer=result["answer"], intent=result["intent"],
+                             presentation=result.get("presentation"),
                              approval_required=bool(result.get("approval_id")),
                              approval_id=result.get("approval_id"),
                              approval_preview=approval_preview,

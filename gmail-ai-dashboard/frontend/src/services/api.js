@@ -28,6 +28,8 @@ export const getCurrentUser = () => api.get('/api/auth/me');
 export const enterDemo = () => api.post('/api/auth/demo');
 export const logout = () => api.post('/api/auth/logout');
 export const eraseAllData = () => api.delete('/api/auth/erase');
+export const getAccountSettings = () => api.get('/api/account/settings');
+export const updateAccountSettings = (changes) => api.put('/api/account/settings', changes);
 export const getDeveloperSettings = () => api.get('/api/developer');
 export const updateDeveloperSettings = (changes) => api.put('/api/developer', changes);
 export const reconnectDeveloperDatabase = () => api.post('/api/developer/reconnect');
@@ -100,7 +102,7 @@ export const sendRagChat = async (data, onProgress) => {
 		if (kind === 'result') result = payload;
 	};
 	try {
-		while (true) {
+		while (!result) {
 			const { value, done } = await reader.read();
 			buffer += decoder.decode(value, { stream: !done });
 			buffer = buffer.replace(/\r\n/g, '\n');
@@ -109,6 +111,7 @@ export const sendRagChat = async (data, onProgress) => {
 				const frame = buffer.slice(0, boundary);
 				buffer = buffer.slice(boundary + 2);
 				processFrame(frame);
+				if (result) break;
 			}
 			if (done) {
 				// Some proxies close an SSE stream without appending the final blank
@@ -118,6 +121,7 @@ export const sendRagChat = async (data, onProgress) => {
 			}
 		}
 	} finally {
+		void reader.cancel().catch(() => {});
 		reader.releaseLock();
 	}
 	if (!result) throw new Error('The mailbox search ended before returning an answer.');
