@@ -102,7 +102,10 @@ jobs:
             echo "Configure HEROKU_API_KEY in the production environment or repository secrets."
             exit 1
           fi
-          account_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+          credential_dir=$(mktemp -d)
+          trap 'rm -rf "$credential_dir"' EXIT
+          umask 077
+          account_status=$(curl --silent --show-error --output "$credential_dir/account.json" --write-out '%{http_code}' \
             --connect-timeout 10 --max-time 30 \
             --header 'Accept: application/vnd.heroku+json; version=3' \
             --header "Authorization: Bearer $HEROKU_API_KEY" \
@@ -114,6 +117,7 @@ jobs:
             echo "HEROKU_API_KEY was rejected by the Heroku API (HTTP $account_status). Check that the production secret is a current Heroku API token."
             exit 1
           fi
+          heroku_email=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["email"])' "$credential_dir/account.json")
           app_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
             --connect-timeout 10 --max-time 30 \
             --header 'Accept: application/vnd.heroku+json; version=3' \
@@ -126,19 +130,16 @@ jobs:
             echo "The HEROKU_API_KEY account cannot access $HEROKU_APP_NAME (HTTP $app_status). Check the app name and deployer permissions."
             exit 1
           fi
-          credential_dir=$(mktemp -d)
-          trap 'rm -rf "$credential_dir"' EXIT
-          umask 077
           cat > "$credential_dir/askpass" <<'SCRIPT'
           #!/bin/sh
           case "$1" in
-            *Username*) printf '\n' ;;
+            *Username*) printf '%s\n' "$HEROKU_EMAIL" ;;
             *Password*) printf '%s\n' "$HEROKU_API_KEY" ;;
             *) exit 1 ;;
           esac
           SCRIPT
           chmod 700 "$credential_dir/askpass"
-          GIT_ASKPASS="$credential_dir/askpass" GIT_TERMINAL_PROMPT=0 git push \
+          HEROKU_EMAIL="$heroku_email" GIT_ASKPASS="$credential_dir/askpass" GIT_TERMINAL_PROMPT=0 git push \
             "https://git.heroku.com/${HEROKU_APP_NAME}.git" HEAD:refs/heads/main
       - name: Check application health
         env:
