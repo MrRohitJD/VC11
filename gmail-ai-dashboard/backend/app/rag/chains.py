@@ -146,26 +146,23 @@ confirmations. A message received this month is not evidence that its payment
 is due this month. Use explicit payment due dates and preserve their year.
 If payment status or the due date is unclear, state the uncertainty.
 
-Return the final response as one valid JSON object, with no Markdown fences, using
-this shape:
-{{"answer":"the complete user-facing answer in Markdown",
- "presentation":{{"layout":"summary|cards|list|timeline|table|plain",
- "title":"short title or empty string","summary":"brief overview or empty string",
- "metrics":[{{"label":"short label","value":"value copied from the answer"}}],
- "sections":[{{"title":"section heading","type":"text|list|cards|timeline|table",
- "items":[{{"label":"short label","value":"fact copied from the answer",
- "detail":"optional supporting text copied from the answer",
- "source":1}}]}}]}}}}
-The presentation is data for the application's own React components, not code.
-Do not put HTML, CSS, JavaScript, URLs, or executable instructions in it. Use
-only facts already present in the answer and the supplied mailbox evidence. Keep
-source as the one-based citation number from the evidence, or null when there is
-no matching citation. Make the presentation the complete visual form of the
-answer: include every substantive statement in its sections, preserving dates,
-amounts, uncertainty, and citations. The answer field is the complete text
-fallback. Use a plain layout with empty sections for short conversational replies.
-Keep the presentation concise: at most 4 metrics, 6 sections, and 8 items per
-section. Omit empty fields and sections.
+Return one valid JSON object, without Markdown fences, with this shape:
+{{"answer":"complete user-facing answer in Markdown",
+ "presentation":{{"html":"semantic HTML fragment",
+ "css":"CSS for that fragment", "javascript":"optional vanilla JavaScript"}}}}
+Design the presentation yourself for THIS question and THIS answer. Choose the
+layout, hierarchy, visual emphasis, colors, and useful interactions based on the
+actual facts; do not reuse a fixed card or table template. Make it responsive
+from mobile to desktop and use accessible headings and buttons. The HTML must contain
+every substantive statement in the answer, including dates, amounts, uncertainty,
+and source references. Keep the answer as the complete text fallback. Use only
+facts from the answer and mailbox evidence. For a clickable source, put its
+one-based citation number in data-source on a button; the host will open that
+email. You may use HTML, CSS, and small vanilla JavaScript for interactions.
+Do not include React/JSX, external assets, URLs, fetch, forms, navigation,
+scripts or style tags inside HTML, or code that accesses the parent window.
+Return no presentation for short conversational replies. Keep HTML under 16000
+characters, CSS under 8000, and JavaScript under 4000.
 """ + USER_RESPONSE_STYLE
 
 RAG_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
@@ -358,7 +355,7 @@ def generate_grounded_answer(chain: Any, context_str: str, question: str) -> str
 
 
 def parse_grounded_answer_output(raw_answer: str, citation_count: int) -> Tuple[str, Optional[Dict[str, Any]]]:
-    """Extract the answer and a bounded, non-executable UI presentation schema."""
+    """Extract the answer and a bounded LLM-designed UI or legacy presentation."""
     raw = str(raw_answer or "").strip()
     candidate = raw
     if candidate.startswith("```"):
@@ -375,6 +372,15 @@ def parse_grounded_answer_output(raw_answer: str, citation_count: int) -> Tuple[
         return raw, None
     raw_view = payload.get("presentation")
     if not isinstance(raw_view, dict):
+        return answer, None
+
+    html = raw_view.get("html")
+    if isinstance(html, str) and html.strip():
+        css = raw_view.get("css", "")
+        javascript = raw_view.get("javascript", "")
+        if (isinstance(css, str) and isinstance(javascript, str)
+                and len(html) <= 16000 and len(css) <= 8000 and len(javascript) <= 4000):
+            return answer, {"html": html.strip(), "css": css, "javascript": javascript}
         return answer, None
 
     layouts = {"summary", "cards", "list", "timeline", "table", "plain"}

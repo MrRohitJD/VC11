@@ -551,7 +551,8 @@ class LangGraphMailboxAssistant(GmailAIAssistant):
                     pass
         # SQL history remains the source of truth for the existing session UI.
         memory.add_message(HumanMessage(content=query))
-        message = ChatMessage(chat_session_id=session.id, role="assistant", content=result["answer"])
+        message = ChatMessage(chat_session_id=session.id, role="assistant", content=result["answer"],
+                              presentation=result.get("presentation"))
         db.add(message)
         if not session.title or session.title == "New Conversation":
             session.title = query[:60]
