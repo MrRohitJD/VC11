@@ -68,6 +68,38 @@ it('opens the complete message when View email is clicked on a citation', async 
     }), expect.any(Function));
 });
 
+it('shows an interactive email layout when an answer has sources but no presentation', async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    getRagStatus.mockResolvedValue({ data: {} });
+    sendRagChat.mockResolvedValue({ data: {
+        answer: 'Here are the billing emails.\n\nThe due date is in the first message.',
+        session_id: 'billing-session',
+        citations: Array.from({ length: 4 }, (_, index) => ({
+            email_id: `bill-${index + 1}`, subject: `Billing email ${index + 1}`,
+            sender: `sender${index + 1}@example.com`, date: '2026-11-21T09:00:00+00:00',
+            snippet: `Billing detail ${index + 1}`,
+        })),
+    } });
+    getRagSourceEmail.mockResolvedValue({ data: {
+        id: 'bill-4', subject: 'Billing email 4', body: 'Full fourth email',
+    } });
+
+    render(<MemoryRouter><AiAssistant /></MemoryRouter>);
+    fireEvent.change(screen.getByPlaceholderText(/Ask about all your emails/), { target: { value: 'Search emails regarding billing' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Send$/ }));
+
+    const answer = await screen.findByRole('region', { name: 'Assistant answer' });
+    expect(within(answer).getByText('The due date is in the first message.')).toBeInTheDocument();
+    expect(within(answer).getByText('4 sources')).toBeInTheDocument();
+    expect(within(answer).getAllByRole('button', { name: /Open email: Billing email/ })).toHaveLength(3);
+
+    fireEvent.click(within(answer).getByRole('button', { name: 'Show all 4 emails' }));
+    expect(within(answer).getAllByRole('button', { name: /Open email: Billing email/ })).toHaveLength(4);
+    fireEvent.click(within(answer).getByRole('button', { name: 'Open email: Billing email 4' }));
+    expect(await within(screen.getByRole('dialog')).findByText('Full fourth email')).toBeInTheDocument();
+    expect(getRagSourceEmail).toHaveBeenCalledWith('bill-4');
+});
+
 it('lets the user collapse both side panels to expand the chat area', async () => {
     getRagStatus.mockResolvedValue({ data: {} });
     render(<MemoryRouter><AiAssistant /></MemoryRouter>);

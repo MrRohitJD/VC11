@@ -129,6 +129,41 @@ const renderAnswerPresentation = (presentation, onCitation) => {
 	);
 };
 
+function AnswerWithSources({ text, emails, onCitation }) {
+	const [showAll, setShowAll] = useState(false);
+	const visibleEmails = showAll ? emails : emails.slice(0, 3);
+
+	return (
+		<section className="answer-with-sources" aria-label="Assistant answer">
+			<div className="answer-with-sources-copy">
+				<div className="answer-with-sources-heading">
+					<span className="answer-with-sources-icon"><Sparkles size={16} /></span>
+					<span>Answer</span>
+					<span className="answer-with-sources-count">{emails.length} {emails.length === 1 ? 'source' : 'sources'}</span>
+				</div>
+				<div className="assistant-lead-text">{renderAnswer(text, onCitation)}</div>
+			</div>
+			<div className="answer-source-preview">
+				<h4>Emails behind this answer</h4>
+				<div className="answer-source-grid">
+					{visibleEmails.map((email, index) => (
+						<button className="answer-source-card" type="button" key={`${email.id}-${index}`} onClick={() => onCitation(index)} aria-label={`Open email: ${email.subject}`}>
+							<span className="answer-source-card-top"><span className="answer-source-number">{String(index + 1).padStart(2, '0')}</span><ExternalLink size={15} /></span>
+							<strong>{email.subject}</strong>
+							<span className="answer-source-meta">{email.sender}{email.date && <> · {email.date}</>}</span>
+							{(email.key_points?.[0] || email.snippet) && <span className="answer-source-excerpt">{email.key_points?.[0] || email.snippet}</span>}
+						</button>
+					))}
+				</div>
+				{emails.length > 3 && <button className="answer-source-show-all" type="button" onClick={() => setShowAll((value) => !value)} aria-expanded={showAll}>
+					{showAll ? 'Show fewer emails' : `Show all ${emails.length} emails`}
+					<ArrowDown size={14} aria-hidden="true" />
+				</button>}
+			</div>
+		</section>
+	);
+}
+
 const PALETTE = [
 	{ bg: '#ffedd5', color: '#ea580c' },
 	{ bg: '#f3e8ff', color: '#9333ea' },
@@ -808,13 +843,13 @@ export default function AiAssistant({ user: propUser }) {
 														</div>
 													</details>
 												</>
+											) : message.response.emails?.length ? (
+												<AnswerWithSources text={message.response.text} emails={message.response.emails} onCitation={(index) => {
+													const source = message.response.emails[index];
+													if (source) handleOpenEmailModal(source);
+												}} />
 											) : (
-												<div className="assistant-lead-text">
-													{renderAnswer(message.response.text, (index) => {
-														const source = message.response.emails?.[index];
-														if (source) handleOpenEmailModal(source);
-													})}
-												</div>
+												<div className="assistant-lead-text">{renderAnswer(message.response.text)}</div>
 											)}
 
 													{/* Key Interviews Found List */}
