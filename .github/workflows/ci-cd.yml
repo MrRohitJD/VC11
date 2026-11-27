@@ -108,7 +108,7 @@ jobs:
           cat > "$credential_dir/askpass" <<'SCRIPT'
           #!/bin/sh
           case "$1" in
-            *Username*) printf '%s\n' heroku ;;
+            *Username*) printf '\n' ;;
             *Password*) printf '%s\n' "$HEROKU_API_KEY" ;;
             *) exit 1 ;;
           esac
@@ -135,3 +135,4 @@ jobs:
               raise SystemExit("Heroku health response did not report status=ok")
           print("Heroku application is healthy")
           PY
+
