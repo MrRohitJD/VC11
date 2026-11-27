@@ -54,7 +54,7 @@ from app.models.rag import (
 from app.rag.graph_agent import default_assistant
 from app.rag.graph_agent import LangGraphMailboxAssistant
 from app.rag.agent import GmailAIAssistant
-from app.rag.chains import personal_chat_model
+from app.rag.chains import generate_answer_ui, personal_chat_model
 from app.rag.preprocessing import clean_email_text
 from app.rag.query_constraints import mailbox_time_context
 from app.rag.indexing import default_pipeline
@@ -247,6 +247,25 @@ def _run_chat(body: ChatRequest, user: User, db: Session, x_timezone: Optional[s
                 use_multi_query=body.use_multi_query,
                 use_gmail_mcp=body.use_gmail_mcp,
             )
+
+        # The graph may synthesize a final answer after its RAG tool call and
+        # discard the tool's presentation. Design from the actual final answer.
+        if (agent_res.citations and agent_res.answer and not agent_res.approval_required
+                and not (isinstance(agent_res.presentation, dict) and agent_res.presentation.get("html"))):
+            try:
+                designed_ui = generate_answer_ui(
+                    assistant.model, body.query.strip(), agent_res.answer, agent_res.citations,
+                )
+                if designed_ui:
+                    agent_res.presentation = designed_ui
+                    if agent_res.message_id and agent_res.session_id:
+                        message = db.get(ChatMessage, UUID(agent_res.message_id))
+                        if message and message.chat_session_id == UUID(agent_res.session_id):
+                            message.presentation = designed_ui
+                            db.commit()
+            except Exception as exc:
+                db.rollback()
+                logger.warning("Final answer UI generation failed: %s", type(exc).__name__)
 
         citation_items = [
             CitationItem(
