@@ -102,6 +102,30 @@ jobs:
             echo "Configure HEROKU_API_KEY in the production environment or repository secrets."
             exit 1
           fi
+          account_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --connect-timeout 10 --max-time 30 \
+            --header 'Accept: application/vnd.heroku+json; version=3' \
+            --header "Authorization: Bearer $HEROKU_API_KEY" \
+            https://api.heroku.com/account) || {
+              echo "Could not reach the Heroku API to verify HEROKU_API_KEY."
+              exit 1
+            }
+          if [ "$account_status" != 200 ]; then
+            echo "HEROKU_API_KEY was rejected by the Heroku API (HTTP $account_status). Check that the production secret is a current Heroku API token."
+            exit 1
+          fi
+          app_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --connect-timeout 10 --max-time 30 \
+            --header 'Accept: application/vnd.heroku+json; version=3' \
+            --header "Authorization: Bearer $HEROKU_API_KEY" \
+            "https://api.heroku.com/apps/$HEROKU_APP_NAME") || {
+              echo "Could not reach the Heroku API to verify app access."
+              exit 1
+            }
+          if [ "$app_status" != 200 ]; then
+            echo "The HEROKU_API_KEY account cannot access $HEROKU_APP_NAME (HTTP $app_status). Check the app name and deployer permissions."
+            exit 1
+          fi
           credential_dir=$(mktemp -d)
           trap 'rm -rf "$credential_dir"' EXIT
           umask 077
